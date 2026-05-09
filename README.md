@@ -21,7 +21,20 @@ Visit [ctscout.dev](https://ctscout.dev) and click "Get a free API key". Solve t
 
 ### 2. Configure your MCP client
 
-**Claude Code** (`~/.claude/mcp.json` or via `claude mcp add`):
+> **Important — Claude Code CLI vs Claude Desktop have separate config files.** Adding via `claude mcp add` registers for the CLI only. If you use Claude Desktop, you must edit Desktop's config file directly.
+
+**Claude Code (CLI)** — use the CLI:
+
+```bash
+claude mcp add ctscout \
+  -s user \
+  -e CTSCOUT_API_KEY=YOUR_KEY_HERE \
+  -- npx -y ctscout-mcp-server
+```
+
+This writes to `~/.claude.json`.
+
+**Claude Desktop** — edit `~/Library/Application Support/Claude/claude_desktop_config.json` (Mac) or the equivalent on Windows/Linux, and add:
 
 ```json
 {
@@ -37,15 +50,13 @@ Visit [ctscout.dev](https://ctscout.dev) and click "Get a free API key". Solve t
 }
 ```
 
-**Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json` on Mac):
-
-Same JSON shape as above, under the `mcpServers` key.
+If the file already has other MCP servers, just add the `ctscout` key under the existing `mcpServers` object.
 
 **Cursor** (`~/.cursor/mcp.json`):
 
-Same shape.
+Same JSON shape as the Desktop example.
 
-After adding the config, restart your MCP client. The tools will appear under "ctscout" in your available tools.
+After adding the config, **fully quit and restart your MCP client** (not just close the window). The tools will appear under "ctscout" in your available tools.
 
 ### 3. Use it
 
