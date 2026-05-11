@@ -1,13 +1,21 @@
 # ctscout-mcp-server
 
-MCP server for [ctscout.dev](https://ctscout.dev) — domain discovery via Certificate Transparency, exposed as tools your LLM can call.
+MCP server for [ctscout.dev](https://ctscout.dev) — domain attribution via Certificate Transparency plus (on Pro) multi-signal enrichment, exposed as tools your LLM can call.
 
 Two tools:
 
 - **`ctscout_search_company`** — find apex domains attributed to an organization by name
-- **`ctscout_lookup_domain`** — reverse-lookup the organization owning one or more domains
+- **`ctscout_lookup_domain`** — reverse-lookup the organization attributed to one or more domains
 
-Both work over the public ctscout.dev `/scan` API. Free tier requires an API key (no email, no signup).
+Both work over the public ctscout.dev `/scan` API. Free tier requires an API key (no email, no signup). Pro tier returns a `confidence_band` per attribution plus the underlying signal evidence (DNS brand tokens, og:site_name match, RDAP, IP/ASN, VLM verdict).
+
+### What's new in 0.2.0
+
+- Pro-tier response surfacing: `confidence_band`, `evidence`, `matched_via`, `signal_health`, `vlm_status`, `vlm_override` rendered in the markdown table when present.
+- VLM-veto indicator (`🚫VLM-veto`) when a visual verdict overrode positive-signal accumulation.
+- Backward-compatible: Free-tier responses render exactly as in v0.1.0; the new fields are additive.
+- Tool descriptions updated: "attributed to" rather than "owns" (lawful, defensible language for attribution claims).
+- Test suite added (Vitest). 20 tests covering both response shapes, truncation, error paths.
 
 ---
 
@@ -78,10 +86,24 @@ The model will pick the right ctscout tool, call it, and summarize.
 |---|---|---|
 | Queries per day | 10 | unlimited |
 | Results per query | top 5 | full set |
-| Data freshness | weekly snapshot | live (DNS, RDAP, crt.sh) |
+| Data freshness | weekly snapshot | live (DNS, RDAP, homepage, IP/ASN, VLM) |
+| Per-attribution evidence | — | `confidence_band` + named signals |
 | Price | $0 | (coming soon) |
 
 The MCP server uses the same API key for both — your tier is determined by the key. If you hit the daily quota, the tool returns a 429 error with an upgrade hint.
+
+### What the Pro response looks like
+
+Free tier returns the legacy `(domain, organization, certs, subdomains)` table. Pro tier replaces it with a richer attribution table you can defend in a meeting:
+
+```
+| Domain          | Attributed to  | Band         | Signals                                         | Evidence                                                  |
+|---|---|---|---|---|
+| coalition.com   | Coalition Inc  | ✅ verified  | dns_txt_brand_token, og_site_name_match, +1     | verified via google-site-verification, atlassian-domain... |
+| imposter.com    | Coalition Inc  | ⚪ insufficient 🚫VLM-veto | dns_txt_brand_token, vlm_verdict_no | Logo on screenshot is a different brand                   |
+```
+
+Bands map to confidence intervals (`verified` ≥ multiple strong independent signals, down to `insufficient` = no signals or signals disagree). The `🚫VLM-veto` tag appears when visual brand verification overrode the positive-signal accumulation. Full structured payload is available via `response_format: "json"`.
 
 ---
 
@@ -106,6 +128,9 @@ git clone https://github.com/minghsuy/ctscout-mcp.git
 cd ctscout-mcp
 npm install
 npm run build
+
+# Run the test suite (Vitest, no network)
+npm test
 
 # Run the server (will fail without CTSCOUT_API_KEY)
 node dist/index.js

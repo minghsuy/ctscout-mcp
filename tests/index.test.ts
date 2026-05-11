@@ -1,0 +1,362 @@
+/**
+ * Tests for ctscout-mcp-server v0.2.0.
+ *
+ * Covers:
+ *   - Free-tier response rendering (existing v0.1.0 shape unchanged)
+ *   - Pro-tier response rendering (new confidence_band / evidence / etc.)
+ *   - Mixed-tier degraded apex (Phase 5's `_degraded()` insufficient row)
+ *   - Empty-domains case
+ *   - Truncation when over CHARACTER_LIMIT
+ *   - Error explanation for each documented HTTP status
+ *
+ * Importing `../src/index.ts` requires CTSCOUT_API_KEY to be present at
+ * import time only if `main()` runs. The module-level guard ensures it
+ * doesn't auto-boot when imported here; we set the env var anyway as
+ * a defense-in-depth measure (some downstream code may consult it).
+ */
+
+// Note: env vars are set in tests/setup.ts (vitest.config setupFiles)
+// before any module imports happen — the `main()` boot guard in the
+// MCP source code prevents auto-boot during tests, but downstream
+// code (e.g. `getApiKey()` called from `callScan()`) reads
+// CTSCOUT_API_KEY at call time, so we want it available even though
+// these unit tests never make HTTP calls.
+
+import { describe, expect, it } from "vitest";
+
+import {
+  ApiError,
+  TimeoutError,
+  explainError,
+  formatScanAsMarkdown,
+  truncateIfNeeded,
+} from "../src/index.ts";
+
+// ---------- Fixtures ----------
+
+type DomainResult = {
+  org: string;
+  apex_domain: string;
+  cert_count: number;
+  subdomain_count: number;
+  first_seen?: string;
+  last_seen?: string;
+  attributed_to?: string;
+  enrichment?: {
+    confidence_band: "verified" | "likely" | "possible" | "insufficient";
+    weight_total: number;
+    matched_via: string[];
+    evidence: Record<string, string>;
+    signal_health: Record<string, string>;
+    vlm_status: "cached" | "pending" | "skipped";
+    vlm_override: boolean;
+  };
+};
+
+type ScanResponse = {
+  domains: DomainResult[];
+  total: number;
+  truncated: boolean;
+  upgrade_hint?: string;
+  source: "warehouse" | "live" | "cache-only" | "live-enriched";
+};
+
+function freeResponse(domains: DomainResult[] = []): ScanResponse {
+  return {
+    domains,
+    total: domains.length,
+    truncated: false,
+    source: "warehouse",
+  };
+}
+
+function proResponse(domains: DomainResult[] = []): ScanResponse {
+  return {
+    domains,
+    total: domains.length,
+    truncated: false,
+    source: "live-enriched",
+  };
+}
+
+// ---------- Free-tier rendering: existing v0.1.0 shape unchanged ----------
+
+describe("formatScanAsMarkdown — free tier", () => {
+  it("renders the legacy free-tier table when no Pro fields present", () => {
+    const md = formatScanAsMarkdown(
+      "Coalition Inc",
+      freeResponse([
+        {
+          org: "Coalition Inc",
+          apex_domain: "coalition.com",
+          cert_count: 42,
+          subdomain_count: 15,
+        },
+      ]),
+    );
+    expect(md).toContain("# ctscout results for: Coalition Inc");
+    expect(md).toContain("Source: `warehouse`");
+    expect(md).toContain("| Domain | Organization | Certs | Subdomains |");
+    expect(md).toContain("| `coalition.com` | Coalition Inc | 42 | 15 |");
+    // Pro tier marker MUST NOT appear in free-tier output
+    expect(md).not.toContain("Pro tier");
+    expect(md).not.toContain("confidence_band");
+  });
+
+  it("emits the empty-result hint when domains is []", () => {
+    const md = formatScanAsMarkdown("Nonexistent Co", freeResponse([]));
+    expect(md).toContain("No domains found");
+    expect(md).toContain("Try a partial company name");
+  });
+
+  it("surfaces upgrade_hint when truncated", () => {
+    const resp: ScanResponse = {
+      domains: [
+        { org: "X", apex_domain: "x.com", cert_count: 1, subdomain_count: 1 },
+      ],
+      total: 100,
+      truncated: true,
+      upgrade_hint: "Upgrade to Pro to see all 100 results.",
+      source: "warehouse",
+    };
+    const md = formatScanAsMarkdown("X Corp", resp);
+    expect(md).toContain("> Upgrade to Pro to see all 100 results.");
+  });
+});
+
+// ---------- Pro-tier rendering ----------
+
+describe("formatScanAsMarkdown — Pro tier", () => {
+  const verifiedRow: DomainResult = {
+    org: "Coalition Inc",
+    apex_domain: "coalition.com",
+    cert_count: 42,
+    subdomain_count: 15,
+    attributed_to: "Coalition Inc",
+    enrichment: {
+      confidence_band: "verified",
+      weight_total: 5.0,
+      matched_via: [
+        "dns_txt_brand_token",
+        "og_site_name_match",
+        "vlm_verdict_verified",
+      ],
+      evidence: {
+        dns_txt_brand_token: "verified via google-site-verification, atlassian-domain-verification",
+        og_site_name_match: 'og:site_name="Coalition"',
+        vlm_verdict_verified: "Logo and copyright text confirm Coalition brand",
+      },
+      signal_health: {
+        rdap_registrant_match: "redacted",
+        ip_asn_custom_org: "miss",
+        vlm_verdict: "verified",
+      },
+      vlm_status: "cached",
+      vlm_override: false,
+    },
+  };
+
+  it("renders the Pro table with band, signals, evidence", () => {
+    const md = formatScanAsMarkdown("Coalition Inc", proResponse([verifiedRow]));
+    expect(md).toContain("Source: `live-enriched` _(Pro tier — multi-signal attribution)_");
+    expect(md).toContain("| Domain | Attributed to | Band | Signals | Evidence |");
+    expect(md).toContain("✅ verified");
+    expect(md).toContain("Coalition Inc");
+    // Should prefer DNS brand token in the evidence column (highest priority)
+    expect(md).toContain("verified via google-site-verification");
+    // matched_via shows up to 3, comma-separated
+    expect(md).toContain("dns_txt_brand_token, og_site_name_match, vlm_verdict_verified");
+  });
+
+  it("marks vlm_override=true with a 🚫VLM-veto tag", () => {
+    const row: DomainResult = {
+      ...verifiedRow,
+      enrichment: {
+        ...verifiedRow.enrichment!,
+        confidence_band: "insufficient",
+        matched_via: ["dns_txt_brand_token", "vlm_verdict_no"],
+        evidence: {
+          dns_txt_brand_token: "verified via google-site-verification",
+          vlm_verdict_no: "Logo on screenshot is a different brand",
+        },
+        signal_health: { vlm_verdict: "no" },
+        vlm_override: true,
+      },
+    };
+    const md = formatScanAsMarkdown("Imposter Inc", proResponse([row]));
+    expect(md).toContain("⚪ insufficient");
+    expect(md).toContain("🚫VLM-veto");
+  });
+
+  it("shows '+N' when matched_via has more than 3 signals", () => {
+    const row: DomainResult = {
+      ...verifiedRow,
+      enrichment: {
+        ...verifiedRow.enrichment!,
+        matched_via: ["a", "b", "c", "d", "e"],
+      },
+    };
+    const md = formatScanAsMarkdown("Test", proResponse([row]));
+    expect(md).toContain("a, b, c, +2");
+  });
+
+  it("falls back to '_none_' when no signals matched", () => {
+    const row: DomainResult = {
+      ...verifiedRow,
+      enrichment: {
+        ...verifiedRow.enrichment!,
+        confidence_band: "insufficient",
+        matched_via: [],
+        evidence: {},
+      },
+    };
+    const md = formatScanAsMarkdown("Test", proResponse([row]));
+    expect(md).toContain("_none_");
+    expect(md).toContain("_no evidence_");
+  });
+
+  it("handles mixed-tier responses (some rows enriched, some _degraded)", () => {
+    // Phase 5's _degraded() helper produces rows with no enrichment field
+    const degradedRow: DomainResult = {
+      org: "Test Co",
+      apex_domain: "broken.example",
+      cert_count: 0,
+      subdomain_count: 0,
+      attributed_to: "Test Co",
+      // No enrichment field — degraded path
+    };
+    const md = formatScanAsMarkdown(
+      "Test Co",
+      proResponse([verifiedRow, degradedRow]),
+    );
+    // Both rows present; the degraded one uses _missing_ band
+    expect(md).toContain("`coalition.com`");
+    expect(md).toContain("`broken.example`");
+    expect(md).toContain("_missing_");
+  });
+
+  it("escapes pipes in evidence values so they don't break the table", () => {
+    const row: DomainResult = {
+      ...verifiedRow,
+      enrichment: {
+        ...verifiedRow.enrichment!,
+        evidence: {
+          dns_txt_brand_token: 'verified | including spurious | pipe characters',
+        },
+      },
+    };
+    const md = formatScanAsMarkdown("Test", proResponse([row]));
+    // Pipe inside the cell must be escaped
+    expect(md).toContain("verified \\| including spurious \\| pipe characters");
+  });
+
+  it("renders all four confidence-band indicators correctly", () => {
+    const bands = ["verified", "likely", "possible", "insufficient"] as const;
+    const expected = ["✅", "🟢", "🟡", "⚪"];
+    for (let i = 0; i < bands.length; i++) {
+      const row: DomainResult = {
+        ...verifiedRow,
+        enrichment: { ...verifiedRow.enrichment!, confidence_band: bands[i] },
+      };
+      const md = formatScanAsMarkdown("Test", proResponse([row]));
+      expect(md).toContain(`${expected[i]} ${bands[i]}`);
+    }
+  });
+});
+
+// ---------- Truncation ----------
+
+describe("truncateIfNeeded", () => {
+  it("returns the original text when under the limit", () => {
+    const resp = freeResponse([
+      { org: "X", apex_domain: "x.com", cert_count: 1, subdomain_count: 1 },
+    ]);
+    const md = formatScanAsMarkdown("X", resp);
+    const result = truncateIfNeeded(md, resp);
+    expect(result.text).toBe(md);
+    expect(result.structured.truncated).toBe(false);
+  });
+
+  it("halves the list and re-renders when text exceeds the limit", () => {
+    // Build a Pro response that fits the typical one-halve recovery
+    // case (current truncateIfNeeded halves once and returns; if a
+    // future change makes it iterative, this test stays valid).
+    // Each row is ~100 chars; 250 rows ≈ 25k chars in pre-trunc text,
+    // halved to 125 ≈ 12.5k.
+    const domains: DomainResult[] = Array.from({ length: 350 }, (_, i) => ({
+      org: `Org ${i}`,
+      apex_domain: `domain-${i}.example`,
+      cert_count: i,
+      subdomain_count: i,
+      attributed_to: `Org ${i}`,
+      enrichment: {
+        confidence_band: "verified",
+        weight_total: 5.0,
+        matched_via: ["dns_txt_brand_token"],
+        evidence: { dns_txt_brand_token: "evidence" },
+        signal_health: {},
+        vlm_status: "cached",
+        vlm_override: false,
+      },
+    }));
+    const resp = proResponse(domains);
+    const md = formatScanAsMarkdown("X", resp);
+    expect(md.length).toBeGreaterThan(25_000); // sanity: pre-trunc IS over
+    const result = truncateIfNeeded(md, resp);
+    expect(result.text.length).toBeLessThanOrEqual(25_000);
+    expect(result.structured.truncated).toBe(true);
+    expect(result.structured.domains.length).toBeLessThan(domains.length);
+    expect(result.structured.upgrade_hint).toContain("Response truncated");
+  });
+});
+
+// ---------- Error explanation ----------
+
+describe("explainError", () => {
+  it("maps 401 to a clear API-key message", () => {
+    const msg = explainError(new ApiError(401, "Unauthorized"));
+    expect(msg).toContain("Invalid or missing CTSCOUT_API_KEY");
+    expect(msg).toContain("https://ctscout.dev");
+  });
+
+  it("maps 429 to a quota-exceeded message", () => {
+    const msg = explainError(new ApiError(429, "Quota"));
+    expect(msg).toContain("Daily request quota exceeded");
+    expect(msg).toContain("Upgrade to pro");
+  });
+
+  it("maps 400 to a bad-request message including the body", () => {
+    const msg = explainError(new ApiError(400, "Invalid company_name"));
+    expect(msg).toContain("Bad request");
+    expect(msg).toContain("Invalid company_name");
+  });
+
+  it("maps 5xx to a server-error message with retry guidance", () => {
+    const msg = explainError(new ApiError(503, "Service Unavailable"));
+    expect(msg).toContain("ctscout server error");
+    expect(msg).toContain("503");
+  });
+
+  it("maps timeout to a timeout message", () => {
+    const msg = explainError(new TimeoutError());
+    expect(msg).toContain("timed out");
+  });
+
+  it("preserves CTSCOUT_API_KEY missing message verbatim", () => {
+    const err = new Error(
+      "CTSCOUT_API_KEY environment variable is not set. ...",
+    );
+    const msg = explainError(err);
+    expect(msg).toBe(err.message);
+  });
+
+  it("falls back to generic message for unexpected errors", () => {
+    const msg = explainError(new Error("Boom"));
+    expect(msg).toContain("Unexpected error: Boom");
+  });
+
+  it("handles non-Error throws", () => {
+    const msg = explainError("string error");
+    expect(msg).toContain("Unexpected error: string error");
+  });
+});

@@ -25,13 +25,29 @@ const SCAN_URL = `${API_BASE_URL}/scan`;
 const REQUEST_TIMEOUT_MS = 30_000;
 const CHARACTER_LIMIT = 25_000;
 const SERVER_NAME = "ctscout-mcp-server";
-const SERVER_VERSION = "0.1.0";
+const SERVER_VERSION = "0.2.0";
 
 // ---------- Types ----------
 
 enum ResponseFormat {
   JSON = "json",
   MARKDOWN = "markdown",
+}
+
+// Pro-tier enrichment fields. All optional — Free tier responses omit
+// them entirely, so callers must guard on presence rather than expecting
+// defaults. Shape mirrors `domain_scout_api.pro_models.ProDomainEvidence`.
+type ConfidenceBand = "verified" | "likely" | "possible" | "insufficient";
+type VlmStatus = "cached" | "pending" | "skipped";
+
+interface ProEnrichment {
+  confidence_band: ConfidenceBand;
+  weight_total: number;
+  matched_via: string[];
+  evidence: Record<string, string>;
+  signal_health: Record<string, string>;
+  vlm_status: VlmStatus;
+  vlm_override: boolean;
 }
 
 interface DomainResult {
@@ -41,6 +57,9 @@ interface DomainResult {
   subdomain_count: number;
   first_seen?: string;
   last_seen?: string;
+  // ---- Pro-tier only (Phase 5+) ----
+  attributed_to?: string; // Customer-facing claim; "attributed_to" not "owns"
+  enrichment?: ProEnrichment;
 }
 
 interface ScanResponse {
@@ -48,7 +67,9 @@ interface ScanResponse {
   total: number;
   truncated: boolean;
   upgrade_hint?: string;
-  source: "warehouse" | "live";
+  // "warehouse" / "live" = legacy free-tier sources.
+  // "cache-only" / "live-enriched" = Pro tier (Phase 5 orchestrator).
+  source: "warehouse" | "live" | "cache-only" | "live-enriched";
 }
 
 // ---------- Zod schemas ----------
@@ -152,7 +173,7 @@ async function callScan(body: ScanRequestBody): Promise<ScanResponse> {
   }
 }
 
-class ApiError extends Error {
+export class ApiError extends Error {
   constructor(
     public status: number,
     public responseBody: string,
@@ -162,14 +183,14 @@ class ApiError extends Error {
   }
 }
 
-class TimeoutError extends Error {
+export class TimeoutError extends Error {
   constructor() {
     super("ctscout API request timed out");
     this.name = "TimeoutError";
   }
 }
 
-function explainError(err: unknown): string {
+export function explainError(err: unknown): string {
   if (err instanceof ApiError) {
     switch (err.status) {
       case 400:
@@ -207,7 +228,10 @@ function explainError(err: unknown): string {
   return `Unexpected error: ${String(err)}`;
 }
 
-function formatScanAsMarkdown(query: string, response: ScanResponse): string {
+// Exported for tests. Renders both Free-tier and Pro-tier responses.
+// Pro fields (confidence_band, evidence, matched_via) only render when
+// present; Free responses use the original (domain, org, certs, subdomains) table.
+export function formatScanAsMarkdown(query: string, response: ScanResponse): string {
   const lines: string[] = [];
   lines.push(`# ctscout results for: ${query}`);
   lines.push("");
@@ -219,9 +243,11 @@ function formatScanAsMarkdown(query: string, response: ScanResponse): string {
     return lines.join("\n");
   }
 
+  const isPro = response.domains.some((d) => d.enrichment != null);
+
   lines.push(
     `Returned **${response.domains.length}** domain(s) of ${response.total} total. ` +
-      `Source: \`${response.source}\`.`,
+      `Source: \`${response.source}\`${isPro ? " _(Pro tier — multi-signal attribution)_" : ""}.`,
   );
   if (response.truncated && response.upgrade_hint) {
     lines.push("");
@@ -229,18 +255,100 @@ function formatScanAsMarkdown(query: string, response: ScanResponse): string {
   }
   lines.push("");
 
-  lines.push("| Domain | Organization | Certs | Subdomains |");
-  lines.push("|---|---|---:|---:|");
-  for (const d of response.domains) {
-    lines.push(
-      `| \`${d.apex_domain}\` | ${d.org} | ${d.cert_count} | ${d.subdomain_count} |`,
-    );
+  if (isPro) {
+    lines.push(formatProTable(response.domains));
+  } else {
+    lines.push(formatFreeTable(response.domains));
   }
 
   return lines.join("\n");
 }
 
-function truncateIfNeeded(text: string, structured: ScanResponse): {
+function formatFreeTable(domains: DomainResult[]): string {
+  const rows: string[] = [];
+  rows.push("| Domain | Organization | Certs | Subdomains |");
+  rows.push("|---|---|---:|---:|");
+  for (const d of domains) {
+    rows.push(
+      `| \`${d.apex_domain}\` | ${d.org} | ${d.cert_count} | ${d.subdomain_count} |`,
+    );
+  }
+  return rows.join("\n");
+}
+
+function formatProTable(domains: DomainResult[]): string {
+  const rows: string[] = [];
+  rows.push("| Domain | Attributed to | Band | Signals | Evidence |");
+  rows.push("|---|---|---|---|---|");
+  for (const d of domains) {
+    const enriched = d.enrichment;
+    if (enriched == null) {
+      // Mixed-tier response (degraded apex from `_degraded()` in Pro /scan).
+      rows.push(
+        `| \`${d.apex_domain}\` | ${d.attributed_to ?? d.org} | _missing_ | — | — |`,
+      );
+      continue;
+    }
+    const bandEmoji = bandIndicator(enriched.confidence_band);
+    const overrideTag = enriched.vlm_override ? " 🚫VLM-veto" : "";
+    const signalSummary = enriched.matched_via.length
+      ? enriched.matched_via.slice(0, 3).join(", ") +
+        (enriched.matched_via.length > 3 ? `, +${enriched.matched_via.length - 3}` : "")
+      : "_none_";
+    const topEvidence = topEvidenceLine(enriched.evidence);
+    rows.push(
+      `| \`${d.apex_domain}\` | ${d.attributed_to ?? d.org} | ${bandEmoji} ${enriched.confidence_band}${overrideTag} | ${signalSummary} | ${topEvidence} |`,
+    );
+  }
+  return rows.join("\n");
+}
+
+function bandIndicator(band: ConfidenceBand): string {
+  switch (band) {
+    case "verified":
+      return "✅";
+    case "likely":
+      return "🟢";
+    case "possible":
+      return "🟡";
+    case "insufficient":
+      return "⚪";
+  }
+}
+
+// Pick the single most informative evidence string for the table cell.
+// Priority order matches the scorer's signal weights: DNS brand tokens >
+// og:site_name > VLM > others. Keeps the row scannable.
+const EVIDENCE_PRIORITY = [
+  "dns_txt_brand_token",
+  "og_site_name_match",
+  "vlm_verdict_verified",
+  "rdap_registrant_match",
+  "homepage_title_brand_token",
+  "ip_asn_custom_org",
+  "san_cohort_overlap",
+  "vlm_verdict_no",
+];
+
+function topEvidenceLine(evidence: Record<string, string>): string {
+  for (const key of EVIDENCE_PRIORITY) {
+    if (key in evidence) {
+      const v = evidence[key];
+      // Defensive: pipe and newline characters would break the markdown
+      // table; replace with safe equivalents.
+      return v.replace(/\|/g, "\\|").replace(/\n/g, " ");
+    }
+  }
+  // Fallback: first key in dict order
+  const keys = Object.keys(evidence);
+  if (keys.length === 0) return "_no evidence_";
+  return evidence[keys[0]].replace(/\|/g, "\\|").replace(/\n/g, " ");
+}
+
+export function truncateIfNeeded(
+  text: string,
+  structured: ScanResponse,
+): {
   text: string;
   structured: ScanResponse;
 } {
@@ -433,7 +541,23 @@ async function main(): Promise<void> {
   );
 }
 
-main().catch((err: unknown) => {
-  console.error("Fatal error:", err);
-  process.exit(1);
-});
+// Only auto-boot when invoked directly (e.g. via `node dist/index.js`
+// or the `bin` entry). Importing this module for tests must NOT start
+// the stdio transport — Vitest would hang on the server's event loop.
+// `import.meta.url` resolves to the executed file; `process.argv[1]`
+// is the entrypoint. Matching them means we were launched directly.
+const isDirectlyExecuted = (() => {
+  try {
+    const argvUrl = new URL(`file://${process.argv[1]}`).href;
+    return import.meta.url === argvUrl;
+  } catch {
+    return false;
+  }
+})();
+
+if (isDirectlyExecuted) {
+  main().catch((err: unknown) => {
+    console.error("Fatal error:", err);
+    process.exit(1);
+  });
+}
