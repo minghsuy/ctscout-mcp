@@ -1,7 +1,7 @@
 {
   "name": "ctscout-mcp-server",
-  "version": "0.1.0",
-  "description": "MCP server for ctscout.dev — domain discovery via Certificate Transparency",
+  "version": "0.2.0",
+  "description": "MCP server for ctscout.dev — domain attribution via Certificate Transparency + multi-signal Pro enrichment",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -17,6 +17,9 @@
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
     "clean": "rm -rf dist",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
     "prepublishOnly": "npm run clean && npm run build",
     "inspect": "npm run build && npx @modelcontextprotocol/inspector node dist/index.js"
   },
@@ -48,7 +51,9 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "@vitest/coverage-v8": "^2.1.8",
     "tsx": "^4.19.2",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
   }
 }
