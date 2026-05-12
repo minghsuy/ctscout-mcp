@@ -159,8 +159,11 @@ else
   echo "warn: no CHANGELOG.md — skipping CHANGELOG bump"
 fi
 
-# Single commit when either bump happened.
-if (( VERSION_BUMPED || CHANGELOG_BUMPED )) && (( !DRY_RUN )); then
+# Single commit when either bump happened. Use run() (which handles
+# DRY_RUN itself) instead of guarding the whole block — keeps --check
+# output coherent: the `would-commit` line appears between `would-add`
+# and `git push`, matching the actual execution order.
+if (( VERSION_BUMPED || CHANGELOG_BUMPED )); then
   run git commit -m "Release v${NEW_VERSION}"
 fi
 
