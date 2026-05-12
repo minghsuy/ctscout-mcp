@@ -3,7 +3,10 @@
 #
 # Mirrors HSA's scripts/release.sh pattern but npm-flavored:
 #   pre-flight gates -> verify -> bump version -> bump CHANGELOG ->
-#   commit -> tag -> push -> npm publish -> gh release create.
+#   commit -> push main -> npm publish -> tag -> push tag -> gh release.
+#
+# Note: tag is pushed AFTER npm publish so a publish failure leaves the
+# repo cleanly retryable (no orphan tag on origin to clean up).
 #
 # Usage:
 #   scripts/release.sh <new-version>      e.g. scripts/release.sh 0.3.0
@@ -77,33 +80,36 @@ if git ls-remote --tags origin "v${NEW_VERSION}" | grep -q "v${NEW_VERSION}"; th
 fi
 
 # --- Quality gates ---
+# Run unconditionally (also in --check) so a dry-run actually validates
+# the release would succeed. Only the WRITE ops below go through run().
+echo "==> python3 available"
+command -v python3 >/dev/null 2>&1 || { echo "error: python3 required for CHANGELOG rewrite" >&2; exit 1; }
+
 echo "==> npm ci"
-run npm ci
+npm ci
 
 echo "==> npm test"
-run npm test
+npm test
 
 echo "==> npm run build"
-run npm run build
+npm run build
 
-# Confirm dist/ exists and looks right.
-if (( !DRY_RUN )); then
-  if [[ ! -f dist/index.js ]]; then
-    echo "error: dist/index.js not present after build" >&2
-    exit 1
-  fi
-  # Sanity: the version baked into the compiled JS should match package.json
-  # (the source has `const SERVER_VERSION = "X.Y.Z"`).
-  if ! grep -q "SERVER_VERSION *= *\"${NEW_VERSION}\"" dist/index.js 2>/dev/null; then
-    CURRENT_PJSON=$(node -p "require('./package.json').version")
-    if [[ "$CURRENT_PJSON" != "$NEW_VERSION" ]]; then
-      echo "warn: SERVER_VERSION in dist/index.js doesn't match $NEW_VERSION" >&2
-      echo "      package.json: $CURRENT_PJSON" >&2
-      echo "      either bump SERVER_VERSION in src/index.ts to match the release,"
-      echo "      or update package.json first."
-      exit 1
-    fi
-  fi
+if [[ ! -f dist/index.js ]]; then
+  echo "error: dist/index.js not present after build" >&2
+  exit 1
+fi
+# Sanity: SERVER_VERSION baked into the compiled JS MUST match $NEW_VERSION.
+# Always fatal on mismatch — the prior version of this check had a blind
+# spot where a pre-bumped package.json + un-bumped src/index.ts would
+# silently ship a binary with the wrong SERVER_VERSION string.
+if ! grep -q "SERVER_VERSION *= *\"${NEW_VERSION}\"" dist/index.js; then
+  CURRENT_PJSON=$(node -p "require('./package.json').version")
+  CURRENT_SERVER_VERSION=$(grep -oE "SERVER_VERSION *= *\"[0-9]+\.[0-9]+\.[0-9]+\"" dist/index.js | head -1 || echo "(not found)")
+  echo "error: SERVER_VERSION in dist/index.js doesn't match $NEW_VERSION" >&2
+  echo "       dist/index.js: $CURRENT_SERVER_VERSION" >&2
+  echo "       package.json:  $CURRENT_PJSON" >&2
+  echo "       fix: bump SERVER_VERSION in src/index.ts to \"$NEW_VERSION\" and rebuild." >&2
+  exit 1
 fi
 
 # --- Bump version (idempotent: skip if already at target) ---
@@ -117,7 +123,8 @@ else
     echo "+ would set package.json.version = \"$NEW_VERSION\""
   else
     # Use npm version --no-git-tag-version so we control the tag step below.
-    npm version --no-git-tag-version "$NEW_VERSION" >/dev/null
+    # Don't suppress output — errors from npm version should surface.
+    npm version --no-git-tag-version "$NEW_VERSION"
     run git add package.json package-lock.json
   fi
   VERSION_BUMPED=1
@@ -154,20 +161,37 @@ if (( VERSION_BUMPED || CHANGELOG_BUMPED )) && (( !DRY_RUN )); then
   run git commit -m "Release v${NEW_VERSION}"
 fi
 
-# --- Tag and push ---
-run git tag -a "v${NEW_VERSION}" -m "v${NEW_VERSION}"
-run git push origin main
-run git push origin "v${NEW_VERSION}"
+# Push the Release commit before publishing so any merge-back conflict
+# surfaces BEFORE we mutate npm. Tagging waits until after publish.
+if (( VERSION_BUMPED || CHANGELOG_BUMPED )); then
+  run git push origin main
+fi
 
-# --- npm publish ---
+# --- npm publish (BEFORE tagging) ---
+# Rationale: pushing the tag is an irreversible publication of intent.
+# If `npm publish` fails (auth, network, registry hiccup) AFTER the tag
+# was pushed, the next attempt is rejected by the tag-exists pre-flight
+# and the user has to manually delete the tag from origin to retry.
+# Publishing FIRST means a failure leaves the state cleanly retryable:
+# Release commit + bumped package.json on main, no tag, no npm release.
 echo "==> npm publish (public, default tag = latest)"
-# `npm publish` reads .npmrc for auth. Skip in dry-run; the publish would
-# fail authentication in --check mode anyway and the simulation isn't useful.
+# `npm publish` reads .npmrc for auth. Skip the actual call in dry-run;
+# auth would fail in --check anyway and the simulation isn't useful.
 if (( DRY_RUN )); then
   echo "+ would run: npm publish --access public"
 else
   run npm publish --access public
 fi
+
+# --- Tag and push (AFTER successful publish) ---
+# Notes: `prepublishOnly` in package.json runs `npm run clean && npm run
+# build` before packaging, so the artifact actually shipped to npm is a
+# fresh rebuild — not the dist/ produced by our earlier `npm run build`.
+# That second build is normally byte-identical to ours; the sanity check
+# above asserts the source has the right SERVER_VERSION, which is what
+# prepublishOnly will compile.
+run git tag -a "v${NEW_VERSION}" -m "v${NEW_VERSION}"
+run git push origin "v${NEW_VERSION}"
 
 # --- GitHub release ---
 if (( DRY_RUN )); then
@@ -194,12 +218,14 @@ trap 'rm -f "$NOTES_FILE"' EXIT
   fi
 } > "$NOTES_FILE"
 
+# gh defaults to the current repo when run from the working tree. No
+# --repo flag means forks/mirrors release against themselves, not upstream.
 run gh release create "v${NEW_VERSION}" \
-  --repo minghsuy/ctscout-mcp \
   --title "v${NEW_VERSION}" \
   --notes-file "$NOTES_FILE"
 
 echo
 echo "==> released v${NEW_VERSION}"
 echo "    npm:    https://www.npmjs.com/package/ctscout-mcp-server/v/${NEW_VERSION}"
-echo "    github: https://github.com/minghsuy/ctscout-mcp/releases/tag/v${NEW_VERSION}"
+ORIGIN_SLUG=$(git remote get-url origin | sed -E 's|.*github\.com[:/](.+)\.git$|\1|')
+echo "    github: https://github.com/${ORIGIN_SLUG}/releases/tag/v${NEW_VERSION}"
