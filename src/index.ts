@@ -14,6 +14,9 @@
  * client (Claude Code, Claude Desktop, Cursor, etc.).
  */
 
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -567,9 +570,6 @@ async function main(): Promise<void> {
 // the guard silently fail for every `npx` install — `main()` never
 // ran and the binary exited 0 with no output. Resolve both sides to
 // their real path before comparing so the symlink case works.
-import { realpathSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-
 const isDirectlyExecuted = (() => {
   try {
     const moduleReal = realpathSync(fileURLToPath(import.meta.url));

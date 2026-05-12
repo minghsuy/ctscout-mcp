@@ -29,14 +29,10 @@ import { describe, expect, it } from "vitest";
 const DIST_INDEX = resolve(__dirname, "..", "dist", "index.js");
 
 describe("isDirectlyExecuted (symlink boot)", () => {
-  it("boots when invoked via a symlink (npx / npm install -g case)", async () => {
-    if (!existsSync(DIST_INDEX)) {
-      // `npm run build` should run before `npm test` in CI / via the
-      // release script. Skip rather than false-fail if dist isn't there.
-      console.warn(`SKIP: dist/index.js not built at ${DIST_INDEX}`);
-      return;
-    }
-
+  // `npm run build` should run before `npm test` in CI / via the release
+  // script. Skip explicitly (so Vitest reports skipped, not 0-assertion pass)
+  // if dist isn't there.
+  it.skipIf(!existsSync(DIST_INDEX))("boots when invoked via a symlink (npx / npm install -g case)", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "ctscout-symlink-"));
     const symlinkPath = join(tmpDir, "ctscout-mcp-server");
     try {
@@ -75,12 +71,14 @@ describe("isDirectlyExecuted (symlink boot)", () => {
       );
 
       // Give the server up to 3s to print its boot banner OR exit.
+      // `close` (not `exit`) — fires only after piped stderr has flushed,
+      // so the data event handler sees the full banner before we assert.
       await new Promise<void>((finish) => {
         const timer = setTimeout(() => {
           proc.kill();
           finish();
         }, 3000);
-        proc.on("exit", () => {
+        proc.on("close", () => {
           clearTimeout(timer);
           finish();
         });
