@@ -1,6 +1,6 @@
 # ctscout-mcp-server
 
-MCP server for [ctscout.dev](https://ctscout.dev) — domain attribution via Certificate Transparency plus (on Pro) multi-signal enrichment, exposed as tools your LLM can call.
+MCP server for [ctscout.dev](https://ctscout.dev) — **digital entity resolution from Certificate Transparency logs**, with optional multi-signal corroboration on Pro. Built for threat-intel pivots, sibling-domain discovery, and adversary-infrastructure attribution from LLM-driven workflows.
 
 Two tools:
 
@@ -8,6 +8,8 @@ Two tools:
 - **`ctscout_lookup_domain`** — reverse-lookup the organization attributed to one or more domains
 
 Both work over the public ctscout.dev `/scan` API. Free tier requires an API key (no email, no signup). Pro tier returns a `confidence_band` per attribution plus the underlying signal evidence (DNS brand tokens, og:site_name match, RDAP, IP/ASN, VLM verdict).
+
+**Not a cyber-risk-scoring tool.** See [LIMITATIONS.md](LIMITATIONS.md) for what ctscout is and isn't, the DV-cert coverage gap, and the corrections path.
 
 ### What's new in 0.2.0
 
@@ -70,9 +72,11 @@ After adding the config, **fully quit and restart your MCP client** (not just cl
 
 In Claude Code or Claude Desktop, just ask the model:
 
-> "Find all domains owned by Cloudflare"
+> "Find all domains attributed to Cloudflare"
 >
-> "Who owns gs.com and goldmansachs.com? Are they the same parent?"
+> "Who is gs.com attributed to? What about goldmansachs.com — same parent?"
+>
+> "I have a suspicious domain — pivot from its cert subject and surface any sibling apex domains attributed to the same entity."
 >
 > "List the domains attributed to The Hartford."
 
@@ -88,9 +92,11 @@ The model will pick the right ctscout tool, call it, and summarize.
 | Results per query | top 5 | full set |
 | Data freshness | weekly snapshot | live (DNS, RDAP, homepage, IP/ASN, VLM) |
 | Per-attribution evidence | — | `confidence_band` + named signals |
-| Price | $0 | (coming soon) |
+| Price | $0 | concierge — email for early access |
 
 The MCP server uses the same API key for both — your tier is determined by the key. If you hit the daily quota, the tool returns a 429 error with an upgrade hint.
+
+Pro is currently concierge-only (manual key mint + invoice) while usage data justifies whether automated commerce is worth building. Email yminghsun@icloud.com if you want a Pro key.
 
 ### What the Pro response looks like
 
@@ -107,17 +113,21 @@ Bands map to confidence intervals (`verified` ≥ multiple strong independent si
 
 ---
 
-## Coverage caveat (read this)
+## What this is, and isn't
 
-ctscout's index is built from Certificate Transparency logs (OV/EV certs that include the legal entity name in the cert subject). Best for established US/EU tech companies. Limited coverage on:
+ctscout is a digital entity resolution tool — it maps apex domains to organizations attributed in their Certificate Transparency records, optionally corroborated by DNS / RDAP / IP / visual brand signals on the Pro tier.
 
-- Small private companies that only use DV certs (Let's Encrypt, ZeroSSL)
-- Cyber insurance MGAs (Coalition, At-Bay, Resilience, etc.) — **0% coverage** as of 2026-05
-- Small US mutual carriers (regional NAIC mutuals)
+**It is NOT a cyber-risk quantification platform.** It does not score security posture, predict breaches, or produce risk ratings. See [LIMITATIONS.md](LIMITATIONS.md) for the full disclaimer, coverage gaps, and corrections path.
 
-Approximately 5,976 organizations indexed as of 2026-05. See [ctscout.dev](https://ctscout.dev) for current coverage stats.
+## Coverage at a glance
 
-When `ctscout_lookup_domain` returns 0 results for a domain, that means the apex isn't in the warehouse — not necessarily that nobody owns it.
+ctscout's warehouse is built from OV/EV certificates only — the ones where the issuing CA validated the org's legal identity. **DV-only infrastructure (Let's Encrypt, ZeroSSL, ACME-defaulting cloud hosts) is invisible to the warehouse.**
+
+The warehouse is strongest on: established US/EU enterprise, government, financial services, traditional infrastructure, defense, education.
+
+The warehouse is weak on: modern cloud-native shops (most domains entirely behind Cloudflare/Vercel/Netlify), pre-launch / stealth-mode startups, anything that defaults to DV certs.
+
+When `ctscout_lookup_domain` returns 0 results, the apex isn't in the warehouse — not necessarily that nobody owns it. See [LIMITATIONS.md](LIMITATIONS.md) for the full coverage discussion and ~5,976-org / 329K-pair scale stats.
 
 ---
 
