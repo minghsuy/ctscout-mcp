@@ -14,6 +14,9 @@
  * client (Claude Code, Claude Desktop, Cursor, etc.).
  */
 
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -25,7 +28,7 @@ const SCAN_URL = `${API_BASE_URL}/scan`;
 const REQUEST_TIMEOUT_MS = 30_000;
 const CHARACTER_LIMIT = 25_000;
 const SERVER_NAME = "ctscout-mcp-server";
-const SERVER_VERSION = "0.2.0";
+const SERVER_VERSION = "0.2.1";
 
 // ---------- Types ----------
 
@@ -559,12 +562,19 @@ async function main(): Promise<void> {
 // Only auto-boot when invoked directly (e.g. via `node dist/index.js`
 // or the `bin` entry). Importing this module for tests must NOT start
 // the stdio transport — Vitest would hang on the server's event loop.
-// `import.meta.url` resolves to the executed file; `process.argv[1]`
-// is the entrypoint. Matching them means we were launched directly.
+//
+// `import.meta.url` resolves to the REAL file path of the executed
+// module. `process.argv[1]` may be a SYMLINK created by npm / npx
+// (e.g. `node_modules/.bin/ctscout-mcp-server -> ../ctscout-mcp-server/
+// dist/index.js`). On v0.2.0 we compared the raw paths, which made
+// the guard silently fail for every `npx` install — `main()` never
+// ran and the binary exited 0 with no output. Resolve both sides to
+// their real path before comparing so the symlink case works.
 const isDirectlyExecuted = (() => {
   try {
-    const argvUrl = new URL(`file://${process.argv[1]}`).href;
-    return import.meta.url === argvUrl;
+    const moduleReal = realpathSync(fileURLToPath(import.meta.url));
+    const argv1Real = realpathSync(process.argv[1]);
+    return moduleReal === argv1Real;
   } catch {
     return false;
   }
