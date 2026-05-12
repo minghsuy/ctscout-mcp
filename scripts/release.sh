@@ -102,7 +102,10 @@ fi
 # Always fatal on mismatch — the prior version of this check had a blind
 # spot where a pre-bumped package.json + un-bumped src/index.ts would
 # silently ship a binary with the wrong SERVER_VERSION string.
-if ! grep -q "SERVER_VERSION *= *\"${NEW_VERSION}\"" dist/index.js; then
+# Escape dots in the version so the grep pattern matches literally rather
+# than as wildcards (no false positives like "0X3Y0").
+ESCAPED_VER="${NEW_VERSION//./\\.}"
+if ! grep -q "SERVER_VERSION *= *\"${ESCAPED_VER}\"" dist/index.js; then
   CURRENT_PJSON=$(node -p "require('./package.json').version")
   CURRENT_SERVER_VERSION=$(grep -oE "SERVER_VERSION *= *\"[0-9]+\.[0-9]+\.[0-9]+\"" dist/index.js | head -1 || echo "(not found)")
   echo "error: SERVER_VERSION in dist/index.js doesn't match $NEW_VERSION" >&2
@@ -227,5 +230,7 @@ run gh release create "v${NEW_VERSION}" \
 echo
 echo "==> released v${NEW_VERSION}"
 echo "    npm:    https://www.npmjs.com/package/ctscout-mcp-server/v/${NEW_VERSION}"
-ORIGIN_SLUG=$(git remote get-url origin | sed -E 's|.*github\.com[:/](.+)\.git$|\1|')
+# `.git` suffix is optional: SSH remotes (`git@host:org/repo.git`)
+# always include it, HTTPS remotes copied from the GitHub UI often don't.
+ORIGIN_SLUG=$(git remote get-url origin | sed -E 's|.*github\.com[:/](.+)|\1|; s|\.git$||')
 echo "    github: https://github.com/${ORIGIN_SLUG}/releases/tag/v${NEW_VERSION}"
