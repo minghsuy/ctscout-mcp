@@ -37,10 +37,13 @@ enum ResponseFormat {
 // Pro-tier enrichment fields. All optional — Free tier responses omit
 // them entirely, so callers must guard on presence rather than expecting
 // defaults. Shape mirrors `domain_scout_api.pro_models.ProDomainEvidence`.
-type ConfidenceBand = "verified" | "likely" | "possible" | "insufficient";
-type VlmStatus = "cached" | "pending" | "skipped";
+// Exported so tests (and future downstream consumers) can drive these
+// without re-declaring the shape locally — re-declaration is silent
+// drift risk if the source struct changes.
+export type ConfidenceBand = "verified" | "likely" | "possible" | "insufficient";
+export type VlmStatus = "cached" | "pending" | "skipped";
 
-interface ProEnrichment {
+export interface ProEnrichment {
   confidence_band: ConfidenceBand;
   weight_total: number;
   matched_via: string[];
@@ -50,7 +53,7 @@ interface ProEnrichment {
   vlm_override: boolean;
 }
 
-interface DomainResult {
+export interface DomainResult {
   org: string;
   apex_domain: string;
   cert_count: number;
@@ -62,7 +65,7 @@ interface DomainResult {
   enrichment?: ProEnrichment;
 }
 
-interface ScanResponse {
+export interface ScanResponse {
   domains: DomainResult[];
   total: number;
   truncated: boolean;
@@ -243,7 +246,15 @@ export function formatScanAsMarkdown(query: string, response: ScanResponse): str
     return lines.join("\n");
   }
 
-  const isPro = response.domains.some((d) => d.enrichment != null);
+  // Pro detection: prefer the explicit source signal, then fall back to
+  // inspecting the rows. If the API returns `cache-only` / `live-enriched`
+  // but every row is in the `_degraded()` path (no `enrichment` field),
+  // we still want the Pro layout — losing it would make a Pro response
+  // silently look like a Free response.
+  const isPro =
+    response.source === "live-enriched" ||
+    response.source === "cache-only" ||
+    response.domains.some((d) => d.enrichment != null);
 
   lines.push(
     `Returned **${response.domains.length}** domain(s) of ${response.total} total. ` +
@@ -333,16 +344,20 @@ const EVIDENCE_PRIORITY = [
 function topEvidenceLine(evidence: Record<string, string>): string {
   for (const key of EVIDENCE_PRIORITY) {
     if (key in evidence) {
-      const v = evidence[key];
-      // Defensive: pipe and newline characters would break the markdown
-      // table; replace with safe equivalents.
-      return v.replace(/\|/g, "\\|").replace(/\n/g, " ");
+      return escapeForTable(evidence[key]);
     }
   }
   // Fallback: first key in dict order
   const keys = Object.keys(evidence);
   if (keys.length === 0) return "_no evidence_";
-  return evidence[keys[0]].replace(/\|/g, "\\|").replace(/\n/g, " ");
+  return escapeForTable(evidence[keys[0]]);
+}
+
+// Defensive: pipe AND any line terminator (CR, LF, CRLF) would break the
+// markdown table. Replace pipes with backslash-pipe and any line terminator
+// (or terminator pair) with a single space.
+function escapeForTable(s: string): string {
+  return s.replace(/\|/g, "\\|").replace(/[\r\n]+/g, " ");
 }
 
 export function truncateIfNeeded(

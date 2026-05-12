@@ -31,35 +31,9 @@ import {
   formatScanAsMarkdown,
   truncateIfNeeded,
 } from "../src/index.ts";
+import type { DomainResult, ScanResponse } from "../src/index.ts";
 
 // ---------- Fixtures ----------
-
-type DomainResult = {
-  org: string;
-  apex_domain: string;
-  cert_count: number;
-  subdomain_count: number;
-  first_seen?: string;
-  last_seen?: string;
-  attributed_to?: string;
-  enrichment?: {
-    confidence_band: "verified" | "likely" | "possible" | "insufficient";
-    weight_total: number;
-    matched_via: string[];
-    evidence: Record<string, string>;
-    signal_health: Record<string, string>;
-    vlm_status: "cached" | "pending" | "skipped";
-    vlm_override: boolean;
-  };
-};
-
-type ScanResponse = {
-  domains: DomainResult[];
-  total: number;
-  truncated: boolean;
-  upgrade_hint?: string;
-  source: "warehouse" | "live" | "cache-only" | "live-enriched";
-};
 
 function freeResponse(domains: DomainResult[] = []): ScanResponse {
   return {
@@ -250,6 +224,83 @@ describe("formatScanAsMarkdown — Pro tier", () => {
     expect(md).toContain("verified \\| including spurious \\| pipe characters");
   });
 
+  it("replaces CR / LF / CRLF in evidence with a single space", () => {
+    // Markdown tables break on any line terminator inside a cell.
+    const row: DomainResult = {
+      ...verifiedRow,
+      enrichment: {
+        ...verifiedRow.enrichment!,
+        evidence: {
+          dns_txt_brand_token: "line one\r\nline two\nline three\rline four",
+        },
+      },
+    };
+    const md = formatScanAsMarkdown("Test", proResponse([row]));
+    // All terminators collapsed to single spaces; no CR or LF remains in the cell
+    expect(md).toContain("line one line two line three line four");
+    // Make sure no stray \r leaked through (which some MD renderers treat as <br>)
+    const tableRowMatch = md.match(/\| `coalition.com` \|[^\n]*/);
+    expect(tableRowMatch).toBeTruthy();
+    expect(tableRowMatch?.[0] ?? "").not.toContain("\r");
+  });
+
+  it("detects Pro response by source even when all rows are degraded", () => {
+    // Phase 5 _degraded() helper produces rows with no `enrichment` field
+    // when a per-apex enrichment fails. If every row is in that state,
+    // `domains.some(d => d.enrichment != null)` is false — but the API
+    // declared this a Pro response via `source: "live-enriched"`. We
+    // must render the Pro layout regardless, so customers see the
+    // attribution column + the degraded-row indicator.
+    const allDegraded: ScanResponse = {
+      domains: [
+        {
+          org: "Coalition Inc",
+          apex_domain: "coalition.com",
+          cert_count: 0,
+          subdomain_count: 0,
+          attributed_to: "Coalition Inc",
+          // no enrichment — degraded
+        },
+        {
+          org: "Coalition Inc",
+          apex_domain: "coalition.io",
+          cert_count: 0,
+          subdomain_count: 0,
+          attributed_to: "Coalition Inc",
+          // no enrichment — degraded
+        },
+      ],
+      total: 2,
+      truncated: false,
+      source: "live-enriched",
+    };
+    const md = formatScanAsMarkdown("Coalition Inc", allDegraded);
+    // The Pro badge must appear despite zero rows with enrichment
+    expect(md).toContain("_(Pro tier — multi-signal attribution)_");
+    // The 5-column Pro header
+    expect(md).toContain("| Domain | Attributed to | Band | Signals | Evidence |");
+    // Both rows show the _missing_ band marker (degraded-row indicator)
+    expect((md.match(/_missing_/g) ?? []).length).toBe(2);
+  });
+
+  it("also detects Pro by source='cache-only' with all rows degraded", () => {
+    const cacheOnlyDegraded: ScanResponse = {
+      domains: [
+        {
+          org: "Coalition Inc",
+          apex_domain: "coalition.com",
+          cert_count: 0,
+          subdomain_count: 0,
+        },
+      ],
+      total: 1,
+      truncated: false,
+      source: "cache-only",
+    };
+    const md = formatScanAsMarkdown("Coalition Inc", cacheOnlyDegraded);
+    expect(md).toContain("_(Pro tier — multi-signal attribution)_");
+  });
+
   it("renders all four confidence-band indicators correctly", () => {
     const bands = ["verified", "likely", "possible", "insufficient"] as const;
     const expected = ["✅", "🟢", "🟡", "⚪"];
@@ -329,6 +380,12 @@ describe("explainError", () => {
     const msg = explainError(new ApiError(400, "Invalid company_name"));
     expect(msg).toContain("Bad request");
     expect(msg).toContain("Invalid company_name");
+  });
+
+  it("maps 403 to a revoked-key message", () => {
+    const msg = explainError(new ApiError(403, "Forbidden"));
+    expect(msg).toContain("revoked");
+    expect(msg).toContain("https://ctscout.dev");
   });
 
   it("maps 5xx to a server-error message with retry guidance", () => {
