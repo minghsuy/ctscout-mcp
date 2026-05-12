@@ -115,7 +115,7 @@ Bands map to confidence intervals (`verified` ≥ multiple strong independent si
 
 ## What this is, and isn't
 
-ctscout is a digital entity resolution tool — it maps apex domains to organizations attributed in their Certificate Transparency records, optionally corroborated by DNS / RDAP / IP / visual brand signals on the Pro tier.
+ctscout is a digital entity resolution tool — it maps apex domains to organizations attributed in their Certificate Transparency records, optionally corroborated by DNS / RDAP / IP/ASN / visual brand signals on the Pro tier.
 
 **It is NOT a cyber-risk quantification platform.** It does not score security posture, predict breaches, or produce risk ratings. See [LIMITATIONS.md](LIMITATIONS.md) for the full disclaimer, coverage gaps, and corrections path.
 
