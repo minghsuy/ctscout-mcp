@@ -4,7 +4,7 @@ ctscout is built to be honest about what it does and what it doesn't. Read this 
 
 ## What ctscout is
 
-A digital entity resolution tool that maps apex domains to the organizations attributed in their Certificate Transparency (CT) records, with optional multi-signal corroboration (DNS, RDAP, IP/AS, favicon, visual brand verification).
+A digital entity resolution tool that maps apex domains to the organizations attributed in their Certificate Transparency (CT) records, with optional multi-signal corroboration (DNS, RDAP, IP/ASN, favicon, visual brand verification).
 
 Primary use cases:
 - **Adversary infrastructure attribution** — given a suspicious domain, see what organization the CT records attribute it to, with evidence
@@ -37,6 +37,8 @@ In practice, this means **cloud-native modern infrastructure is largely invisibl
 
 The warehouse is best at: established US/EU enterprise, government, financial services, traditional infrastructure, education, defense — anyone who buys OV/EV certs as a matter of policy.
 
+As of 2026-05, the warehouse covers approximately 5,976 organizations across 329,000 org-domain pairs.
+
 ### Temporal fields mean "when we observed it"
 
 `first_seen` and `last_seen` reflect when the ctscout warehouse first/last ingested an entry from the CT pipeline. They do NOT mean the original SCT timestamp from the CT log. If you need the actual CT issuance time, query crt.sh or another CT-log search tool directly.
@@ -66,6 +68,6 @@ The free tier is self-serve at https://ctscout.dev — Turnstile-protected, no e
 
 The Pro tier (live multi-signal enrichment, full result set, higher quota) is currently **concierge-only**. Email yminghsun@icloud.com if you want early access; key minting and invoicing are manual until usage data justifies automated commerce.
 
-## License
+## License and data
 
-This project is MIT-licensed. The underlying CT-log analysis library, [domain-scout](https://github.com/minghsuy/domain-scout), is also MIT. Data comes exclusively from public CT logs and public RDAP/DNS records; no PII is collected, transmitted, or sold.
+MIT-licensed. See [LICENSE](LICENSE). Data comes exclusively from public CT logs and public RDAP/DNS records; no PII is collected, transmitted, or sold.
