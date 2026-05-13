@@ -27,7 +27,7 @@ Threat-intel and OSINT analysts get value on the subset of investigations where 
 - Substitute for an EASM / attack-surface management product
 - Provide vulnerability data, exploit predictions, or remediation guidance
 
-If you are an insurance underwriter, broker, or risk analyst looking for cyber-risk-scoring inputs, ctscout is not your tool. The output of ctscout (domain → entity attribution with evidence) is digital identity information, not security state.
+ctscout's output is **digital identity information** (domain → legal-entity attribution with evidence), not security state. It is a perfectly reasonable input alongside other signals if you are an insurance underwriter, broker, risk analyst, or anyone else mapping a counterparty's digital footprint — you just shouldn't expect ctscout itself to do the risk scoring. Pair it with whatever EASM / security-rating / vulnerability product is doing that work in your stack.
 
 ## Coverage gaps you should know
 
