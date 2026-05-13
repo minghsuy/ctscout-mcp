@@ -1,6 +1,6 @@
 # ctscout-mcp-server
 
-MCP server for [ctscout.dev](https://ctscout.dev) — **named-entity attribution from OV/EV Certificate Transparency logs**, with optional multi-signal corroboration on Pro. For mapping legal-entity digital footprints, sibling-domain discovery, and SAN-cohort analysis from LLM-driven workflows.
+MCP server for [ctscout.dev](https://ctscout.dev) — **named-entity attribution from Certificate Transparency logs (OV/EV only)**, with optional multi-signal corroboration on Pro. For mapping legal-entity digital footprints, sibling-domain discovery, and SAN-cohort analysis from LLM-driven workflows.
 
 DV-only infrastructure (Let's Encrypt, ZeroSSL, cloud-native shops) is invisible to ctscout by design. See [LIMITATIONS.md](LIMITATIONS.md) for what that means in practice.
 
