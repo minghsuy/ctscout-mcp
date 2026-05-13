@@ -1,6 +1,8 @@
 # ctscout-mcp-server
 
-MCP server for [ctscout.dev](https://ctscout.dev) — **digital entity resolution from Certificate Transparency logs**, with optional multi-signal corroboration on Pro. Built for threat-intel pivots, sibling-domain discovery, and adversary-infrastructure attribution from LLM-driven workflows.
+MCP server for [ctscout.dev](https://ctscout.dev) — **named-entity attribution from OV/EV Certificate Transparency logs**, with optional multi-signal corroboration on Pro. For mapping legal-entity digital footprints, sibling-domain discovery, and SAN-cohort analysis from LLM-driven workflows.
+
+DV-only infrastructure (Let's Encrypt, ZeroSSL, cloud-native shops) is invisible to ctscout by design. See [LIMITATIONS.md](LIMITATIONS.md) for what that means in practice.
 
 Two tools:
 
@@ -76,7 +78,7 @@ In Claude Code or Claude Desktop, just ask the model:
 >
 > "Who is gs.com attributed to? What about goldmansachs.com — same parent?"
 >
-> "I have a suspicious domain — pivot from its cert subject and surface any sibling apex domains attributed to the same entity."
+> "Given an OV/EV-cert domain, pivot from its cert subject and surface sibling apex domains attributed to the same legal entity."
 >
 > "List the domains attributed to The Hartford."
 

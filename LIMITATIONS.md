@@ -6,10 +6,16 @@ ctscout is built to be honest about what it does and what it doesn't. Read this 
 
 A digital entity resolution tool that maps apex domains to the organizations attributed in their Certificate Transparency (CT) records, with optional multi-signal corroboration (DNS, RDAP, IP/ASN, favicon, visual brand verification).
 
+ctscout indexes **OV and EV certificates exclusively** — the ones where the issuing CA validated the organization's legal identity and embedded it in the cert subject. DV certs (Let's Encrypt, ZeroSSL, ACME-defaulting cloud hosts) are filtered at ingest and are never stored, never queryable. This is a deliberate scoping decision, not a coverage gap to be filled later.
+
 Primary use cases:
-- **Adversary infrastructure attribution** — given a suspicious domain, see what organization the CT records attribute it to, with evidence
-- **Sibling domain discovery** — given a known domain or org, find related apex domains attributed to the same legal entity
-- **Cohort analysis** — analyze SAN cohorts and cert-issuance patterns over time
+- **Named-entity attribution** — given a domain with an OV/EV cert, surface the legal entity recorded in the cert subject, with multi-signal corroboration on the Pro tier
+- **Sibling and subsidiary discovery** — given a known org or domain, find related apex domains attributed to the same legal entity (within OV/EV coverage)
+- **Cohort and temporal analysis** — analyze SAN cohorts and cert-issuance patterns over time
+
+ctscout serves well: GTM / RevOps teams enriching account-to-domain mappings, brokerage / TPRM analysts mapping client digital footprints, researchers investigating relationships among legitimate entities.
+
+Threat-intel and OSINT analysts get value on the subset of investigations where targets hold OV/EV certs — sanctioned entities, shell companies with real corporate paper, supply-chain compromises rooted at OV-cert vendors, sophisticated actors investing in legitimacy. **The majority of commodity adversary infrastructure (phishing, C2, cloud-native attack tooling) uses DV certs and is invisible to ctscout entirely.** See "Coverage gaps" below.
 
 ## What ctscout is NOT
 
