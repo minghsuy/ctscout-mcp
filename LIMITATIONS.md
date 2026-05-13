@@ -13,7 +13,7 @@ Primary use cases:
 - **Sibling and subsidiary discovery** — given a known org or domain, find related apex domains attributed to the same legal entity (within OV/EV coverage)
 - **Cohort and temporal analysis** — analyze SAN cohorts and cert-issuance patterns over time
 
-ctscout serves well: GTM / RevOps teams enriching account-to-domain mappings, brokerage / TPRM analysts mapping client digital footprints, researchers investigating relationships among legitimate entities.
+ctscout serves well: GTM / RevOps teams enriching account-to-domain mappings, brokerage / TPRM analysts mapping client digital footprints, researchers investigating entity relationships from public-record data.
 
 Threat-intel and OSINT analysts get value on the subset of investigations where targets hold OV/EV certs — sanctioned entities, shell companies with real corporate paper, supply-chain compromises rooted at OV-cert vendors, sophisticated actors investing in legitimacy. **The majority of commodity adversary infrastructure (phishing, C2, cloud-native attack tooling) uses DV certs and is invisible to ctscout entirely.** See "Coverage gaps" below.
 
