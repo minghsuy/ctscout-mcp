@@ -28,7 +28,7 @@ const SCAN_URL = `${API_BASE_URL}/scan`;
 const REQUEST_TIMEOUT_MS = 30_000;
 const CHARACTER_LIMIT = 25_000;
 const SERVER_NAME = "ctscout-mcp-server";
-const SERVER_VERSION = "0.2.1";
+const SERVER_VERSION = "0.2.2";
 
 // ---------- Types ----------
 
