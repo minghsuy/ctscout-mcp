@@ -127,7 +127,7 @@ The model will pick the right ctscout tool, call it, and summarize.
 
 The MCP server uses the same API key for both — your tier is determined by the key. If you hit the daily quota, the tool returns a 429 error with an upgrade hint.
 
-Pro is currently concierge-only (manual key mint + invoice) while usage data justifies whether automated commerce is worth building. Email yminghsun@icloud.com if you want a Pro key.
+Pro is currently concierge-only (manual key mint + invoice) while usage data justifies whether automated commerce is worth building. Email pro@ctscout.dev if you want a Pro key.
 
 ### What the Pro response looks like
 
