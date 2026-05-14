@@ -10,8 +10,11 @@
  * Auth: requires an API key via the CTSCOUT_API_KEY environment variable.
  * Get a free key (no email, no signup) at https://ctscout.dev.
  *
- * Distribution: stdio transport, intended to be invoked via npx by an MCP
- * client (Claude Code, Claude Desktop, Cursor, etc.).
+ * Distribution: stdio transport for local use (invoked via npx by an MCP
+ * client such as Claude Code or Claude Desktop). For zero-install access
+ * the same tools are also served over HTTP at https://ctscout.dev/mcp
+ * (Streamable HTTP transport) and https://ctscout.dev/sse (SSE legacy).
+ * This binary is the local-execution path; the README documents both.
  */
 
 import { realpathSync } from "node:fs";

@@ -13,6 +13,11 @@ Both work over the public ctscout.dev `/scan` API. Free tier requires an API key
 
 **Not a cyber-risk-scoring tool.** See [LIMITATIONS.md](LIMITATIONS.md) for what ctscout is and isn't, the DV-cert coverage gap, and the corrections path.
 
+### What's new in 0.2.2
+
+- Hosted MCP endpoint at `https://ctscout.dev/mcp` (Streamable HTTP) and `https://ctscout.dev/sse` (legacy SSE) — same two tools, zero local install. Auth via `X-API-Key` header (or `Authorization: Bearer …`).
+- README restructured to lead with the hosted path; the local-npm install is now a fallback for restricted networks.
+
 ### What's new in 0.2.0
 
 - Pro-tier response surfacing: `confidence_band`, `evidence`, `matched_via`, `signal_health`, `vlm_status`, `vlm_override` rendered in the markdown table when present.
@@ -62,8 +67,8 @@ This writes to `~/.claude.json`.
 ```
 
 Config file locations:
-- **Claude Desktop**: `~/Library/Application Support/Claude/claude_desktop_config.json` (Mac), `%APPDATA%\Claude\claude_desktop_config.json` (Windows)
-- **Cursor**: `~/.cursor/mcp.json`
+- **Claude Desktop**: `~/Library/Application Support/Claude/claude_desktop_config.json` (Mac), `%APPDATA%\Claude\claude_desktop_config.json` (Windows). HTTP-transport MCP support requires a recent Desktop build; if your client doesn't recognize `"type": "http"`, use the local npm fallback below.
+- **Cursor**: `~/.cursor/mcp.json`. If Cursor's HTTP transport doesn't connect, swap the `url` to `https://ctscout.dev/sse` — the same tools are served over the legacy SSE transport.
 
 After adding, **fully quit and restart your MCP client** (not just close the window). The tools will appear under "ctscout".
 
