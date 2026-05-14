@@ -66,13 +66,13 @@ If ctscout returns an attribution you believe is wrong, please open an issue at 
 - The result returned
 - Why it's wrong (cert subject mismatch, stale data, brand collision, etc.)
 
-For coverage requests (specific entities you want indexed beyond current warehouse), email yminghsun@icloud.com with the entity name and any known apex domains.
+For coverage requests (specific entities you want indexed beyond current warehouse), email pro@ctscout.dev with the entity name and any known apex domains.
 
 ## Tier issuance
 
 The free tier is self-serve at https://ctscout.dev — Turnstile-protected, no email or account required, 10 queries per day.
 
-The Pro tier (live multi-signal enrichment, full result set, higher quota) is currently **concierge-only**. Email yminghsun@icloud.com if you want early access; key minting and invoicing are manual until usage data justifies automated commerce.
+The Pro tier (live multi-signal enrichment, full result set, higher quota) is currently **concierge-only**. Email pro@ctscout.dev if you want early access; key minting and invoicing are manual until usage data justifies automated commerce.
 
 ## License and data
 
