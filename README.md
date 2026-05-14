@@ -13,6 +13,11 @@ Both work over the public ctscout.dev `/scan` API. Free tier requires an API key
 
 **Not a cyber-risk-scoring tool.** See [LIMITATIONS.md](LIMITATIONS.md) for what ctscout is and isn't, the DV-cert coverage gap, and the corrections path.
 
+### What's new in 0.2.2
+
+- Hosted MCP endpoint at `https://ctscout.dev/mcp` (Streamable HTTP) and `https://ctscout.dev/sse` (legacy SSE) — same two tools, zero local install. Auth via `X-API-Key` header (or `Authorization: Bearer …`).
+- README restructured to lead with the hosted path; the local-npm install is now a fallback for restricted networks.
+
 ### What's new in 0.2.0
 
 - Pro-tier response surfacing: `confidence_band`, `evidence`, `matched_via`, `signal_health`, `vlm_status`, `vlm_override` rendered in the markdown table when present.
@@ -25,17 +30,51 @@ Both work over the public ctscout.dev `/scan` API. Free tier requires an API key
 
 ## Install
 
-For Claude Code, Claude Desktop, Cursor, or any other MCP client.
+For Claude Code, Claude Desktop, Cursor, or any other MCP client. **Two ways to connect:** hosted (recommended, no install) or local npm (this package).
 
 ### 1. Get a free API key
 
 Visit [ctscout.dev](https://ctscout.dev) and click "Get a free API key". Solve the Turnstile captcha. Copy the key (you can't recover it later — save it now).
 
-### 2. Configure your MCP client
+### 2a. Hosted endpoint (recommended — zero install)
 
-> **Important — Claude Code CLI vs Claude Desktop have separate config files.** Adding via `claude mcp add` registers for the CLI only. If you use Claude Desktop, you must edit Desktop's config file directly.
+The same tools are hosted at `https://ctscout.dev/mcp`. Nothing to install — just point your MCP client at the URL with your API key as the `X-API-Key` header.
 
-**Claude Code (CLI)** — use the CLI:
+**Claude Code (CLI)**:
+
+```bash
+claude mcp add ctscout \
+  -s user \
+  --transport http \
+  --header "X-API-Key: YOUR_KEY_HERE" \
+  https://ctscout.dev/mcp
+```
+
+This writes to `~/.claude.json`.
+
+**Claude Desktop / Cursor / Cline / any HTTP-transport MCP client** — edit the client config:
+
+```json
+{
+  "mcpServers": {
+    "ctscout": {
+      "type": "http",
+      "url": "https://ctscout.dev/mcp",
+      "headers": { "X-API-Key": "YOUR_KEY_HERE" }
+    }
+  }
+}
+```
+
+Config file locations:
+- **Claude Desktop**: `~/Library/Application Support/Claude/claude_desktop_config.json` (Mac), `%APPDATA%\Claude\claude_desktop_config.json` (Windows). HTTP-transport MCP support requires a recent Desktop build; if your client doesn't recognize `"type": "http"`, use the local npm fallback below.
+- **Cursor**: `~/.cursor/mcp.json`. If Cursor's HTTP transport doesn't connect, swap the `url` to `https://ctscout.dev/sse` — the same tools are served over the legacy SSE transport.
+
+After adding, **fully quit and restart your MCP client** (not just close the window). The tools will appear under "ctscout".
+
+### 2b. Local npm (fallback — if you can't use the hosted endpoint)
+
+If you're behind a network policy that blocks `ctscout.dev`, prefer running the published Node binary locally:
 
 ```bash
 claude mcp add ctscout \
@@ -44,9 +83,7 @@ claude mcp add ctscout \
   -- npx -y ctscout-mcp-server
 ```
 
-This writes to `~/.claude.json`.
-
-**Claude Desktop** — edit `~/Library/Application Support/Claude/claude_desktop_config.json` (Mac) or the equivalent on Windows/Linux, and add:
+Or in JSON config:
 
 ```json
 {
@@ -54,21 +91,13 @@ This writes to `~/.claude.json`.
     "ctscout": {
       "command": "npx",
       "args": ["-y", "ctscout-mcp-server"],
-      "env": {
-        "CTSCOUT_API_KEY": "YOUR_KEY_HERE"
-      }
+      "env": { "CTSCOUT_API_KEY": "YOUR_KEY_HERE" }
     }
   }
 }
 ```
 
-If the file already has other MCP servers, just add the `ctscout` key under the existing `mcpServers` object.
-
-**Cursor** (`~/.cursor/mcp.json`):
-
-Same JSON shape as the Desktop example.
-
-After adding the config, **fully quit and restart your MCP client** (not just close the window). The tools will appear under "ctscout" in your available tools.
+The two paths talk to the same `/scan` API on the backend — feature-parity is automatic. The hosted endpoint just skips the Node install.
 
 ### 3. Use it
 
