@@ -289,12 +289,16 @@ const LEGAL_ENTITY_SUFFIXES =
   /\b(Inc|Corp|Corporation|Group|Companies|Company|Co|Ltd|LLC|L\.L\.C\.|AG|SA|S\.A\.|N\.V\.|GmbH|plc|Holdings|Holding)\.?$/i;
 
 function buildLegalEntitySuggestions(input: string): string[] {
+  // Five sector-neutral suffixes. Earlier draft had "Insurance Company" as
+  // a 6th variant (from the Travelers/Hartford bug report), but that's
+  // nonsense for non-insurance brands ("Spotify Insurance Company"). The
+  // five remaining variants cover the vast majority of real legal-entity
+  // formations.
   const variants = [
     `${input} Companies`,
     `${input} Group`,
     `${input} Inc`,
     `${input} Corporation`,
-    `${input} Insurance Company`,
     `The ${input}`,
   ];
   return [
@@ -305,13 +309,12 @@ function buildLegalEntitySuggestions(input: string): string[] {
 }
 
 /** Hint context for empty-result rendering. `kind === "company"` means the
- *  query was a company name (search_company tool) and the brand→legal
- *  did-you-mean block applies. `kind === "domain"` means the query was a
- *  domain list (lookup_domain tool) and the brand/legal suggestions are
- *  irrelevant (empty result there is the DV-only certs caveat). */
-export type FormatHint =
-  | { kind: "company"; companyName: string }
-  | { kind: "domain" };
+ *  query was a company name (search_company tool); we use the `query`
+ *  argument as the basis for did-you-mean suggestions. `kind === "domain"`
+ *  means the query was a domain list (lookup_domain tool) and brand/legal
+ *  suggestions don't apply — empty-result there is the DV-only certs
+ *  caveat, not a name-form issue. */
+export type FormatHint = { kind: "company" } | { kind: "domain" };
 
 export function formatScanAsMarkdown(
   query: string,
@@ -327,7 +330,7 @@ export function formatScanAsMarkdown(
       "No domains found. Try a partial company name (e.g. 'Goldman' instead of 'Goldman Sachs Group, Inc.') or a different domain.",
     );
     if (hint?.kind === "company") {
-      const q = hint.companyName.trim();
+      const q = query.trim();
       if (q && !LEGAL_ENTITY_SUFFIXES.test(q)) {
         lines.push("");
         lines.push(...buildLegalEntitySuggestions(q));
@@ -607,7 +610,7 @@ Legal-vs-brand caveat (important):
   - The cert subject (O field) uses LEGAL entity names, not brand names.
   - "Travelers Insurance" → 0 results because the legal name is "The Travelers Companies, Inc."
   - "Hartford Financial" → 0 results; legal names are "Hartford Fire Insurance Company" or "The Hartford Financial Services Group".
-  - If a brand-name search returns nothing, retry with variants like "X Companies", "X Group", "X Inc", "X Corporation", "X Insurance Company", or "The X". The empty-result markdown output includes these suggestions automatically when the input looks brand-shaped.
+  - If a brand-name search returns nothing, retry with variants like "X Companies", "X Group", "X Inc", "X Corporation", or "The X". The empty-result markdown output includes these suggestions automatically when the input looks brand-shaped.
 
 Coverage caveat:
   - Best for established US/EU tech companies with OV/EV certs (~5,976 entities indexed).
@@ -635,7 +638,6 @@ Coverage caveat:
 
       const md = formatScanAsMarkdown(params.company_name, data, {
         kind: "company",
-        companyName: params.company_name,
       });
       const { text, structured } = truncateIfNeeded(md, data);
       return {

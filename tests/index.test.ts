@@ -776,7 +776,6 @@ describe("formatScanAsMarkdown - legal-entity did-you-mean suggestions", () => {
   it("brand-name input on empty result emits suggestions", () => {
     const md = formatScanAsMarkdown("Travelers Insurance", freeResponse([]), {
       kind: "company",
-      companyName: "Travelers Insurance",
     });
     expect(md).toContain("No domains found");
     expect(md).toContain("• Travelers Insurance Companies");
@@ -785,6 +784,9 @@ describe("formatScanAsMarkdown - legal-entity did-you-mean suggestions", () => {
   });
 
   it("legal-entity-shaped input skips suggestions", () => {
+    // Cover every suffix in the LEGAL_ENTITY_SUFFIXES regex including the
+    // less-obvious ones (Co, SA, Holding singular) to guard against
+    // someone tweaking the regex and silently breaking the skip.
     for (const suffix of [
       "Inc",
       "Corp",
@@ -792,19 +794,21 @@ describe("formatScanAsMarkdown - legal-entity did-you-mean suggestions", () => {
       "Group",
       "Companies",
       "Company",
+      "Co",
       "Ltd",
       "LLC",
       "AG",
+      "SA",
       "plc",
       "GmbH",
+      "Holding",
       "Holdings",
     ]) {
       const md = formatScanAsMarkdown(`Acme ${suffix}`, freeResponse([]), {
         kind: "company",
-        companyName: `Acme ${suffix}`,
       });
-      expect(md).toContain("No domains found");
-      expect(md).not.toContain("Try one of these variants");
+      expect(md, `suffix=${suffix}`).toContain("No domains found");
+      expect(md, `suffix=${suffix}`).not.toContain("Try one of these variants");
     }
   });
 
@@ -822,15 +826,11 @@ describe("formatScanAsMarkdown - legal-entity did-you-mean suggestions", () => {
     expect(md).not.toContain("Try one of these variants");
   });
 
-  it("empty / whitespace companyName skips suggestions", () => {
-    const a = formatScanAsMarkdown("", freeResponse([]), {
-      kind: "company",
-      companyName: "",
-    });
+  it("empty / whitespace query skips suggestions", () => {
+    const a = formatScanAsMarkdown("", freeResponse([]), { kind: "company" });
     expect(a).not.toContain("Try one of these variants");
     const b = formatScanAsMarkdown("   ", freeResponse([]), {
       kind: "company",
-      companyName: "   ",
     });
     expect(b).not.toContain("Try one of these variants");
   });
@@ -846,7 +846,7 @@ describe("formatScanAsMarkdown - legal-entity did-you-mean suggestions", () => {
           subdomain_count: 0,
         },
       ]),
-      { kind: "company", companyName: "Acme Brand" },
+      { kind: "company" },
     );
     expect(md).toContain("acme.com");
     expect(md).not.toContain("Try one of these variants");
@@ -855,30 +855,26 @@ describe("formatScanAsMarkdown - legal-entity did-you-mean suggestions", () => {
   it("Hartford Financial case from the bug report", () => {
     const md = formatScanAsMarkdown("Hartford Financial", freeResponse([]), {
       kind: "company",
-      companyName: "Hartford Financial",
     });
-    expect(md).toContain("• Hartford Financial Insurance Company");
+    expect(md).toContain("• Hartford Financial Companies");
     expect(md).toContain("• The Hartford Financial");
   });
 
-  it("suggestion block lists six variants", () => {
+  it("suggestion block lists five variants", () => {
     const md = formatScanAsMarkdown("Foo", freeResponse([]), {
       kind: "company",
-      companyName: "Foo",
     });
     const bullets = md.split("\n").filter((l) => l.startsWith("  •"));
-    expect(bullets).toHaveLength(6);
+    expect(bullets).toHaveLength(5);
   });
 
   it("case-insensitive suffix detection", () => {
     const a = formatScanAsMarkdown("Acme INC", freeResponse([]), {
       kind: "company",
-      companyName: "Acme INC",
     });
     expect(a).not.toContain("Try one of these variants");
     const b = formatScanAsMarkdown("Acme corporation", freeResponse([]), {
       kind: "company",
-      companyName: "Acme corporation",
     });
     expect(b).not.toContain("Try one of these variants");
   });
