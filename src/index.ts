@@ -60,25 +60,51 @@ export interface ProEnrichment {
 }
 
 export interface DomainResult {
-  org: string;
-  apex_domain: string;
-  cert_count: number;
-  subdomain_count: number;
-  first_seen?: string;
-  last_seen?: string;
-  // ---- Pro-tier only (Phase 5+) ----
-  attributed_to?: string; // Customer-facing claim; "attributed_to" not "owns"
+  // ---- Warehouse / "Phase 5 fictional Pro" shape (free tier from D1; or
+  //      pre-Phase-6 Pro-with-enrichment which the origin never actually
+  //      produced). Marked optional because the real Pro tier returns
+  //      ScoutResult-shaped objects instead — see below.
+  org?: string;
+  apex_domain?: string;
+  cert_count?: number;
+  subdomain_count?: number;
+  first_seen?: string | null;
+  last_seen?: string | null;
+  // Customer-facing claim; "attributed_to" not "owns"
+  attributed_to?: string;
   enrichment?: ProEnrichment;
+
+  // ---- ScoutResult shape (real Pro tier, proxied verbatim from the Spark
+  //      origin's domain-scout library). The origin returns these fields,
+  //      NOT the warehouse/enrichment shape above. The mismatch was the
+  //      undefined-cells bug fixed in 2026-05-15 (ctscout-mcp#14).
+  domain?: string;
+  confidence?: number | null;
+  sources?: string[];
+  evidence?: Array<Record<string, unknown>>;
+  cert_org_names?: string[];
+  rdap_org?: string | null;
+  resolves?: boolean;
+  is_seed?: boolean;
+  seed_sources?: string[];
+
+  // Catch-all for any future origin fields so the type doesn't go stale.
+  [k: string]: unknown;
 }
 
 export interface ScanResponse {
   domains: DomainResult[];
-  total: number;
-  truncated: boolean;
+  // Warehouse responses set these; ScoutResult responses don't.
+  total?: number;
+  truncated?: boolean;
   upgrade_hint?: string;
   // "warehouse" / "live" = legacy free-tier sources.
-  // "cache-only" / "live-enriched" = Pro tier (Phase 5 orchestrator).
-  source: "warehouse" | "live" | "cache-only" | "live-enriched";
+  // "cache-only" / "live-enriched" = Phase 5 Pro tier (orchestrator with
+  // enrichment objects — fictional, the origin doesn't produce this).
+  // undefined = ScoutResult shape from the real Pro tier origin.
+  source?: "warehouse" | "live" | "cache-only" | "live-enriched";
+  // ScoutResult also carries `entity` and `run_metadata` at the top level.
+  [k: string]: unknown;
 }
 
 // ---------- Zod schemas ----------
@@ -237,9 +263,24 @@ export function explainError(err: unknown): string {
   return `Unexpected error: ${String(err)}`;
 }
 
-// Exported for tests. Renders both Free-tier and Pro-tier responses.
-// Pro fields (confidence_band, evidence, matched_via) only render when
-// present; Free responses use the original (domain, org, certs, subdomains) table.
+// Exported for tests. Renders three response shapes from the ctscout /scan
+// API:
+//
+//   1. Warehouse (free tier) — `source: "warehouse"`, each domain has
+//      `{org, apex_domain, cert_count, subdomain_count, first_seen,
+//      last_seen}`. Legacy v0.1.0 table format.
+//   2. ScoutResult (real Pro tier) — proxied verbatim from the Spark
+//      origin's domain-scout library. Top level has no `source` field;
+//      each domain has `{domain, confidence, sources[], evidence[],
+//      cert_org_names[], rdap_org, ...}`. Rendered as a confidence-band
+//      / signals / evidence table.
+//   3. Phase-5 fictional Pro (`source: "live-enriched" | "cache-only"` or
+//      domains carrying an `enrichment` object) — the original assumed
+//      Pro shape. Kept for backward compat with pre-Phase-6 fixtures.
+//
+// The undefined-cells bug fixed here (2026-05-15, ctscout-mcp#14) was
+// that the real Pro tier returns shape #2, but the formatter only knew
+// shapes #1 and #3 — so every cell rendered as `undefined`.
 export function formatScanAsMarkdown(query: string, response: ScanResponse): string {
   const lines: string[] = [];
   lines.push(`# ctscout results for: ${query}`);
@@ -252,19 +293,28 @@ export function formatScanAsMarkdown(query: string, response: ScanResponse): str
     return lines.join("\n");
   }
 
-  // Pro detection: prefer the explicit source signal, then fall back to
-  // inspecting the rows. If the API returns `cache-only` / `live-enriched`
-  // but every row is in the `_degraded()` path (no `enrichment` field),
-  // we still want the Pro layout — losing it would make a Pro response
-  // silently look like a Free response.
-  const isPro =
-    response.source === "live-enriched" ||
-    response.source === "cache-only" ||
-    response.domains.some((d) => d.enrichment != null);
+  // Shape detection. ScoutResult domain objects have `domain` (not
+  // `apex_domain`); the two shapes don't overlap on this attribute.
+  // Single-field check is sufficient.
+  const first = response.domains[0];
+  const isScoutResult =
+    typeof first.domain === "string" && typeof first.apex_domain !== "string";
+
+  // Phase-5 fictional Pro detection (kept for backward compat). Only
+  // considered when the response isn't already ScoutResult-shaped.
+  const isPhase5Pro =
+    !isScoutResult &&
+    (response.source === "live-enriched" ||
+      response.source === "cache-only" ||
+      response.domains.some((d) => d.enrichment != null));
+
+  const isPro = isScoutResult || isPhase5Pro;
+  const totalDisplay = response.total ?? response.domains.length;
+  const sourceDisplay = response.source ?? (isScoutResult ? "scout-result" : "unknown");
 
   lines.push(
-    `Returned **${response.domains.length}** domain(s) of ${response.total} total. ` +
-      `Source: \`${response.source}\`${isPro ? " _(Pro tier — multi-signal attribution)_" : ""}.`,
+    `Returned **${response.domains.length}** domain(s) of ${totalDisplay} total. ` +
+      `Source: \`${sourceDisplay}\`${isPro ? " _(Pro tier — multi-signal attribution)_" : ""}.`,
   );
   if (response.truncated && response.upgrade_hint) {
     lines.push("");
@@ -272,7 +322,9 @@ export function formatScanAsMarkdown(query: string, response: ScanResponse): str
   }
   lines.push("");
 
-  if (isPro) {
+  if (isScoutResult) {
+    lines.push(formatScoutResultTable(response.domains));
+  } else if (isPhase5Pro) {
     lines.push(formatProTable(response.domains));
   } else {
     lines.push(formatFreeTable(response.domains));
@@ -319,6 +371,71 @@ function formatProTable(domains: DomainResult[]): string {
   }
   return rows.join("\n");
 }
+
+// ---------- ScoutResult renderer (real Pro tier from Spark origin) ----------
+
+// Map a 0..1 confidence float to a human-readable band. Matches the
+// thresholds used in ctscout-worker#56's formatter for cross-transport
+// consistency.
+function confidenceBand(c: number | null | undefined): string {
+  if (c == null || Number.isNaN(c)) return "—";
+  if (c >= 0.9) return "verified";
+  if (c >= 0.7) return "likely";
+  if (c >= 0.5) return "possible";
+  return "low";
+}
+
+// Sanitize a cell value for markdown-table inclusion. Replace pipes with a
+// Unicode lookalike (U+2502), collapse newlines, fall back to em-dash for
+// null/undefined/empty inputs, and truncate with ellipsis past `maxLen`.
+function cellSafe(s: string | null | undefined, maxLen = 80): string {
+  if (s == null) return "—";
+  const stripped = String(s).replace(/\|/g, "│").replace(/[\r\n]+/g, " ").trim();
+  if (stripped.length === 0) return "—";
+  return stripped.length > maxLen ? `${stripped.slice(0, maxLen - 1)}…` : stripped;
+}
+
+// How many sources to show inline before collapsing the rest into a "+N
+// more" overflow indicator. Mirrors the Phase-5 Pro renderer's behavior
+// for cross-path consistency (matched_via is also capped + collapsed).
+const SOURCES_INLINE_LIMIT = 4;
+
+function formatScoutResultTable(domains: DomainResult[]): string {
+  const rows: string[] = [];
+  rows.push("| Domain | Org | Confidence | Sources | Evidence |");
+  rows.push("|---|---|---|---|---|");
+  for (const d of domains) {
+    const domain = d.domain;
+    const certOrgs = d.cert_org_names ?? [];
+    // Org fallback chain: cert_org_names[0] -> rdap_org -> org. cellSafe
+    // turns undefined into "—" so we don't need a trailing `?? undefined`.
+    const org = certOrgs[0] ?? d.rdap_org ?? d.org;
+    const conf = d.confidence;
+    const confCell =
+      conf != null ? `${confidenceBand(conf)} (${conf.toFixed(2)})` : "—";
+    const sources = d.sources ?? [];
+    // Show first N sources and append a "+M" indicator for any overflow,
+    // so callers can tell when they're looking at an incomplete list.
+    const overflowSources = sources.length - SOURCES_INLINE_LIMIT;
+    const sourcesCell =
+      sources.slice(0, SOURCES_INLINE_LIMIT).join(", ") +
+      (overflowSources > 0 ? `, +${overflowSources}` : "");
+    const evidenceArr = d.evidence ?? [];
+    // Type-guard rather than cast: the `evidence` element type is
+    // Record<string, unknown>, so `description` is `unknown`. If the
+    // origin ever sends a non-string description (number, object, null),
+    // we fall back to em-dash instead of stringifying via cellSafe.
+    const rawDescription = evidenceArr[0]?.description;
+    const firstDescription =
+      typeof rawDescription === "string" ? rawDescription : undefined;
+    rows.push(
+      `| \`${cellSafe(domain, 60)}\` | ${cellSafe(org, 50)} | ${confCell} | ${cellSafe(sourcesCell, 40)} | ${cellSafe(firstDescription, 80)} |`,
+    );
+  }
+  return rows.join("\n");
+}
+
+// ---------- Phase-5 fictional Pro renderer helpers (kept for compat) ----------
 
 function bandIndicator(band: ConfidenceBand): string {
   switch (band) {
