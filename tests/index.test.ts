@@ -670,3 +670,94 @@ describe("formatScanAsMarkdown — ScoutResult edge cases", () => {
     expect(cells[2]).toBe("—");
   });
 });
+
+// ---------- Iter-1 fixes from bot review on PR #15 ----------
+
+describe("formatScanAsMarkdown - ScoutResult sources overflow indicator", () => {
+  it("shows '+N' for sources beyond the inline limit (4)", () => {
+    const md = formatScanAsMarkdown("Test", {
+      domains: [
+        {
+          domain: "x.com",
+          confidence: 0.9,
+          sources: ["a", "b", "c", "d", "e", "f"],
+          evidence: [{ description: "e" }],
+          cert_org_names: ["Org"],
+        },
+      ],
+    });
+    // First 4 inline + "+2" overflow.
+    expect(md).toContain("a, b, c, d, +2");
+  });
+
+  it("no overflow indicator when sources <= inline limit", () => {
+    const md = formatScanAsMarkdown("Test", {
+      domains: [
+        {
+          domain: "x.com",
+          confidence: 0.9,
+          sources: ["a", "b", "c"],
+          evidence: [{ description: "e" }],
+          cert_org_names: ["Org"],
+        },
+      ],
+    });
+    expect(md).toContain("a, b, c");
+    expect(md).not.toContain("+0");
+    expect(md).not.toMatch(/\+\d/);
+  });
+});
+
+describe("formatScanAsMarkdown - ScoutResult description type guard", () => {
+  // The `evidence` element type is Record<string, unknown>, so `description`
+  // is `unknown`. The formatter type-guards instead of casting so non-string
+  // values fall back to em-dash rather than being stringified to gibberish.
+
+  function withEvidenceDescription(description: unknown): string {
+    return formatScanAsMarkdown("Test", {
+      domains: [
+        {
+          domain: "x.com",
+          confidence: 0.9,
+          sources: ["s"],
+          evidence: [{ description }],
+          cert_org_names: ["Org"],
+        },
+      ],
+    });
+  }
+
+  it("string description renders as-is", () => {
+    expect(withEvidenceDescription("real evidence text")).toContain(
+      "real evidence text",
+    );
+  });
+
+  it("number description does NOT leak as '42' or similar - em-dash instead", () => {
+    const md = withEvidenceDescription(42);
+    const row = md.split("\n").find((l) => l.includes("x.com")) as string;
+    expect(row).toBeDefined();
+    expect(row).toMatch(/\| — \|$/);
+    expect(row).not.toContain("42");
+  });
+
+  it("object description does NOT render as '[object Object]' - em-dash instead", () => {
+    const md = withEvidenceDescription({ nested: "object" });
+    const row = md.split("\n").find((l) => l.includes("x.com")) as string;
+    expect(row).toMatch(/\| — \|$/);
+    expect(row).not.toContain("[object Object]");
+  });
+
+  it("null description renders em-dash, not 'null'", () => {
+    const md = withEvidenceDescription(null);
+    const row = md.split("\n").find((l) => l.includes("x.com")) as string;
+    expect(row).toMatch(/\| — \|$/);
+    expect(row).not.toContain("null");
+  });
+
+  it("undefined description renders em-dash", () => {
+    const md = withEvidenceDescription(undefined);
+    const row = md.split("\n").find((l) => l.includes("x.com")) as string;
+    expect(row).toMatch(/\| — \|$/);
+  });
+});

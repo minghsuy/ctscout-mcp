@@ -395,6 +395,11 @@ function cellSafe(s: string | null | undefined, maxLen = 80): string {
   return stripped.length > maxLen ? `${stripped.slice(0, maxLen - 1)}…` : stripped;
 }
 
+// How many sources to show inline before collapsing the rest into a "+N
+// more" overflow indicator. Mirrors the Phase-5 Pro renderer's behavior
+// for cross-path consistency (matched_via is also capped + collapsed).
+const SOURCES_INLINE_LIMIT = 4;
+
 function formatScoutResultTable(domains: DomainResult[]): string {
   const rows: string[] = [];
   rows.push("| Domain | Org | Confidence | Sources | Evidence |");
@@ -402,14 +407,27 @@ function formatScoutResultTable(domains: DomainResult[]): string {
   for (const d of domains) {
     const domain = d.domain;
     const certOrgs = d.cert_org_names ?? [];
-    const org = certOrgs[0] ?? d.rdap_org ?? d.org ?? undefined;
+    // Org fallback chain: cert_org_names[0] -> rdap_org -> org. cellSafe
+    // turns undefined into "—" so we don't need a trailing `?? undefined`.
+    const org = certOrgs[0] ?? d.rdap_org ?? d.org;
     const conf = d.confidence;
     const confCell =
       conf != null ? `${confidenceBand(conf)} (${conf.toFixed(2)})` : "—";
     const sources = d.sources ?? [];
-    const sourcesCell = sources.slice(0, 4).join(", ");
+    // Show first N sources and append a "+M" indicator for any overflow,
+    // so callers can tell when they're looking at an incomplete list.
+    const overflowSources = sources.length - SOURCES_INLINE_LIMIT;
+    const sourcesCell =
+      sources.slice(0, SOURCES_INLINE_LIMIT).join(", ") +
+      (overflowSources > 0 ? `, +${overflowSources}` : "");
     const evidenceArr = d.evidence ?? [];
-    const firstDescription = evidenceArr[0]?.description as string | undefined;
+    // Type-guard rather than cast: the `evidence` element type is
+    // Record<string, unknown>, so `description` is `unknown`. If the
+    // origin ever sends a non-string description (number, object, null),
+    // we fall back to em-dash instead of stringifying via cellSafe.
+    const rawDescription = evidenceArr[0]?.description;
+    const firstDescription =
+      typeof rawDescription === "string" ? rawDescription : undefined;
     rows.push(
       `| \`${cellSafe(domain, 60)}\` | ${cellSafe(org, 50)} | ${confCell} | ${cellSafe(sourcesCell, 40)} | ${cellSafe(firstDescription, 80)} |`,
     );
