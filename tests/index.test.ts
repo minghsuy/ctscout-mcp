@@ -761,3 +761,124 @@ describe("formatScanAsMarkdown - ScoutResult description type guard", () => {
     expect(row).toMatch(/\| — \|$/);
   });
 });
+
+// ---------- legal-entity did-you-mean suggestions ----------
+//
+// The cert subject O field uses legal entity names, not brand names. Searches
+// for brand-shaped inputs like "Travelers Insurance" return 0 while the data
+// is in the warehouse under "The Travelers Companies, Inc." The formatter
+// appends a static "did you mean?" suggestion block on empty results when
+// the caller flags the query as a company-name (search_company tool path).
+// Skipped for already-legal-shaped inputs and for the domain-list path
+// (lookup_domain, kind: "domain").
+
+describe("formatScanAsMarkdown - legal-entity did-you-mean suggestions", () => {
+  it("brand-name input on empty result emits suggestions", () => {
+    const md = formatScanAsMarkdown("Travelers Insurance", freeResponse([]), {
+      kind: "company",
+    });
+    expect(md).toContain("No domains found");
+    expect(md).toContain("• Travelers Insurance Companies");
+    expect(md).toContain("• Travelers Insurance Group");
+    expect(md).toContain("• The Travelers Insurance");
+  });
+
+  it("legal-entity-shaped input skips suggestions", () => {
+    // Cover every suffix in the LEGAL_ENTITY_SUFFIXES regex including the
+    // less-obvious ones (Co, SA, Holding singular) to guard against
+    // someone tweaking the regex and silently breaking the skip.
+    for (const suffix of [
+      "Inc",
+      "Corp",
+      "Corporation",
+      "Group",
+      "Companies",
+      "Company",
+      "Co",
+      "Ltd",
+      "LLC",
+      "L.L.C.",
+      "AG",
+      "SA",
+      "S.A.",
+      "N.V.",
+      "plc",
+      "GmbH",
+      "Holding",
+      "Holdings",
+    ]) {
+      const md = formatScanAsMarkdown(`Acme ${suffix}`, freeResponse([]), {
+        kind: "company",
+      });
+      expect(md, `suffix=${suffix}`).toContain("No domains found");
+      expect(md, `suffix=${suffix}`).not.toContain("Try one of these variants");
+    }
+  });
+
+  it("lookup_domain (kind: 'domain') skips suggestions", () => {
+    const md = formatScanAsMarkdown("travelers.com", freeResponse([]), {
+      kind: "domain",
+    });
+    expect(md).toContain("No domains found");
+    expect(md).not.toContain("Try one of these variants");
+  });
+
+  it("no hint skips suggestions (backwards compat)", () => {
+    const md = formatScanAsMarkdown("Travelers Insurance", freeResponse([]));
+    expect(md).toContain("No domains found");
+    expect(md).not.toContain("Try one of these variants");
+  });
+
+  it("empty / whitespace query skips suggestions", () => {
+    const a = formatScanAsMarkdown("", freeResponse([]), { kind: "company" });
+    expect(a).not.toContain("Try one of these variants");
+    const b = formatScanAsMarkdown("   ", freeResponse([]), {
+      kind: "company",
+    });
+    expect(b).not.toContain("Try one of these variants");
+  });
+
+  it("non-empty result with brand-name query does NOT emit suggestions", () => {
+    const md = formatScanAsMarkdown(
+      "Acme Brand",
+      freeResponse([
+        {
+          org: "Acme",
+          apex_domain: "acme.com",
+          cert_count: 1,
+          subdomain_count: 0,
+        },
+      ]),
+      { kind: "company" },
+    );
+    expect(md).toContain("acme.com");
+    expect(md).not.toContain("Try one of these variants");
+  });
+
+  it("Hartford Financial case from the bug report", () => {
+    const md = formatScanAsMarkdown("Hartford Financial", freeResponse([]), {
+      kind: "company",
+    });
+    expect(md).toContain("• Hartford Financial Companies");
+    expect(md).toContain("• The Hartford Financial");
+  });
+
+  it("suggestion block lists five variants", () => {
+    const md = formatScanAsMarkdown("Foo", freeResponse([]), {
+      kind: "company",
+    });
+    const bullets = md.split("\n").filter((l) => l.startsWith("  •"));
+    expect(bullets).toHaveLength(5);
+  });
+
+  it("case-insensitive suffix detection", () => {
+    const a = formatScanAsMarkdown("Acme INC", freeResponse([]), {
+      kind: "company",
+    });
+    expect(a).not.toContain("Try one of these variants");
+    const b = formatScanAsMarkdown("Acme corporation", freeResponse([]), {
+      kind: "company",
+    });
+    expect(b).not.toContain("Try one of these variants");
+  });
+});

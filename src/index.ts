@@ -281,7 +281,46 @@ export function explainError(err: unknown): string {
 // The undefined-cells bug fixed here (2026-05-15, ctscout-mcp#14) was
 // that the real Pro tier returns shape #2, but the formatter only knew
 // shapes #1 and #3 — so every cell rendered as `undefined`.
-export function formatScanAsMarkdown(query: string, response: ScanResponse): string {
+/** Suffixes indicating the query is already a legal entity name shape.
+ *  Used to skip the brand→legal "did you mean?" hint when the user has
+ *  already supplied a legal-shaped name — zero results in that case is a
+ *  genuine no-match, not a brand/legal mismatch. */
+const LEGAL_ENTITY_SUFFIXES =
+  /\b(Inc|Corp|Corporation|Group|Companies|Company|Co|Ltd|LLC|L\.L\.C\.|AG|SA|S\.A\.|N\.V\.|GmbH|plc|Holdings|Holding)\.?$/i;
+
+function buildLegalEntitySuggestions(input: string): string[] {
+  // Five sector-neutral suffixes. Earlier draft had "Insurance Company" as
+  // a 6th variant (from the Travelers/Hartford bug report), but that's
+  // nonsense for non-insurance brands ("Spotify Insurance Company"). The
+  // five remaining variants cover the vast majority of real legal-entity
+  // formations.
+  const variants = [
+    `${input} Companies`,
+    `${input} Group`,
+    `${input} Inc`,
+    `${input} Corporation`,
+    `The ${input}`,
+  ];
+  return [
+    `If "${input}" is a common/brand name, the cert subject (O field) likely uses a longer legal entity name. Try one of these variants:`,
+    "",
+    ...variants.map((v) => `  • ${v}`),
+  ];
+}
+
+/** Hint context for empty-result rendering. `kind === "company"` means the
+ *  query was a company name (search_company tool); we use the `query`
+ *  argument as the basis for did-you-mean suggestions. `kind === "domain"`
+ *  means the query was a domain list (lookup_domain tool) and brand/legal
+ *  suggestions don't apply — empty-result there is the DV-only certs
+ *  caveat, not a name-form issue. */
+export type FormatHint = { kind: "company" } | { kind: "domain" };
+
+export function formatScanAsMarkdown(
+  query: string,
+  response: ScanResponse,
+  hint?: FormatHint,
+): string {
   const lines: string[] = [];
   lines.push(`# ctscout results for: ${query}`);
   lines.push("");
@@ -290,6 +329,13 @@ export function formatScanAsMarkdown(query: string, response: ScanResponse): str
     lines.push(
       "No domains found. Try a partial company name (e.g. 'Goldman' instead of 'Goldman Sachs Group, Inc.') or a different domain.",
     );
+    if (hint?.kind === "company") {
+      const q = query.trim();
+      if (q && !LEGAL_ENTITY_SUFFIXES.test(q)) {
+        lines.push("");
+        lines.push(...buildLegalEntitySuggestions(q));
+      }
+    }
     return lines.join("\n");
   }
 
@@ -558,7 +604,13 @@ Auth & limits:
 Error handling:
   - HTTP 401: API key missing or invalid.
   - HTTP 429: daily quota exceeded — wait or upgrade.
-  - "No domains found": try a shorter or different company name.
+  - "No domains found": try a shorter or different company name (see legal-vs-brand caveat below).
+
+Legal-vs-brand caveat (important):
+  - The cert subject (O field) uses LEGAL entity names, not brand names.
+  - "Travelers Insurance" → 0 results because the legal name is "The Travelers Companies, Inc."
+  - "Hartford Financial" → 0 results; legal names are "Hartford Fire Insurance Company" or "The Hartford Financial Services Group".
+  - If a brand-name search returns nothing, retry with variants like "X Companies", "X Group", "X Inc", "X Corporation", or "The X". The empty-result markdown output includes these suggestions automatically when the input looks brand-shaped.
 
 Coverage caveat:
   - Best for established US/EU tech companies with OV/EV certs (~5,976 entities indexed).
@@ -584,7 +636,9 @@ Coverage caveat:
         };
       }
 
-      const md = formatScanAsMarkdown(params.company_name, data);
+      const md = formatScanAsMarkdown(params.company_name, data, {
+        kind: "company",
+      });
       const { text, structured } = truncateIfNeeded(md, data);
       return {
         content: [{ type: "text", text }],
@@ -643,7 +697,9 @@ Auth & limits: same as ctscout_search_company.`,
         };
       }
 
-      const md = formatScanAsMarkdown(params.domains.join(", "), data);
+      const md = formatScanAsMarkdown(params.domains.join(", "), data, {
+        kind: "domain",
+      });
       const { text, structured } = truncateIfNeeded(md, data);
       return {
         content: [{ type: "text", text }],
