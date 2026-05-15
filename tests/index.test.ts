@@ -417,3 +417,256 @@ describe("explainError", () => {
     expect(msg).toContain("Unexpected error: string error");
   });
 });
+
+// ---------- ScoutResult-shape rendering (real Pro tier from origin) ----------
+//
+// The Spark origin (domain-scout-api on DGX) proxies the raw ScoutResult
+// from the domain-scout library verbatim. That shape has no top-level
+// `source` field, and each domain has `{domain, confidence, sources[],
+// evidence[], cert_org_names[], ...}` — NOT the warehouse shape.
+//
+// SCOUT_RESULT_FIXTURE below is captured from
+// `tools/call ctscout_search_company {"company_name":"CNA Financial"}`
+// against ctscout.dev/mcp on 2026-05-15, trimmed to two representative
+// domains (real response had 13). This is the same fixture used in
+// ctscout-worker#56's test/format-as-markdown.spec.ts.
+
+const SCOUT_RESULT_FIXTURE: ScanResponse = {
+  domains: [
+    {
+      domain: "cnacentral.com",
+      confidence: 0.95,
+      sources: ["ct_org_match", "shared_infra"],
+      evidence: [
+        {
+          source_type: "ct_org_match",
+          description:
+            "Cert org 'CNA Financial Corporation' matches target (score=1.00)",
+          signal_type: "cert_org_match",
+          signal_weight: 0.8,
+        },
+        {
+          source_type: "shared_infra",
+          description: "Shares infrastructure with cna.com",
+          signal_type: "shared_infrastructure",
+          signal_weight: 0.1,
+        },
+      ],
+      cert_org_names: ["CNA Financial Corporation"],
+      first_seen: "2023-05-09T00:00:00",
+      last_seen: "2024-12-05T23:59:59",
+      resolves: true,
+      rdap_org: null,
+      is_seed: false,
+      seed_sources: [],
+    },
+    {
+      domain: "cnasurety.com",
+      confidence: 0.9,
+      sources: ["ct_org_match"],
+      evidence: [
+        {
+          source_type: "ct_org_match",
+          description:
+            "Cert org 'CNA Financial Corporation' matches target (score=1.00)",
+          signal_type: "cert_org_match",
+          signal_weight: 0.8,
+        },
+      ],
+      cert_org_names: ["CNA Financial Corporation"],
+      first_seen: "2023-05-09T00:00:00",
+      last_seen: "2024-12-07T23:59:59",
+      resolves: true,
+      rdap_org: null,
+      is_seed: false,
+      seed_sources: [],
+    },
+  ],
+};
+
+describe("formatScanAsMarkdown — Pro tier (real ScoutResult shape)", () => {
+  const md = formatScanAsMarkdown("CNA Financial", SCOUT_RESULT_FIXTURE);
+
+  it("does not contain 'undefined' anywhere in the output", () => {
+    // Pre-fix regression guard: every cell rendered as `undefined` because
+    // the formatter expected warehouse/enrichment shape.
+    expect(md).not.toContain("undefined");
+  });
+
+  it("uses the ScoutResult table header (Domain / Org / Confidence / Sources / Evidence)", () => {
+    expect(md).toContain("| Domain | Org | Confidence | Sources | Evidence |");
+  });
+
+  it("renders the actual domain string from `domain` (not apex_domain)", () => {
+    expect(md).toContain("`cnacentral.com`");
+    expect(md).toContain("`cnasurety.com`");
+  });
+
+  it("renders the org from cert_org_names[0]", () => {
+    expect(md).toContain("CNA Financial Corporation");
+  });
+
+  it("maps confidence float to a band + numeric (verified for >=0.9)", () => {
+    expect(md).toContain("verified (0.95)");
+    expect(md).toContain("verified (0.90)");
+  });
+
+  it("renders sources as a comma-joined list", () => {
+    expect(md).toContain("ct_org_match, shared_infra");
+  });
+
+  it("renders the first evidence description", () => {
+    expect(md).toContain(
+      "Cert org 'CNA Financial Corporation' matches target",
+    );
+  });
+
+  it("marks the response as Pro tier in the header", () => {
+    expect(md).toContain("_(Pro tier — multi-signal attribution)_");
+  });
+
+  it("handles missing `total` (ScoutResult doesn't carry it) by falling back to domains.length", () => {
+    // Pre-fix: would have rendered "of undefined total" because the type
+    // required `total` and the fixture/origin doesn't provide it.
+    expect(md).toContain("**2** domain(s) of 2 total");
+    expect(md).not.toContain("undefined");
+  });
+
+  it("handles missing `source` field with a sensible label", () => {
+    expect(md).toContain("Source: `scout-result`");
+  });
+});
+
+describe("formatScanAsMarkdown — ScoutResult confidence band thresholds", () => {
+  function scoutResultWithConfidence(c: number | null | undefined): ScanResponse {
+    return {
+      domains: [
+        {
+          domain: "x.com",
+          confidence: c,
+          sources: ["s"],
+          evidence: [{ description: "e" }],
+          cert_org_names: ["Org"],
+        },
+      ],
+    };
+  }
+
+  it("0.95 -> verified", () => {
+    expect(formatScanAsMarkdown("Test", scoutResultWithConfidence(0.95))).toContain(
+      "verified (0.95)",
+    );
+  });
+  it("0.80 -> likely", () => {
+    expect(formatScanAsMarkdown("Test", scoutResultWithConfidence(0.8))).toContain(
+      "likely (0.80)",
+    );
+  });
+  it("0.60 -> possible", () => {
+    expect(formatScanAsMarkdown("Test", scoutResultWithConfidence(0.6))).toContain(
+      "possible (0.60)",
+    );
+  });
+  it("0.30 -> low", () => {
+    expect(formatScanAsMarkdown("Test", scoutResultWithConfidence(0.3))).toContain(
+      "low (0.30)",
+    );
+  });
+  it("null confidence does not crash (regression guard for .toFixed on null)", () => {
+    // Pre-fix this would throw `TypeError: Cannot read properties of null
+    // (reading 'toFixed')` if confidence came in as null. The fix uses
+    // loose `!= null` instead of strict `!== undefined`.
+    const md = formatScanAsMarkdown("Test", scoutResultWithConfidence(null));
+    expect(md).toContain("`x.com`");
+    expect(md).toContain("| — |");
+    expect(md).not.toContain("undefined");
+  });
+  it("undefined confidence renders em-dash placeholder", () => {
+    const md = formatScanAsMarkdown("Test", scoutResultWithConfidence(undefined));
+    expect(md).toContain("`x.com`");
+    expect(md).toContain("| — |");
+  });
+});
+
+describe("formatScanAsMarkdown — ScoutResult edge cases", () => {
+  it("pipe characters in field values don't break the table", () => {
+    const md = formatScanAsMarkdown("Test", {
+      domains: [
+        {
+          domain: "x.com",
+          confidence: 0.9,
+          sources: ["s"],
+          evidence: [{ description: "has a | pipe in it" }],
+          cert_org_names: ["Org | Inc"],
+        },
+      ],
+    });
+    const row = md.split("\n").find((l) => l.includes("x.com")) as string;
+    expect(row).toBeDefined();
+    // Each ScoutResult row has exactly 6 pipes (5 cells + leading/trailing).
+    expect((row.match(/\|/g) ?? []).length).toBe(6);
+  });
+
+  it("empty evidence description falls back to em-dash via cellSafe", () => {
+    const md = formatScanAsMarkdown("Test", {
+      domains: [
+        {
+          domain: "x.com",
+          confidence: 0.9,
+          sources: ["s"],
+          evidence: [{ description: "" }],
+          cert_org_names: ["Org"],
+        },
+      ],
+    });
+    const row = md.split("\n").find((l) => l.includes("x.com")) as string;
+    expect(row).toMatch(/\| — \|$/);
+  });
+
+  it("missing evidence array falls back to em-dash", () => {
+    const md = formatScanAsMarkdown("Test", {
+      domains: [
+        {
+          domain: "x.com",
+          confidence: 0.9,
+          sources: ["s"],
+          evidence: [],
+          cert_org_names: ["Org"],
+        },
+      ],
+    });
+    const row = md.split("\n").find((l) => l.includes("x.com")) as string;
+    expect(row).toMatch(/\| — \|$/);
+  });
+
+  it("missing cert_org_names falls back to rdap_org, then em-dash", () => {
+    const md1 = formatScanAsMarkdown("Test", {
+      domains: [
+        {
+          domain: "x.com",
+          confidence: 0.9,
+          sources: ["s"],
+          evidence: [{ description: "e" }],
+          rdap_org: "Org From RDAP",
+        },
+      ],
+    });
+    expect(md1).toContain("Org From RDAP");
+
+    const md2 = formatScanAsMarkdown("Test", {
+      domains: [
+        {
+          domain: "x.com",
+          confidence: 0.9,
+          sources: ["s"],
+          evidence: [{ description: "e" }],
+        },
+      ],
+    });
+    const row = md2.split("\n").find((l) => l.includes("x.com")) as string;
+    // Second cell (Org) should be em-dash when neither cert_org_names nor
+    // rdap_org are present.
+    const cells = row.split("|").map((c) => c.trim());
+    expect(cells[2]).toBe("—");
+  });
+});
