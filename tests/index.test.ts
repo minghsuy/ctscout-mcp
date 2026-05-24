@@ -32,6 +32,7 @@ import {
   formatScanAsMarkdown,
   truncateIfNeeded,
   getApiKey,
+  clearApiKeyCache,
 } from "../src/index.ts";
 import type { DomainResult, ScanResponse } from "../src/index.ts";
 
@@ -70,6 +71,7 @@ describe("getApiKey", () => {
     } else {
       process.env.CTSCOUT_API_KEY = originalApiKey;
     }
+    clearApiKeyCache();
   });
 
   it("returns the key when present and valid", () => {
@@ -1094,6 +1096,7 @@ describe("callScan", () => {
     } else {
       process.env.CTSCOUT_API_KEY = originalApiKey;
     }
+    clearApiKeyCache();
   });
 
   it("successfully fetches data and returns JSON", async () => {

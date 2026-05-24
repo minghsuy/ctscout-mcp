@@ -158,6 +158,11 @@ type LookupDomainInput = z.infer<typeof LookupDomainInputSchema>;
 
 let cachedApiKey: string | undefined;
 
+// Exported for tests so they can clear the cache when testing missing-key scenarios
+export function clearApiKeyCache(): void {
+  cachedApiKey = undefined;
+}
+
 export function getApiKey(): string {
   if (cachedApiKey !== undefined) {
     return cachedApiKey;
