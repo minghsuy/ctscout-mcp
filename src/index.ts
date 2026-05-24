@@ -788,17 +788,19 @@ const isDirectlyExecuted = (() => {
     let argv1Real: string;
     try {
       argv1Real = realpathSync(process.argv[1]);
-    } catch (e: any) {
-      if (e.code === "ENOENT") {
-        const ext = [".js", ".ts", ".mjs", ".cjs"].find((ext) => {
+    } catch (e) {
+      if (e instanceof Error && (e as NodeJS.ErrnoException).code === "ENOENT") {
+        let resolved: string | undefined;
+        for (const ext of [".js", ".ts", ".mjs", ".cjs"]) {
           try {
-            return realpathSync(process.argv[1] + ext);
+            resolved = realpathSync(process.argv[1] + ext);
+            break;
           } catch {
-            return false;
+            // try next extension
           }
-        });
-        if (ext) {
-          argv1Real = realpathSync(process.argv[1] + ext);
+        }
+        if (resolved !== undefined) {
+          argv1Real = resolved;
         } else {
           return false;
         }
