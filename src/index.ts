@@ -32,6 +32,7 @@ const REQUEST_TIMEOUT_MS = 30_000;
 const CHARACTER_LIMIT = 25_000;
 const SERVER_NAME = "ctscout-mcp-server";
 const SERVER_VERSION = "0.2.5";
+const USER_AGENT = `${SERVER_NAME}/${SERVER_VERSION}`;
 
 // ---------- Types ----------
 
@@ -186,7 +187,7 @@ export async function callScan(body: ScanRequestBody): Promise<ScanResponse> {
         "Content-Type": "application/json",
         Accept: "application/json",
         "X-API-Key": apiKey,
-        "User-Agent": `${SERVER_NAME}/${SERVER_VERSION}`,
+        "User-Agent": USER_AGENT,
       },
       body: JSON.stringify(body),
       signal: controller.signal,
