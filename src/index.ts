@@ -441,7 +441,7 @@ function formatTable(domains: DomainResult[], kind: TableKind): string {
           : "_none_";
         const topEvidence = topEvidenceLine(enriched.evidence);
         rows.push(
-          `| \`${cellSafe(domain, 60)}\` | ${cellSafe(org, 50)} | ${bandEmoji} ${enriched.confidence_band}${overrideTag} | ${signalSummary} | ${topEvidence} |`,
+          `| \`${cellSafe(domain, 60)}\` | ${cellSafe(org, 50)} | ${bandEmoji} ${enriched.confidence_band}${overrideTag} | ${cellSafe(signalSummary)} | ${topEvidence} |`,
         );
       }
     } else if (kind === "scout") {
