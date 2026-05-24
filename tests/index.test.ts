@@ -96,6 +96,35 @@ describe("formatScanAsMarkdown — free tier", () => {
     const md = formatScanAsMarkdown("X Corp", resp);
     expect(md).toContain("> Upgrade to Pro to see all 100 results.");
   });
+
+  it("handles missing fields (undefined-cells bug) gracefully", () => {
+    const md = formatScanAsMarkdown(
+      "Missing Co",
+      freeResponse([
+        {
+          // Intentional missing apex_domain, org, cert_count, subdomain_count
+        },
+      ]),
+    );
+    expect(md).not.toContain("undefined");
+    expect(md).toContain("| `—` | — | — | — |");
+  });
+
+  it("handles origin-shaped data correctly mapped to warehouse table fields", () => {
+    const md = formatScanAsMarkdown(
+      "Origin Data",
+      freeResponse([
+        {
+          // Instead of apex_domain, we have domain from origin
+          domain: "origindomain.com",
+          // Instead of org, we have cert_org_names from origin
+          cert_org_names: ["Origin Org"],
+        },
+      ]),
+    );
+    expect(md).not.toContain("undefined");
+    expect(md).toContain("| `origindomain.com` | Origin Org | — | — |");
+  });
 });
 
 // ---------- Pro-tier rendering ----------
@@ -140,6 +169,81 @@ describe("formatScanAsMarkdown — Pro tier", () => {
     expect(md).toContain("verified via google-site-verification");
     // matched_via shows up to 3, comma-separated
     expect(md).toContain("dns_txt_brand_token, og_site_name_match, vlm_verdict_verified");
+  });
+
+  it("handles missing fields in Phase 5 Pro table (undefined-cells bug) gracefully", () => {
+    const md = formatScanAsMarkdown(
+      "Missing Pro Co",
+      proResponse([
+        {
+          // Intentional missing apex_domain, org, attributed_to
+          enrichment: {
+            confidence_band: "insufficient",
+            weight_total: 0.0,
+            matched_via: [],
+            evidence: {},
+            signal_health: {},
+            vlm_status: "skipped",
+            vlm_override: false,
+          },
+        },
+      ]),
+    );
+    expect(md).not.toContain("undefined");
+    // cellSafe of undefined should output "—" for Domain and Attributed to columns
+    expect(md).toContain("| `—` | — | ⚪ insufficient | _none_ | _no evidence_ |");
+  });
+
+  it("handles origin fields mapping in Phase 5 Pro table correctly", () => {
+    const md = formatScanAsMarkdown(
+      "Missing Pro Co",
+      proResponse([
+        {
+          apex_domain: "origin-pro.com", // Add apex_domain to prevent it from being classified as ScoutResult
+          domain: "origin-pro.com",
+          rdap_org: "Origin RDAP Org",
+          enrichment: {
+            confidence_band: "insufficient",
+            weight_total: 0.0,
+            matched_via: [],
+            evidence: {},
+            signal_health: {},
+            vlm_status: "skipped",
+            vlm_override: false,
+          },
+        },
+      ]),
+    );
+    expect(md).not.toContain("undefined");
+    expect(md).toContain("| `origin-pro.com` | Origin RDAP Org | ⚪ insufficient | _none_ | _no evidence_ |");
+  });
+
+  it("handles missing fields in degraded Phase 5 Pro table (undefined-cells bug) gracefully", () => {
+    const md = formatScanAsMarkdown(
+      "Missing Pro Co",
+      proResponse([
+        {
+          // Intentional missing apex_domain, org, attributed_to, enrichment
+        },
+      ]),
+    );
+    expect(md).not.toContain("undefined");
+    expect(md).toContain("| `—` | — | _missing_ | — | — |");
+  });
+
+  it("handles origin fields mapping in degraded Phase 5 Pro table correctly", () => {
+    const md = formatScanAsMarkdown(
+      "Missing Pro Co",
+      proResponse([
+        {
+          apex_domain: "origin-pro-degraded.com",
+          domain: "origin-pro-degraded.com",
+          cert_org_names: ["Origin Cert Org"],
+        },
+      ]),
+    );
+    expect(md).not.toContain("undefined");
+    expect(md).toContain("| `origin-pro-degraded.com` | Origin Cert Org | _missing_ | — | — |");
   });
 
   it("marks vlm_override=true with a 🚫VLM-veto tag", () => {
