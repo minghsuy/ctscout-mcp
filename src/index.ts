@@ -322,6 +322,7 @@ function buildLegalEntitySuggestions(input: string): string[] {
  *  suggestions don't apply — empty-result there is the DV-only certs
  *  caveat, not a name-form issue. */
 export type FormatHint = { kind: "company" } | { kind: "domain" };
+type TableKind = "free" | "pro" | "scout";
 
 export function formatScanAsMarkdown(
   query: string,
@@ -375,57 +376,88 @@ export function formatScanAsMarkdown(
   }
   lines.push("");
 
-  if (isScoutResult) {
-    lines.push(formatScoutResultTable(response.domains));
-  } else if (isPhase5Pro) {
-    lines.push(formatProTable(response.domains));
-  } else {
-    lines.push(formatFreeTable(response.domains));
-  }
+  const kind: TableKind = isScoutResult ? "scout" : isPhase5Pro ? "pro" : "free";
+  lines.push(formatTable(response.domains, kind));
 
   return lines.join("\n");
 }
 
-function formatFreeTable(domains: DomainResult[]): string {
-  const rows: string[] = [];
-  rows.push("| Domain | Organization | Certs | Subdomains |");
-  rows.push("|---|---|---:|---:|");
-  for (const d of domains) {
-    const domain = d.apex_domain ?? d.domain;
-    const org = d.org ?? d.cert_org_names?.[0] ?? d.rdap_org;
-    rows.push(
-      `| \`${cellSafe(domain, 60)}\` | ${cellSafe(org, 50)} | ${d.cert_count ?? "—"} | ${d.subdomain_count ?? "—"} |`,
-    );
-  }
-  return rows.join("\n");
-}
+// How many sources to show inline before collapsing the rest into a "+N
+// more" overflow indicator. Mirrors the Phase-5 Pro renderer's behavior
+// for cross-path consistency (matched_via is also capped + collapsed).
+const SOURCES_INLINE_LIMIT = 4;
 
-function formatProTable(domains: DomainResult[]): string {
+function formatTable(domains: DomainResult[], kind: TableKind): string {
   const rows: string[] = [];
-  rows.push("| Domain | Attributed to | Band | Signals | Evidence |");
-  rows.push("|---|---|---|---|---|");
-  for (const d of domains) {
-    const domain = d.apex_domain ?? d.domain;
-    const org = d.attributed_to ?? d.org ?? d.cert_org_names?.[0] ?? d.rdap_org;
-    const enriched = d.enrichment;
-    if (enriched == null) {
-      // Mixed-tier response (degraded apex from `_degraded()` in Pro /scan).
-      rows.push(
-        `| \`${cellSafe(domain, 60)}\` | ${cellSafe(org, 50)} | _missing_ | — | — |`,
-      );
-      continue;
-    }
-    const bandEmoji = bandIndicator(enriched.confidence_band);
-    const overrideTag = enriched.vlm_override ? " 🚫VLM-veto" : "";
-    const signalSummary = enriched.matched_via.length
-      ? enriched.matched_via.slice(0, 3).join(", ") +
-        (enriched.matched_via.length > 3 ? `, +${enriched.matched_via.length - 3}` : "")
-      : "_none_";
-    const topEvidence = topEvidenceLine(enriched.evidence);
-    rows.push(
-      `| \`${cellSafe(domain, 60)}\` | ${cellSafe(org, 50)} | ${bandEmoji} ${enriched.confidence_band}${overrideTag} | ${signalSummary} | ${topEvidence} |`,
-    );
+
+  if (kind === "free") {
+    rows.push("| Domain | Organization | Certs | Subdomains |");
+    rows.push("|---|---|---:|---:|");
+  } else if (kind === "pro") {
+    rows.push("| Domain | Attributed to | Band | Signals | Evidence |");
+    rows.push("|---|---|---|---|---|");
+  } else if (kind === "scout") {
+    rows.push("| Domain | Org | Confidence | Sources | Evidence |");
+    rows.push("|---|---|---|---|---|");
   }
+
+  for (const d of domains) {
+    if (kind === "free") {
+      const domain = d.apex_domain ?? d.domain;
+      const org = d.org ?? d.cert_org_names?.[0] ?? d.rdap_org;
+      rows.push(
+        `| \`${cellSafe(domain, 60)}\` | ${cellSafe(org, 50)} | ${d.cert_count ?? "—"} | ${d.subdomain_count ?? "—"} |`,
+      );
+    } else if (kind === "pro") {
+      const domain = d.apex_domain ?? d.domain;
+      const org = d.attributed_to ?? d.org ?? d.cert_org_names?.[0] ?? d.rdap_org;
+      const enriched = d.enrichment;
+      if (enriched == null) {
+        // Mixed-tier response (degraded apex from `_degraded()` in Pro /scan).
+        rows.push(
+          `| \`${cellSafe(domain, 60)}\` | ${cellSafe(org, 50)} | _missing_ | — | — |`,
+        );
+      } else {
+        const bandEmoji = bandIndicator(enriched.confidence_band);
+        const overrideTag = enriched.vlm_override ? " 🚫VLM-veto" : "";
+        const signalSummary = enriched.matched_via.length
+          ? enriched.matched_via.slice(0, 3).join(", ") +
+            (enriched.matched_via.length > 3 ? `, +${enriched.matched_via.length - 3}` : "")
+          : "_none_";
+        const topEvidence = topEvidenceLine(enriched.evidence);
+        rows.push(
+          `| \`${cellSafe(domain, 60)}\` | ${cellSafe(org, 50)} | ${bandEmoji} ${enriched.confidence_band}${overrideTag} | ${signalSummary} | ${topEvidence} |`,
+        );
+      }
+    } else if (kind === "scout") {
+      const domain = d.domain;
+      const certOrgs = d.cert_org_names ?? [];
+      // Org fallback chain: cert_org_names[0] -> rdap_org -> org. cellSafe
+      // turns undefined into "—" so we don't need a trailing `?? undefined`.
+      const org = certOrgs[0] ?? d.rdap_org ?? d.org;
+      const conf = d.confidence;
+      const confCell =
+        conf != null ? `${confidenceBand(conf)} (${conf.toFixed(2)})` : "—";
+      const sources = d.sources ?? [];
+      // Show first N sources and append a "+M" indicator for any overflow,
+      // so callers can tell when they're looking at an incomplete list.
+      const overflowSources = sources.length - SOURCES_INLINE_LIMIT;
+      const sourcesCell =
+        sources.slice(0, SOURCES_INLINE_LIMIT).join(", ") +
+        (overflowSources > 0 ? `, +${overflowSources}` : "");
+      // Type-guard rather than cast: the `evidence` element type is
+      // Record<string, unknown>, so `description` is `unknown`. If the
+      // origin ever sends a non-string description (number, object, null),
+      // we fall back to em-dash instead of stringifying via cellSafe.
+      const rawDescription = d.evidence?.[0]?.description;
+      const firstDescription =
+        typeof rawDescription === "string" ? rawDescription : undefined;
+      rows.push(
+        `| \`${cellSafe(domain, 60)}\` | ${cellSafe(org, 50)} | ${confCell} | ${cellSafe(sourcesCell, 40)} | ${cellSafe(firstDescription, 80)} |`,
+      );
+    }
+  }
+
   return rows.join("\n");
 }
 
@@ -450,45 +482,6 @@ function cellSafe(s: string | null | undefined, maxLen = 80): string {
   const stripped = String(s).replace(/\|/g, "│").replace(/[\r\n]+/g, " ").trim();
   if (stripped.length === 0) return "—";
   return stripped.length > maxLen ? `${stripped.slice(0, maxLen - 1)}…` : stripped;
-}
-
-// How many sources to show inline before collapsing the rest into a "+N
-// more" overflow indicator. Mirrors the Phase-5 Pro renderer's behavior
-// for cross-path consistency (matched_via is also capped + collapsed).
-const SOURCES_INLINE_LIMIT = 4;
-
-function formatScoutResultTable(domains: DomainResult[]): string {
-  const rows: string[] = [];
-  rows.push("| Domain | Org | Confidence | Sources | Evidence |");
-  rows.push("|---|---|---|---|---|");
-  for (const d of domains) {
-    const domain = d.domain;
-    const certOrgs = d.cert_org_names ?? [];
-    // Org fallback chain: cert_org_names[0] -> rdap_org -> org. cellSafe
-    // turns undefined into "—" so we don't need a trailing `?? undefined`.
-    const org = certOrgs[0] ?? d.rdap_org ?? d.org;
-    const conf = d.confidence;
-    const confCell =
-      conf != null ? `${confidenceBand(conf)} (${conf.toFixed(2)})` : "—";
-    const sources = d.sources ?? [];
-    // Show first N sources and append a "+M" indicator for any overflow,
-    // so callers can tell when they're looking at an incomplete list.
-    const overflowSources = sources.length - SOURCES_INLINE_LIMIT;
-    const sourcesCell =
-      sources.slice(0, SOURCES_INLINE_LIMIT).join(", ") +
-      (overflowSources > 0 ? `, +${overflowSources}` : "");
-    // Type-guard rather than cast: the `evidence` element type is
-    // Record<string, unknown>, so `description` is `unknown`. If the
-    // origin ever sends a non-string description (number, object, null),
-    // we fall back to em-dash instead of stringifying via cellSafe.
-    const rawDescription = d.evidence?.[0]?.description;
-    const firstDescription =
-      typeof rawDescription === "string" ? rawDescription : undefined;
-    rows.push(
-      `| \`${cellSafe(domain, 60)}\` | ${cellSafe(org, 50)} | ${confCell} | ${cellSafe(sourcesCell, 40)} | ${cellSafe(firstDescription, 80)} |`,
-    );
-  }
-  return rows.join("\n");
 }
 
 // ---------- Phase-5 fictional Pro renderer helpers (kept for compat) ----------
