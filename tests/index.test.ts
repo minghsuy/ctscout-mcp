@@ -22,7 +22,7 @@
 // CTSCOUT_API_KEY at call time, so we want it available even though
 // these unit tests never make HTTP calls.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, beforeEach, afterEach } from "vitest";
 
 import {
   ApiError,
@@ -30,6 +30,7 @@ import {
   explainError,
   formatScanAsMarkdown,
   truncateIfNeeded,
+  getApiKey,
 } from "../src/index.ts";
 import type { DomainResult, ScanResponse } from "../src/index.ts";
 
@@ -54,6 +55,42 @@ function proResponse(domains: DomainResult[] = []): ScanResponse {
 }
 
 // ---------- Free-tier rendering: existing v0.1.0 shape unchanged ----------
+
+describe("getApiKey", () => {
+  let originalApiKey: string | undefined;
+
+  beforeEach(() => {
+    originalApiKey = process.env.CTSCOUT_API_KEY;
+  });
+
+  afterEach(() => {
+    if (originalApiKey === undefined) {
+      delete process.env.CTSCOUT_API_KEY;
+    } else {
+      process.env.CTSCOUT_API_KEY = originalApiKey;
+    }
+  });
+
+  it("returns the key when present and valid", () => {
+    process.env.CTSCOUT_API_KEY = "valid_key_123";
+    expect(getApiKey()).toBe("valid_key_123");
+  });
+
+  it("throws an error when the key is missing", () => {
+    delete process.env.CTSCOUT_API_KEY;
+    expect(() => getApiKey()).toThrowError(/CTSCOUT_API_KEY environment variable is not set/);
+  });
+
+  it("throws an error when the key is empty string", () => {
+    process.env.CTSCOUT_API_KEY = "";
+    expect(() => getApiKey()).toThrowError(/CTSCOUT_API_KEY environment variable is not set/);
+  });
+
+  it("throws an error when the key is only whitespace", () => {
+    process.env.CTSCOUT_API_KEY = "   \n\t  ";
+    expect(() => getApiKey()).toThrowError(/CTSCOUT_API_KEY environment variable is not set/);
+  });
+});
 
 describe("formatScanAsMarkdown — free tier", () => {
   it("renders the legacy free-tier table when no Pro fields present", () => {
