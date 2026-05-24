@@ -225,11 +225,17 @@ export class TimeoutError extends Error {
   }
 }
 
+function escapeMarkdown(text: string): string {
+  if (!text) return "";
+  return text.replace(/([\\`*_[\]()<>!])/g, "\\$1");
+}
+
 export function explainError(err: unknown): string {
   if (err instanceof ApiError) {
+    const safeBody = escapeMarkdown(err.responseBody);
     switch (err.status) {
       case 400:
-        return `Bad request: ${err.responseBody}. Check the input parameters.`;
+        return `Bad request: ${safeBody}. Check the input parameters.`;
       case 401:
         return (
           "Invalid or missing CTSCOUT_API_KEY. " +
@@ -248,7 +254,7 @@ export function explainError(err: unknown): string {
       case 503:
         return `ctscout server error (${err.status}). Try again in a moment, or check https://ctscout.dev/health.`;
       default:
-        return `ctscout API error: HTTP ${err.status}: ${err.responseBody}`;
+        return `ctscout API error: HTTP ${err.status}: ${safeBody}`;
     }
   }
   if (err instanceof TimeoutError) {

@@ -379,7 +379,32 @@ describe("explainError", () => {
   it("maps 400 to a bad-request message including the body", () => {
     const msg = explainError(new ApiError(400, "Invalid company_name"));
     expect(msg).toContain("Bad request");
-    expect(msg).toContain("Invalid company_name");
+    expect(msg).toContain("Invalid company\\_name");
+  });
+
+  it("escapes markdown characters in 400 response body to prevent injection", () => {
+    const maliciousBody = "Error `code` with [link](https://evil.com) and ![img](foo) and _italic_ and *bold*";
+    const msg = explainError(new ApiError(400, maliciousBody));
+    expect(msg).toContain("Bad request");
+    expect(msg).not.toContain("`code`");
+    expect(msg).not.toContain("[link]");
+    expect(msg).not.toContain("![img]");
+    // Check that characters were escaped
+    expect(msg).toContain("\\`code\\`");
+    expect(msg).toContain("\\[link\\]\\(https://evil.com\\)");
+    expect(msg).toContain("\\!\\[img\\]\\(foo\\)");
+    expect(msg).toContain("\\_italic\\_");
+    expect(msg).toContain("\\*bold\\*");
+  });
+
+  it("escapes markdown characters in default API error response body", () => {
+    const maliciousBody = "Unknown error <script>alert(1)</script> [link](x)";
+    const msg = explainError(new ApiError(418, maliciousBody));
+    expect(msg).toContain("HTTP 418");
+    expect(msg).not.toContain("<script>");
+    expect(msg).not.toContain("[link]");
+    expect(msg).toContain("\\<script\\>alert\\(1\\)\\</script\\>");
+    expect(msg).toContain("\\[link\\]\\(x\\)");
   });
 
   it("maps 403 to a revoked-key message", () => {
