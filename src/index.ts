@@ -174,7 +174,7 @@ interface ScanRequestBody {
   seed_domain?: string[];
 }
 
-async function callScan(body: ScanRequestBody): Promise<ScanResponse> {
+export async function callScan(body: ScanRequestBody): Promise<ScanResponse> {
   const apiKey = getApiKey();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);

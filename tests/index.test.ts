@@ -22,12 +22,13 @@
 // CTSCOUT_API_KEY at call time, so we want it available even though
 // these unit tests never make HTTP calls.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 import {
   ApiError,
   TimeoutError,
   explainError,
+  callScan,
   formatScanAsMarkdown,
   truncateIfNeeded,
 } from "../src/index.ts";
@@ -880,5 +881,41 @@ describe("formatScanAsMarkdown - legal-entity did-you-mean suggestions", () => {
       kind: "company",
     });
     expect(b).not.toContain("Try one of these variants");
+  });
+});
+
+describe("callScan", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("throws ApiError when response is not ok", async () => {
+    vi.stubGlobal("fetch", async () => {
+      return {
+        ok: false,
+        status: 400,
+        text: async () => "Bad Request",
+      };
+    });
+
+    await expect(callScan({ company_name: "test" })).rejects.toThrow(ApiError);
+    await expect(callScan({ company_name: "test" })).rejects.toMatchObject({
+      status: 400,
+      responseBody: "Bad Request",
+    });
+  });
+
+  it("throws TimeoutError on AbortError", async () => {
+    vi.stubGlobal("fetch", async () => {
+      const error = new Error("AbortError");
+      error.name = "AbortError";
+      throw error;
+    });
+
+    await expect(callScan({ company_name: "test" })).rejects.toThrow(TimeoutError);
   });
 });
