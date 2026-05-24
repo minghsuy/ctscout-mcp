@@ -314,8 +314,8 @@ function buildLegalEntitySuggestions(input: string): string[] {
 
   // If the user already included "Insurance" or "Financial" we don't need to append it again,
   // just the legal suffix. If they didn't, we should provide the sector-specific variants.
-  const hasFinIns = /\b(Insurance|Financial)\b/i.test(input);
-  if (!hasFinIns) {
+  const hasFinancialOrInsuranceTerm = /\b(Insurance|Financial)\b/i.test(input);
+  if (!hasFinancialOrInsuranceTerm) {
     suggestions.push(
       "",
       `Or, if this is a financial/insurance brand:`,

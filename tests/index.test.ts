@@ -1119,6 +1119,8 @@ describe("formatScanAsMarkdown - legal-entity did-you-mean suggestions", () => {
     });
     expect(md).toContain("• Hartford Financial Companies");
     expect(md).toContain("• The Hartford Financial");
+    // "Financial" keyword suppresses the financial/insurance fallback block
+    expect(md).not.toContain("Or, if this is a financial/insurance brand:");
   });
 
   it("suggestion block lists base variants and fallback", () => {
