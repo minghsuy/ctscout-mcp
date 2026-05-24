@@ -384,8 +384,10 @@ function formatFreeTable(domains: DomainResult[]): string {
   rows.push("| Domain | Organization | Certs | Subdomains |");
   rows.push("|---|---|---:|---:|");
   for (const d of domains) {
+    const domain = d.apex_domain ?? d.domain;
+    const org = d.org ?? d.cert_org_names?.[0] ?? d.rdap_org;
     rows.push(
-      `| \`${d.apex_domain}\` | ${d.org} | ${d.cert_count} | ${d.subdomain_count} |`,
+      `| \`${cellSafe(domain, 60)}\` | ${cellSafe(org, 50)} | ${d.cert_count ?? "—"} | ${d.subdomain_count ?? "—"} |`,
     );
   }
   return rows.join("\n");
@@ -396,11 +398,13 @@ function formatProTable(domains: DomainResult[]): string {
   rows.push("| Domain | Attributed to | Band | Signals | Evidence |");
   rows.push("|---|---|---|---|---|");
   for (const d of domains) {
+    const domain = d.apex_domain ?? d.domain;
+    const org = d.attributed_to ?? d.org ?? d.cert_org_names?.[0] ?? d.rdap_org;
     const enriched = d.enrichment;
     if (enriched == null) {
       // Mixed-tier response (degraded apex from `_degraded()` in Pro /scan).
       rows.push(
-        `| \`${d.apex_domain}\` | ${d.attributed_to ?? d.org} | _missing_ | — | — |`,
+        `| \`${cellSafe(domain, 60)}\` | ${cellSafe(org, 50)} | _missing_ | — | — |`,
       );
       continue;
     }
@@ -412,7 +416,7 @@ function formatProTable(domains: DomainResult[]): string {
       : "_none_";
     const topEvidence = topEvidenceLine(enriched.evidence);
     rows.push(
-      `| \`${d.apex_domain}\` | ${d.attributed_to ?? d.org} | ${bandEmoji} ${enriched.confidence_band}${overrideTag} | ${signalSummary} | ${topEvidence} |`,
+      `| \`${cellSafe(domain, 60)}\` | ${cellSafe(org, 50)} | ${bandEmoji} ${enriched.confidence_band}${overrideTag} | ${signalSummary} | ${topEvidence} |`,
     );
   }
   return rows.join("\n");
