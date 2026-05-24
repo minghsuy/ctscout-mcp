@@ -156,7 +156,12 @@ type LookupDomainInput = z.infer<typeof LookupDomainInputSchema>;
 
 // ---------- Shared utilities ----------
 
+let cachedApiKey: string | undefined;
+
 export function getApiKey(): string {
+  if (cachedApiKey !== undefined) {
+    return cachedApiKey;
+  }
   const key = process.env.CTSCOUT_API_KEY;
   if (!key || key.trim().length === 0) {
     throw new Error(
@@ -166,6 +171,7 @@ export function getApiKey(): string {
         "~/.claude/mcp.json under env.CTSCOUT_API_KEY).",
     );
   }
+  cachedApiKey = key;
   return key;
 }
 
