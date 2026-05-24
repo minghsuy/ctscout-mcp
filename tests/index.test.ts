@@ -1268,8 +1268,8 @@ describe("callScan", () => {
 
 describe("markdown-escaping chokepoint guard — free-tier table (cellSafe)", () => {
   // Free-tier row format: | `domain` | org | cert_count | subdomain_count |
-  // That is 4 cells separated by 5 `|` chars.
-  const FREE_TIER_PIPE_COUNT = 5;
+  // That is 4 cells separated by 5 `|` chars (1 leading delimiter + 4 cell separators).
+  const FREE_TIER_PIPE_COUNT = 5; // 4 cells + 1 leading delimiter
 
   it("pipe in org is replaced with Unicode lookalike (│), not bare |", () => {
     const md = formatScanAsMarkdown("Test", {
@@ -1331,7 +1331,7 @@ describe("markdown-escaping chokepoint guard — free-tier table (cellSafe)", ()
 });
 
 describe("markdown-escaping chokepoint guard — scout-tier table (cellSafe)", () => {
-  function scoutRow(overrides: Partial<import("../src/index.ts").DomainResult>): import("../src/index.ts").ScanResponse {
+  function scoutRow(overrides: Partial<DomainResult>): ScanResponse {
     return {
       domains: [{
         domain: "safe.com",
@@ -1344,7 +1344,7 @@ describe("markdown-escaping chokepoint guard — scout-tier table (cellSafe)", (
     };
   }
 
-  const DANGEROUS_PAIRS: Array<[string, string, Partial<import("../src/index.ts").DomainResult>]> = [
+  const DANGEROUS_PAIRS: Array<[string, string, Partial<DomainResult>]> = [
     ["org with pipe", "org | injection", { cert_org_names: ["org | injection"] }],
     ["org with newline", "org\nnewline", { cert_org_names: ["org\nnewline"] }],
     ["domain with pipe", "safe.com|evil", { domain: "safe.com|evil" }],
@@ -1352,6 +1352,7 @@ describe("markdown-escaping chokepoint guard — scout-tier table (cellSafe)", (
     ["evidence description with pipe", "evidence | injected", { evidence: [{ description: "evidence | injected" }] }],
     ["evidence description with newline", "line1\nline2", { evidence: [{ description: "line1\nline2" }] }],
     ["sources with pipe", "src|evil", { sources: ["src|evil"] }],
+    ["org with CRLF", "org\r\nnewline", { cert_org_names: ["org\r\nnewline"] }],
   ];
 
   for (const [label, , overrides] of DANGEROUS_PAIRS) {
@@ -1449,5 +1450,62 @@ describe("markdown-escaping chokepoint guard — pro (phase-5) table (escapeForT
     expect(dataRows).toHaveLength(1);
     expect(dataRows[0]).not.toMatch(/[\r\n]/);
     expect(dataRows[0]).toContain("Org newline");
+  });
+
+  it("pipe in signalSummary (matched_via) is neutralised (cellSafe path)", () => {
+    // matched_via values come from the API response; a pipe in a signal name
+    // would break the markdown table. This test would have FAILED before the
+    // production fix that routed signalSummary through cellSafe().
+    const md = formatScanAsMarkdown("Test", {
+      domains: [{
+        apex_domain: "safe.com",
+        attributed_to: "Safe Org",
+        enrichment: { ...baseEnrichment, matched_via: ["signal|one", "signal|two"] },
+      }],
+      total: 1,
+      truncated: false,
+      source: "live-enriched",
+    });
+    const dataRows = md.split("\n").filter((l) => l.startsWith("|") && !l.startsWith("| Domain") && !l.startsWith("|---|"));
+    expect(dataRows).toHaveLength(1);
+    const row = dataRows[0];
+    // Pro rows have 5 cells → 6 unescaped pipes.
+    expect((row.match(/(?<!\\)\|/g) ?? []).length, `unescaped pipe leaked: ${row}`).toBe(6);
+    expect(row).not.toContain("signal|one");
+    expect(row).toContain("signal│one");
+    expect(row).toContain("signal│two");
+  });
+
+  it("newline in signalSummary (matched_via) is collapsed — no row split", () => {
+    const md = formatScanAsMarkdown("Test", {
+      domains: [{
+        apex_domain: "safe.com",
+        attributed_to: "Safe Org",
+        enrichment: { ...baseEnrichment, matched_via: ["signal\none", "sig\r\ntwo"] },
+      }],
+      total: 1,
+      truncated: false,
+      source: "live-enriched",
+    });
+    const dataRows = md.split("\n").filter((l) => l.startsWith("|") && !l.startsWith("| Domain") && !l.startsWith("|---|"));
+    expect(dataRows).toHaveLength(1);
+    expect(dataRows[0]).not.toMatch(/[\r\n]/);
+  });
+
+  it("backtick and hash in signalSummary pass through cellSafe without breaking structure", () => {
+    const md = formatScanAsMarkdown("Test", {
+      domains: [{
+        apex_domain: "safe.com",
+        attributed_to: "Safe Org",
+        enrichment: { ...baseEnrichment, matched_via: ["`backtick`", "# hash"] },
+      }],
+      total: 1,
+      truncated: false,
+      source: "live-enriched",
+    });
+    const dataRows = md.split("\n").filter((l) => l.startsWith("|") && !l.startsWith("| Domain") && !l.startsWith("|---|"));
+    expect(dataRows).toHaveLength(1);
+    // Still exactly 6 unescaped pipes — structure intact.
+    expect((dataRows[0].match(/(?<!\\)\|/g) ?? []).length).toBe(6);
   });
 });
