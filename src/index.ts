@@ -156,7 +156,7 @@ type LookupDomainInput = z.infer<typeof LookupDomainInputSchema>;
 
 // ---------- Shared utilities ----------
 
-function getApiKey(): string {
+export function getApiKey(): string {
   const key = process.env.CTSCOUT_API_KEY;
   if (!key || key.trim().length === 0) {
     throw new Error(
