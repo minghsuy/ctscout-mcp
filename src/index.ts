@@ -385,7 +385,7 @@ function formatFreeTable(domains: DomainResult[]): string {
   rows.push("|---|---|---:|---:|");
   for (const d of domains) {
     rows.push(
-      `| \`${d.apex_domain}\` | ${d.org} | ${d.cert_count} | ${d.subdomain_count} |`,
+      `| \`${escapeForTable(d.apex_domain)}\` | ${escapeForTable(d.org)} | ${d.cert_count} | ${d.subdomain_count} |`,
     );
   }
   return rows.join("\n");
@@ -400,7 +400,7 @@ function formatProTable(domains: DomainResult[]): string {
     if (enriched == null) {
       // Mixed-tier response (degraded apex from `_degraded()` in Pro /scan).
       rows.push(
-        `| \`${d.apex_domain}\` | ${d.attributed_to ?? d.org} | _missing_ | — | — |`,
+        `| \`${escapeForTable(d.apex_domain)}\` | ${escapeForTable(d.attributed_to ?? d.org)} | _missing_ | — | — |`,
       );
       continue;
     }
@@ -412,7 +412,7 @@ function formatProTable(domains: DomainResult[]): string {
       : "_none_";
     const topEvidence = topEvidenceLine(enriched.evidence);
     rows.push(
-      `| \`${d.apex_domain}\` | ${d.attributed_to ?? d.org} | ${bandEmoji} ${enriched.confidence_band}${overrideTag} | ${signalSummary} | ${topEvidence} |`,
+      `| \`${escapeForTable(d.apex_domain)}\` | ${escapeForTable(d.attributed_to ?? d.org)} | ${bandEmoji} ${enriched.confidence_band}${overrideTag} | ${escapeForTable(signalSummary)} | ${topEvidence} |`,
     );
   }
   return rows.join("\n");
@@ -525,8 +525,9 @@ function topEvidenceLine(evidence: Record<string, string>): string {
 // Defensive: pipe AND any line terminator (CR, LF, CRLF) would break the
 // markdown table. Replace pipes with backslash-pipe and any line terminator
 // (or terminator pair) with a single space.
-function escapeForTable(s: string): string {
-  return s.replace(/\|/g, "\\|").replace(/[\r\n]+/g, " ");
+function escapeForTable(s: string | undefined | null): string {
+  if (s == null) return "—";
+  return String(s).replace(/\|/g, "\\|").replace(/[\r\n]+/g, " ");
 }
 
 export function truncateIfNeeded(
