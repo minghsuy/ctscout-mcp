@@ -1002,9 +1002,43 @@ describe("formatScanAsMarkdown - legal-entity did-you-mean suggestions", () => {
       kind: "company",
     });
     expect(md).toContain("No domains found");
+    // Base variants
     expect(md).toContain("• Travelers Insurance Companies");
+    expect(md).toContain("• Travelers Insurance Company");
     expect(md).toContain("• Travelers Insurance Group");
     expect(md).toContain("• The Travelers Insurance");
+    // Does not include fallback block since "Insurance" is already in input
+    expect(md).not.toContain("Or, if this is a financial/insurance brand:");
+  });
+
+  it("non-financial brand-name input emits base suggestions and financial fallback", () => {
+    const md = formatScanAsMarkdown("Spotify", freeResponse([]), {
+      kind: "company",
+    });
+    expect(md).toContain("No domains found");
+    expect(md).toContain("• Spotify Companies");
+    expect(md).toContain("• Spotify Company");
+    expect(md).toContain("• Spotify Group");
+    expect(md).toContain("• The Spotify");
+    expect(md).toContain("Or, if this is a financial/insurance brand:");
+    expect(md).toContain("• Spotify Insurance Company");
+  });
+
+  it("short financial brand-name input emits both base and financial fallback", () => {
+    const md = formatScanAsMarkdown("Travelers", freeResponse([]), {
+      kind: "company",
+    });
+    expect(md).toContain("No domains found");
+    // Base variants
+    expect(md).toContain("• Travelers Companies");
+    expect(md).toContain("• Travelers Company");
+    expect(md).toContain("• Travelers Group");
+    expect(md).toContain("• The Travelers");
+    // Financial/insurance fallback block
+    expect(md).toContain("Or, if this is a financial/insurance brand:");
+    expect(md).toContain("• Travelers Insurance Company");
+    expect(md).toContain("• Travelers Financial Services Group");
+    expect(md).toContain("• The Travelers Financial Services Group, Inc.");
   });
 
   it("legal-entity-shaped input skips suggestions", () => {
@@ -1085,14 +1119,16 @@ describe("formatScanAsMarkdown - legal-entity did-you-mean suggestions", () => {
     });
     expect(md).toContain("• Hartford Financial Companies");
     expect(md).toContain("• The Hartford Financial");
+    // "Financial" keyword suppresses the financial/insurance fallback block
+    expect(md).not.toContain("Or, if this is a financial/insurance brand:");
   });
 
-  it("suggestion block lists five variants", () => {
+  it("suggestion block lists base variants and fallback", () => {
     const md = formatScanAsMarkdown("Foo", freeResponse([]), {
       kind: "company",
     });
     const bullets = md.split("\n").filter((l) => l.startsWith("  •"));
-    expect(bullets).toHaveLength(5);
+    expect(bullets).toHaveLength(9); // 6 base + 3 financial
   });
 
   it("case-insensitive suffix detection", () => {
