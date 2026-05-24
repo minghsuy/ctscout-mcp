@@ -546,22 +546,39 @@ export function truncateIfNeeded(
   text: string;
   structured: ScanResponse;
 } {
-  if (text.length <= CHARACTER_LIMIT) {
-    return { text, structured };
+  let currentText = text;
+  let currentStructured = structured;
+
+  while (currentText.length > CHARACTER_LIMIT && currentStructured.domains.length > 0) {
+    // If we're down to 1 domain and still over the limit, we must break to avoid infinite loop
+    if (currentStructured.domains.length === 1) {
+      currentStructured = {
+        ...currentStructured,
+        domains: [],
+        truncated: true,
+        upgrade_hint:
+          `Response truncated to 0 of ${structured.domains.length} domains ` +
+          `to stay under ${CHARACTER_LIMIT} chars. Re-run with response_format='json' ` +
+          `or refine the query.`,
+      };
+      currentText = formatScanAsMarkdown("(truncated)", currentStructured);
+      break;
+    }
+
+    const halved = Math.max(1, Math.floor(currentStructured.domains.length / 2));
+    currentStructured = {
+      ...currentStructured,
+      domains: currentStructured.domains.slice(0, halved),
+      truncated: true,
+      upgrade_hint:
+        `Response truncated to ${halved} of ${structured.domains.length} domains ` +
+        `to stay under ${CHARACTER_LIMIT} chars. Re-run with response_format='json' ` +
+        `or refine the query.`,
+    };
+    currentText = formatScanAsMarkdown("(truncated)", currentStructured);
   }
-  // Halve domain list and re-render
-  const halved = Math.max(1, Math.floor(structured.domains.length / 2));
-  const truncated: ScanResponse = {
-    ...structured,
-    domains: structured.domains.slice(0, halved),
-    truncated: true,
-    upgrade_hint:
-      `Response truncated to ${halved} of ${structured.domains.length} domains ` +
-      `to stay under ${CHARACTER_LIMIT} chars. Re-run with response_format='json' ` +
-      `or refine the query.`,
-  };
-  const newText = formatScanAsMarkdown("(truncated)", truncated);
-  return { text: newText, structured: truncated };
+
+  return { text: currentText, structured: currentStructured };
 }
 
 // ---------- Server + tools ----------

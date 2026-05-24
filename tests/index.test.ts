@@ -499,9 +499,8 @@ describe("truncateIfNeeded", () => {
   });
 
   it("halves the list and re-renders when text exceeds the limit", () => {
-    // Build a Pro response that fits the typical one-halve recovery
-    // case (current truncateIfNeeded halves once and returns; if a
-    // future change makes it iterative, this test stays valid).
+    // Build a Pro response that fits the typical multi-halve recovery
+    // case (truncateIfNeeded is now iterative, halving until under the limit).
     // Each row is ~100 chars; 250 rows ≈ 25k chars in pre-trunc text,
     // halved to 125 ≈ 12.5k.
     const domains: DomainResult[] = Array.from({ length: 350 }, (_, i) => ({
@@ -528,6 +527,36 @@ describe("truncateIfNeeded", () => {
     expect(result.structured.truncated).toBe(true);
     expect(result.structured.domains.length).toBeLessThan(domains.length);
     expect(result.structured.upgrade_hint).toContain("Response truncated");
+  });
+
+  it("zeroes out domains when a single domain still exceeds the limit", () => {
+    // Construct a 1-domain response whose markdown is over the limit by
+    // giving it a very large evidence string that inflates the rendered text.
+    const bigEvidence = "x".repeat(30_000);
+    const domain: DomainResult = {
+      org: "Big Co",
+      apex_domain: "big.example",
+      cert_count: 1,
+      subdomain_count: 0,
+      attributed_to: "Big Co",
+      enrichment: {
+        confidence_band: "verified",
+        weight_total: 5.0,
+        matched_via: ["dns_txt_brand_token"],
+        evidence: { dns_txt_brand_token: bigEvidence },
+        signal_health: {},
+        vlm_status: "cached",
+        vlm_override: false,
+      },
+    };
+    const resp = proResponse([domain]);
+    const md = formatScanAsMarkdown("Big Co", resp);
+    expect(md.length).toBeGreaterThan(25_000);
+    const result = truncateIfNeeded(md, resp);
+    expect(result.text.length).toBeLessThanOrEqual(25_000);
+    expect(result.structured.domains.length).toBe(0);
+    expect(result.structured.truncated).toBe(true);
+    expect(result.structured.upgrade_hint).toContain("0 of 1 domains");
   });
 });
 
