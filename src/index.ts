@@ -527,9 +527,10 @@ function topEvidenceLine(evidence: Record<string, string>): string {
     }
   }
   // Fallback: first key in dict order
-  const keys = Object.keys(evidence);
-  if (keys.length === 0) return "_no evidence_";
-  return escapeForTable(evidence[keys[0]]);
+  for (const key in evidence) {
+    return escapeForTable(evidence[key]);
+  }
+  return "_no evidence_";
 }
 
 // Defensive: pipe AND any line terminator (CR, LF, CRLF) would break the
