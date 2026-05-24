@@ -22,11 +22,12 @@
 // CTSCOUT_API_KEY at call time, so we want it available even though
 // these unit tests never make HTTP calls.
 
-import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   ApiError,
   TimeoutError,
+  callScan,
   explainError,
   formatScanAsMarkdown,
   truncateIfNeeded,
@@ -1074,5 +1075,97 @@ describe("formatScanAsMarkdown - legal-entity did-you-mean suggestions", () => {
       kind: "company",
     });
     expect(b).not.toContain("Try one of these variants");
+  });
+});
+
+describe("callScan", () => {
+  let originalFetch: typeof globalThis.fetch;
+  let originalApiKey: string | undefined;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    originalApiKey = process.env.CTSCOUT_API_KEY;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    if (originalApiKey === undefined) {
+      delete process.env.CTSCOUT_API_KEY;
+    } else {
+      process.env.CTSCOUT_API_KEY = originalApiKey;
+    }
+  });
+
+  it("successfully fetches data and returns JSON", async () => {
+    process.env.CTSCOUT_API_KEY = "test-key";
+    const mockResponse: ScanResponse = { domains: [] };
+
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => mockResponse,
+    } as Response);
+
+    const result = await callScan({ company_name: "Test" });
+
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/scan"),
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          "X-API-Key": "test-key",
+          "Content-Type": "application/json",
+        }),
+        body: JSON.stringify({ company_name: "Test" }),
+      })
+    );
+    expect(result).toEqual(mockResponse);
+  });
+
+  it("throws error if CTSCOUT_API_KEY is not set", async () => {
+    delete process.env.CTSCOUT_API_KEY;
+    await expect(callScan({ company_name: "Test" })).rejects.toThrow(
+      "CTSCOUT_API_KEY environment variable is not set"
+    );
+  });
+
+  it("throws error if CTSCOUT_API_KEY is empty", async () => {
+    process.env.CTSCOUT_API_KEY = "   ";
+    await expect(callScan({ company_name: "Test" })).rejects.toThrow(
+      "CTSCOUT_API_KEY environment variable is not set"
+    );
+  });
+
+  it("throws ApiError if fetch responds with non-200 status", async () => {
+    process.env.CTSCOUT_API_KEY = "test-key";
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      text: async () => "Unauthorized",
+    } as Response);
+
+    let caughtError: unknown;
+    try {
+      await callScan({ company_name: "Test" });
+    } catch (err) {
+      caughtError = err;
+    }
+
+    expect(caughtError).toBeInstanceOf(ApiError);
+    expect((caughtError as ApiError).status).toBe(401);
+    expect((caughtError as ApiError).responseBody).toBe("Unauthorized");
+  });
+
+  it("throws TimeoutError if fetch throws AbortError", async () => {
+    process.env.CTSCOUT_API_KEY = "test-key";
+
+    const abortError = new Error("The operation was aborted");
+    abortError.name = "AbortError";
+
+    globalThis.fetch = vi.fn().mockRejectedValue(abortError);
+
+    await expect(callScan({ company_name: "Test" })).rejects.toThrowError(
+      TimeoutError
+    );
   });
 });
