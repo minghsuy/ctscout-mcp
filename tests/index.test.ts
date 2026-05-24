@@ -83,6 +83,23 @@ describe("formatScanAsMarkdown — free tier", () => {
     expect(md).toContain("Try a partial company name");
   });
 
+  it("escapes markdown characters in domain and org fields to prevent injection", () => {
+    const md = formatScanAsMarkdown(
+      "Evil Inc",
+      freeResponse([
+        {
+          org: "Evil Inc | injected column",
+          apex_domain: "evil.com\nmalicious",
+          cert_count: 1,
+          subdomain_count: 0,
+        },
+      ]),
+    );
+    expect(md).toContain("| `evil.com malicious` | Evil Inc │ injected column | 1 | 0 |");
+    expect(md).not.toContain("Evil Inc | injected column");
+    expect(md).not.toContain("evil.com\nmalicious");
+  });
+
   it("surfaces upgrade_hint when truncated", () => {
     const resp: ScanResponse = {
       domains: [
@@ -244,6 +261,17 @@ describe("formatScanAsMarkdown — Pro tier", () => {
     );
     expect(md).not.toContain("undefined");
     expect(md).toContain("| `origin-pro-degraded.com` | Origin Cert Org | _missing_ | — | — |");
+  });
+
+  it("escapes markdown characters in domain and attributed_to fields in Pro table", () => {
+    const evilRow: DomainResult = {
+      ...verifiedRow,
+      apex_domain: "evil.com|x",
+      attributed_to: "Evil Inc\ncorp",
+    };
+
+    const md = formatScanAsMarkdown("Evil Inc", proResponse([evilRow]));
+    expect(md).toContain("| `evil.com│x` | Evil Inc corp | ✅ verified | dns_txt_brand_token, og_site_name_match, vlm_verdict_verified | verified via google-site-verification, atlassian-domain-verification |");
   });
 
   it("marks vlm_override=true with a 🚫VLM-veto tag", () => {
