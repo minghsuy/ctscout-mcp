@@ -296,23 +296,37 @@ const LEGAL_ENTITY_SUFFIXES =
   /\b(Inc|Corp|Corporation|Group|Companies|Company|Co|Ltd|LLC|L\.L\.C\.|AG|SA|S\.A\.|N\.V\.|GmbH|plc|Holdings|Holding)\.?$/i;
 
 function buildLegalEntitySuggestions(input: string): string[] {
-  // Five sector-neutral suffixes. Earlier draft had "Insurance Company" as
-  // a 6th variant (from the Travelers/Hartford bug report), but that's
-  // nonsense for non-insurance brands ("Spotify Insurance Company"). The
-  // five remaining variants cover the vast majority of real legal-entity
-  // formations.
+  // Sector-neutral suffixes.
   const variants = [
     `${input} Companies`,
+    `${input} Company`,
     `${input} Group`,
     `${input} Inc`,
     `${input} Corporation`,
     `The ${input}`,
   ];
-  return [
+
+  const suggestions = [
     `If "${input}" is a common/brand name, the cert subject (O field) likely uses a longer legal entity name. Try one of these variants:`,
     "",
     ...variants.map((v) => `  • ${v}`),
   ];
+
+  // If the user already included "Insurance" or "Financial" we don't need to append it again,
+  // just the legal suffix. If they didn't, we should provide the sector-specific variants.
+  const hasFinIns = /\b(Insurance|Financial)\b/i.test(input);
+  if (!hasFinIns) {
+    suggestions.push(
+      "",
+      `Or, if this is a financial/insurance brand:`,
+      "",
+      `  • ${input} Insurance Company`,
+      `  • ${input} Financial Services Group`,
+      `  • The ${input} Financial Services Group, Inc.`
+    );
+  }
+
+  return suggestions;
 }
 
 /** Hint context for empty-result rendering. `kind === "company"` means the
