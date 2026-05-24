@@ -471,12 +471,11 @@ function formatScoutResultTable(domains: DomainResult[]): string {
     const sourcesCell =
       sources.slice(0, SOURCES_INLINE_LIMIT).join(", ") +
       (overflowSources > 0 ? `, +${overflowSources}` : "");
-    const evidenceArr = d.evidence ?? [];
     // Type-guard rather than cast: the `evidence` element type is
     // Record<string, unknown>, so `description` is `unknown`. If the
     // origin ever sends a non-string description (number, object, null),
     // we fall back to em-dash instead of stringifying via cellSafe.
-    const rawDescription = evidenceArr[0]?.description;
+    const rawDescription = d.evidence?.[0]?.description;
     const firstDescription =
       typeof rawDescription === "string" ? rawDescription : undefined;
     rows.push(
