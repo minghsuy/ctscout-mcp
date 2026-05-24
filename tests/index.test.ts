@@ -414,6 +414,18 @@ describe("formatScanAsMarkdown — Pro tier", () => {
     expect(tableRowMatch?.[0] ?? "").not.toContain("\r");
   });
 
+  it("falls back to first dict key when evidence has no EVIDENCE_PRIORITY match", () => {
+    const row: DomainResult = {
+      ...verifiedRow,
+      enrichment: {
+        ...verifiedRow.enrichment!,
+        evidence: { unknown_signal: "some evidence value" },
+      },
+    };
+    const md = formatScanAsMarkdown("Test", proResponse([row]));
+    expect(md).toContain("some evidence value");
+  });
+
   it("detects Pro response by source even when all rows are degraded", () => {
     // Phase 5 _degraded() helper produces rows with no `enrichment` field
     // when a per-apex enrichment fails. If every row is in that state,
