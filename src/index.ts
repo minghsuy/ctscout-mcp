@@ -190,6 +190,7 @@ async function callScan(body: ScanRequestBody): Promise<ScanResponse> {
       },
       body: JSON.stringify(body),
       signal: controller.signal,
+      redirect: "error",
     });
 
     if (!response.ok) {
