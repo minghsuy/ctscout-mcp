@@ -550,8 +550,6 @@ export function truncateIfNeeded(
   let currentStructured = structured;
 
   while (currentText.length > CHARACTER_LIMIT && currentStructured.domains.length > 0) {
-    const halved = Math.max(1, Math.floor(currentStructured.domains.length / 2));
-
     // If we're down to 1 domain and still over the limit, we must break to avoid infinite loop
     if (currentStructured.domains.length === 1) {
       currentStructured = {
@@ -567,6 +565,7 @@ export function truncateIfNeeded(
       break;
     }
 
+    const halved = Math.max(1, Math.floor(currentStructured.domains.length / 2));
     currentStructured = {
       ...currentStructured,
       domains: currentStructured.domains.slice(0, halved),
