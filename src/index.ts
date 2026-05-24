@@ -785,7 +785,29 @@ async function main(): Promise<void> {
 const isDirectlyExecuted = (() => {
   try {
     const moduleReal = realpathSync(fileURLToPath(import.meta.url));
-    const argv1Real = realpathSync(process.argv[1]);
+    let argv1Real: string;
+    try {
+      argv1Real = realpathSync(process.argv[1]);
+    } catch (e) {
+      if (e instanceof Error && (e as NodeJS.ErrnoException).code === "ENOENT") {
+        let resolved: string | undefined;
+        for (const ext of [".js", ".ts", ".mjs", ".cjs"]) {
+          try {
+            resolved = realpathSync(process.argv[1] + ext);
+            break;
+          } catch {
+            // try next extension
+          }
+        }
+        if (resolved !== undefined) {
+          argv1Real = resolved;
+        } else {
+          return false;
+        }
+      } else {
+        return false;
+      }
+    }
     return moduleReal === argv1Real;
   } catch {
     return false;
