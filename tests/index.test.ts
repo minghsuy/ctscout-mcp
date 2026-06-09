@@ -31,6 +31,7 @@ import {
   explainError,
   formatScanAsMarkdown,
   truncateIfNeeded,
+  truncateJsonIfNeeded,
   getApiKey,
 } from "../src/index.ts";
 import type { DomainResult, ScanResponse } from "../src/index.ts";
@@ -505,7 +506,7 @@ describe("truncateIfNeeded", () => {
       { org: "X", apex_domain: "x.com", cert_count: 1, subdomain_count: 1 },
     ]);
     const md = formatScanAsMarkdown("X", resp);
-    const result = truncateIfNeeded(md, resp);
+    const result = truncateIfNeeded(md, resp, "X");
     expect(result.text).toBe(md);
     expect(result.structured.truncated).toBe(false);
   });
@@ -534,11 +535,26 @@ describe("truncateIfNeeded", () => {
     const resp = proResponse(domains);
     const md = formatScanAsMarkdown("X", resp);
     expect(md.length).toBeGreaterThan(25_000); // sanity: pre-trunc IS over
-    const result = truncateIfNeeded(md, resp);
+    const result = truncateIfNeeded(md, resp, "X");
     expect(result.text.length).toBeLessThanOrEqual(25_000);
     expect(result.structured.truncated).toBe(true);
     expect(result.structured.domains.length).toBeLessThan(domains.length);
     expect(result.structured.upgrade_hint).toContain("Response truncated");
+  });
+
+  it("keeps the original query in the truncated header (regression: '(truncated)' placeholder)", () => {
+    const domains: DomainResult[] = Array.from({ length: 700 }, (_, i) => ({
+      org: `Org ${i}`,
+      apex_domain: `domain-${i}.example`,
+      cert_count: i,
+      subdomain_count: i,
+    }));
+    const resp = freeResponse(domains);
+    const md = formatScanAsMarkdown("Goldman Sachs", resp);
+    expect(md.length).toBeGreaterThan(25_000);
+    const result = truncateIfNeeded(md, resp, "Goldman Sachs");
+    expect(result.text).toContain("# ctscout results for: Goldman Sachs");
+    expect(result.text).not.toContain("(truncated)");
   });
 
   it("zeroes out domains when a single domain still exceeds the limit", () => {
@@ -564,11 +580,84 @@ describe("truncateIfNeeded", () => {
     const resp = proResponse([domain]);
     const md = formatScanAsMarkdown("Big Co", resp);
     expect(md.length).toBeGreaterThan(25_000);
-    const result = truncateIfNeeded(md, resp);
+    const result = truncateIfNeeded(md, resp, "Big Co");
     expect(result.text.length).toBeLessThanOrEqual(25_000);
     expect(result.structured.domains.length).toBe(0);
     expect(result.structured.truncated).toBe(true);
     expect(result.structured.upgrade_hint).toContain("0 of 1 domains");
+    // Truncated-to-zero is NOT a no-match: the rendered text must surface
+    // the truncation hint, not the "No domains found" guidance (and not
+    // the brand→legal did-you-mean suggestions).
+    expect(result.text).toContain("# ctscout results for: Big Co");
+    expect(result.text).toContain("0 of 1 domains");
+    expect(result.text).not.toContain("No domains found");
+    expect(result.text).not.toContain("Try one of these variants");
+  });
+});
+
+// ---------- JSON-path truncation (response_format='json') ----------
+//
+// Regression lock for the unbounded-JSON bug: the markdown path was capped
+// at CHARACTER_LIMIT but response_format='json' returned the full
+// pretty-printed payload with no limit — and the markdown truncation hint
+// actively recommended switching to JSON. Both paths now share the same
+// shrink loop.
+
+describe("truncateJsonIfNeeded", () => {
+  function bigDomains(n: number): DomainResult[] {
+    return Array.from({ length: n }, (_, i) => ({
+      org: `Org ${i}`,
+      apex_domain: `domain-${i}.example`,
+      cert_count: i,
+      subdomain_count: i,
+      attributed_to: `Org ${i}`,
+    }));
+  }
+
+  it("returns pretty-printed JSON unchanged when under the limit", () => {
+    const resp = freeResponse(bigDomains(3));
+    const result = truncateJsonIfNeeded(resp);
+    expect(result.text).toBe(JSON.stringify(resp, null, 2));
+    expect(result.structured).toBe(resp);
+  });
+
+  it("caps oversized responses and self-describes the truncation", () => {
+    const resp = freeResponse(bigDomains(2_000));
+    expect(JSON.stringify(resp, null, 2).length).toBeGreaterThan(25_000);
+    const result = truncateJsonIfNeeded(resp);
+    expect(result.text.length).toBeLessThanOrEqual(25_000);
+    // Output must remain valid JSON and carry the truncation markers.
+    const parsed = JSON.parse(result.text) as ScanResponse;
+    expect(parsed.truncated).toBe(true);
+    expect(parsed.upgrade_hint).toContain("Response truncated");
+    expect(parsed.domains.length).toBeLessThan(2_000);
+    expect(parsed.domains.length).toBeGreaterThan(0);
+    expect(result.structured.truncated).toBe(true);
+  });
+
+  it("zeroes out domains when a single domain still exceeds the limit", () => {
+    const resp = freeResponse([
+      {
+        org: "Big Co",
+        apex_domain: "big.example",
+        cert_count: 1,
+        subdomain_count: 0,
+        // 30k-char field inflates a single row past the limit.
+        blob: "x".repeat(30_000),
+      },
+    ]);
+    const result = truncateJsonIfNeeded(resp);
+    expect(result.text.length).toBeLessThanOrEqual(25_000);
+    const parsed = JSON.parse(result.text) as ScanResponse;
+    expect(parsed.domains.length).toBe(0);
+    expect(parsed.truncated).toBe(true);
+    expect(parsed.upgrade_hint).toContain("0 of 1 domains");
+  });
+
+  it("upgrade_hint no longer recommends the JSON path as a size escape hatch", () => {
+    const resp = freeResponse(bigDomains(2_000));
+    const result = truncateJsonIfNeeded(resp);
+    expect(result.structured.upgrade_hint).not.toContain("response_format");
   });
 });
 
@@ -616,6 +705,21 @@ describe("explainError", () => {
     expect(msg).not.toContain("[link]");
     expect(msg).toContain("\\<script\\>alert\\(1\\)\\</script\\>");
     expect(msg).toContain("\\[link\\]\\(x\\)");
+  });
+
+  it("caps oversized error bodies (regression: unbounded responseBody echo)", () => {
+    const hugeBody = "e".repeat(30_000);
+    const msg = explainError(new ApiError(400, hugeBody));
+    expect(msg.length).toBeLessThan(1_500);
+    expect(msg).toContain("truncated, 30000 chars total");
+  });
+
+  it("caps oversized bodies on the default (unmapped status) branch too", () => {
+    const hugeBody = "e".repeat(30_000);
+    const msg = explainError(new ApiError(418, hugeBody));
+    expect(msg.length).toBeLessThan(1_500);
+    expect(msg).toContain("HTTP 418");
+    expect(msg).toContain("truncated, 30000 chars total");
   });
 
   it("maps 403 to a revoked-key message", () => {

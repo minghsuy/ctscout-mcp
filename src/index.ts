@@ -125,7 +125,9 @@ const SearchCompanyInputSchema = z
       .default(ResponseFormat.MARKDOWN)
       .describe(
         "Output format: 'markdown' for human-readable summary, 'json' for " +
-          "the raw API response (useful for programmatic processing).",
+          "the raw API response (useful for programmatic processing). " +
+          "Both formats cap output at 25,000 characters; oversized result " +
+          "sets are truncated with truncated=true and an upgrade_hint.",
       ),
   })
   .strict();
@@ -140,15 +142,17 @@ const LookupDomainInputSchema = z
       .max(10, "At most 10 domains per request")
       .describe(
         "Apex domains to look up (e.g. ['gs.com', 'goldmansachs.com']). " +
-          "Returns the organization(s) that own each domain, plus any " +
-          "sibling domains in the warehouse owned by the same orgs. Max 10.",
+          "Returns the organization(s) attributed to each domain, plus any " +
+          "sibling domains in the warehouse attributed to the same orgs. Max 10.",
       ),
     response_format: z
       .nativeEnum(ResponseFormat)
       .default(ResponseFormat.MARKDOWN)
       .describe(
         "Output format: 'markdown' for human-readable summary, 'json' for " +
-          "the raw API response.",
+          "the raw API response. Both formats cap output at 25,000 " +
+          "characters; oversized result sets are truncated with " +
+          "truncated=true and an upgrade_hint.",
       ),
   })
   .strict();
@@ -163,8 +167,9 @@ export function getApiKey(): string {
     throw new Error(
       "CTSCOUT_API_KEY environment variable is not set. " +
         "Get a free key at https://ctscout.dev (no email, no signup) and " +
-        "set it via your MCP client config (e.g. for Claude Code, in " +
-        "~/.claude/mcp.json under env.CTSCOUT_API_KEY).",
+        "set it via your MCP client config (e.g. for Claude Code, run " +
+        "`claude mcp add` or set env.CTSCOUT_API_KEY on the server entry " +
+        "in ~/.claude.json).",
     );
   }
   return key;
@@ -232,9 +237,20 @@ function escapeMarkdown(text: string): string {
   return text.replace(/([\\`*_[\]()<>!])/g, "\\$1");
 }
 
+// Cap on how much of an upstream error body we echo back into tool output.
+// A misbehaving origin (proxy HTML error page, giant validation payload)
+// must not be able to inflate the error message unboundedly. Applied
+// BEFORE escapeMarkdown so escape expansion can't push it back over.
+const ERROR_BODY_LIMIT = 500;
+
+function truncateBody(s: string, maxLen = ERROR_BODY_LIMIT): string {
+  if (s.length <= maxLen) return s;
+  return `${s.slice(0, maxLen)}… (truncated, ${s.length} chars total)`;
+}
+
 export function explainError(err: unknown): string {
   if (err instanceof ApiError) {
-    const safeBody = escapeMarkdown(err.responseBody);
+    const safeBody = escapeMarkdown(truncateBody(err.responseBody));
     switch (err.status) {
       case 400:
         return `Bad request: ${safeBody}. Check the input parameters.`;
@@ -349,6 +365,13 @@ export function formatScanAsMarkdown(
   lines.push("");
 
   if (response.domains.length === 0) {
+    // Truncated-to-zero (see truncateIfNeeded): the result set wasn't
+    // empty — every row was dropped to fit the size limit. Surface the
+    // truncation hint instead of the misleading no-match guidance.
+    if (response.truncated && response.upgrade_hint) {
+      lines.push(`> ${response.upgrade_hint}`);
+      return lines.join("\n");
+    }
     lines.push(
       "No domains found. Try a partial company name (e.g. 'Goldman' instead of 'Goldman Sachs Group, Inc.') or a different domain.",
     );
@@ -548,46 +571,70 @@ function escapeForTable(s: string): string {
   return s.replace(/\|/g, "\\|").replace(/[\r\n]+/g, " ");
 }
 
+function truncationHint(kept: number, total: number): string {
+  return (
+    `Response truncated to ${kept} of ${total} domains ` +
+    `to stay under ${CHARACTER_LIMIT} chars. Refine the query for a ` +
+    `narrower result set.`
+  );
+}
+
+// Iteratively halve the domain list and re-render until the output fits
+// CHARACTER_LIMIT. `render` is the format-specific serializer (markdown
+// table or JSON), so both response_format paths share one shrink loop.
+// Halving to 0 (a single domain whose rendering alone exceeds the limit)
+// empties the list and exits via the loop condition.
+function shrinkToLimit(
+  structured: ScanResponse,
+  initialText: string,
+  render: (s: ScanResponse) => string,
+): { text: string; structured: ScanResponse } {
+  let currentText = initialText;
+  let currentStructured = structured;
+
+  while (
+    currentText.length > CHARACTER_LIMIT &&
+    currentStructured.domains.length > 0
+  ) {
+    const kept = Math.floor(currentStructured.domains.length / 2);
+    currentStructured = {
+      ...currentStructured,
+      domains: currentStructured.domains.slice(0, kept),
+      truncated: true,
+      upgrade_hint: truncationHint(kept, structured.domains.length),
+    };
+    currentText = render(currentStructured);
+  }
+
+  return { text: currentText, structured: currentStructured };
+}
+
 export function truncateIfNeeded(
   text: string,
   structured: ScanResponse,
+  query: string,
+  hint?: FormatHint,
 ): {
   text: string;
   structured: ScanResponse;
 } {
-  let currentText = text;
-  let currentStructured = structured;
+  return shrinkToLimit(structured, text, (s) =>
+    formatScanAsMarkdown(query, s, hint),
+  );
+}
 
-  while (currentText.length > CHARACTER_LIMIT && currentStructured.domains.length > 0) {
-    // If we're down to 1 domain and still over the limit, we must break to avoid infinite loop
-    if (currentStructured.domains.length === 1) {
-      currentStructured = {
-        ...currentStructured,
-        domains: [],
-        truncated: true,
-        upgrade_hint:
-          `Response truncated to 0 of ${structured.domains.length} domains ` +
-          `to stay under ${CHARACTER_LIMIT} chars. Re-run with response_format='json' ` +
-          `or refine the query.`,
-      };
-      currentText = formatScanAsMarkdown("(truncated)", currentStructured);
-      break;
-    }
-
-    const halved = Math.max(1, Math.floor(currentStructured.domains.length / 2));
-    currentStructured = {
-      ...currentStructured,
-      domains: currentStructured.domains.slice(0, halved),
-      truncated: true,
-      upgrade_hint:
-        `Response truncated to ${halved} of ${structured.domains.length} domains ` +
-        `to stay under ${CHARACTER_LIMIT} chars. Re-run with response_format='json' ` +
-        `or refine the query.`,
-    };
-    currentText = formatScanAsMarkdown("(truncated)", currentStructured);
-  }
-
-  return { text: currentText, structured: currentStructured };
+// JSON-path counterpart. Pretty-print when it fits; fall back to compact
+// JSON, then to dropping domains via the shared shrink loop. The emitted
+// JSON self-describes the truncation (`truncated` + `upgrade_hint`).
+export function truncateJsonIfNeeded(structured: ScanResponse): {
+  text: string;
+  structured: ScanResponse;
+} {
+  const renderJson = (s: ScanResponse): string => {
+    const pretty = JSON.stringify(s, null, 2);
+    return pretty.length <= CHARACTER_LIMIT ? pretty : JSON.stringify(s);
+  };
+  return shrinkToLimit(structured, renderJson(structured), renderJson);
 }
 
 // ---------- Server + tools ----------
@@ -665,17 +712,19 @@ Coverage caveat:
       const data = await callScan({ company_name: params.company_name });
 
       if (params.response_format === ResponseFormat.JSON) {
-        const text = JSON.stringify(data, null, 2);
+        const { text, structured } = truncateJsonIfNeeded(data);
         return {
           content: [{ type: "text", text }],
-          structuredContent: data as unknown as Record<string, unknown>,
+          structuredContent: structured as unknown as Record<string, unknown>,
         };
       }
 
       const md = formatScanAsMarkdown(params.company_name, data, {
         kind: "company",
       });
-      const { text, structured } = truncateIfNeeded(md, data);
+      const { text, structured } = truncateIfNeeded(md, data, params.company_name, {
+        kind: "company",
+      });
       return {
         content: [{ type: "text", text }],
         structuredContent: structured as unknown as Record<string, unknown>,
@@ -726,17 +775,22 @@ Auth & limits: same as ctscout_search_company.`,
       const data = await callScan({ seed_domain: params.domains });
 
       if (params.response_format === ResponseFormat.JSON) {
-        const text = JSON.stringify(data, null, 2);
+        const { text, structured } = truncateJsonIfNeeded(data);
         return {
           content: [{ type: "text", text }],
-          structuredContent: data as unknown as Record<string, unknown>,
+          structuredContent: structured as unknown as Record<string, unknown>,
         };
       }
 
       const md = formatScanAsMarkdown(params.domains.join(", "), data, {
         kind: "domain",
       });
-      const { text, structured } = truncateIfNeeded(md, data);
+      const { text, structured } = truncateIfNeeded(
+        md,
+        data,
+        params.domains.join(", "),
+        { kind: "domain" },
+      );
       return {
         content: [{ type: "text", text }],
         structuredContent: structured as unknown as Record<string, unknown>,
