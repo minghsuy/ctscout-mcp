@@ -548,9 +548,23 @@ function escapeForTable(s: string): string {
   return s.replace(/\|/g, "\\|").replace(/[\r\n]+/g, " ");
 }
 
-export function truncateIfNeeded(
+// Both output formats are capped at CHARACTER_LIMIT, so the hint must not
+// point at JSON as an escape hatch for size (it used to — ctscout-mcp#42).
+function truncationHint(kept: number, total: number): string {
+  return (
+    `Response truncated to ${kept} of ${total} domains ` +
+    `to stay under ${CHARACTER_LIMIT} chars. Refine the query to narrow ` +
+    `the results (JSON output is truncated the same way).`
+  );
+}
+
+// Shared halving loop: drop whole trailing domain entries and re-render
+// until the rendered text fits, parameterized by the render function so
+// the markdown and JSON paths bound output identically.
+function truncateWithRender(
   text: string,
   structured: ScanResponse,
+  render: (s: ScanResponse) => string,
 ): {
   text: string;
   structured: ScanResponse;
@@ -565,12 +579,9 @@ export function truncateIfNeeded(
         ...currentStructured,
         domains: [],
         truncated: true,
-        upgrade_hint:
-          `Response truncated to 0 of ${structured.domains.length} domains ` +
-          `to stay under ${CHARACTER_LIMIT} chars. Re-run with response_format='json' ` +
-          `or refine the query.`,
+        upgrade_hint: truncationHint(0, structured.domains.length),
       };
-      currentText = formatScanAsMarkdown("(truncated)", currentStructured);
+      currentText = render(currentStructured);
       break;
     }
 
@@ -579,15 +590,60 @@ export function truncateIfNeeded(
       ...currentStructured,
       domains: currentStructured.domains.slice(0, halved),
       truncated: true,
-      upgrade_hint:
-        `Response truncated to ${halved} of ${structured.domains.length} domains ` +
-        `to stay under ${CHARACTER_LIMIT} chars. Re-run with response_format='json' ` +
-        `or refine the query.`,
+      upgrade_hint: truncationHint(halved, structured.domains.length),
     };
-    currentText = formatScanAsMarkdown("(truncated)", currentStructured);
+    currentText = render(currentStructured);
   }
 
   return { text: currentText, structured: currentStructured };
+}
+
+export function truncateIfNeeded(
+  text: string,
+  structured: ScanResponse,
+): {
+  text: string;
+  structured: ScanResponse;
+} {
+  return truncateWithRender(text, structured, (s) =>
+    formatScanAsMarkdown("(truncated)", s),
+  );
+}
+
+// JSON-format responses must respect CHARACTER_LIMIT too (ctscout-mcp#42).
+// Strategy: pretty-print when it fits; otherwise fall back to compact
+// stringify (often 30-50% smaller), then halve domains as in markdown.
+// Truncated output stays valid JSON and self-describes via truncated /
+// upgrade_hint fields.
+export function truncateJsonIfNeeded(structured: ScanResponse): {
+  text: string;
+  structured: ScanResponse;
+} {
+  const pretty = JSON.stringify(structured, null, 2);
+  if (pretty.length <= CHARACTER_LIMIT) {
+    return { text: pretty, structured };
+  }
+
+  const result = truncateWithRender(JSON.stringify(structured), structured, (s) =>
+    JSON.stringify(s),
+  );
+
+  // Pathological case: top-level fields alone (e.g. a huge run_metadata
+  // from the real Pro tier) exceed the limit even with zero domains.
+  // Markdown can't hit this — it only renders known fields — so match its
+  // bound by emitting a minimal valid envelope of known, bounded fields.
+  if (result.text.length > CHARACTER_LIMIT) {
+    const minimal: ScanResponse = {
+      domains: [],
+      total: structured.total,
+      truncated: true,
+      upgrade_hint: truncationHint(0, structured.domains.length),
+      source: structured.source,
+    };
+    return { text: JSON.stringify(minimal), structured: minimal };
+  }
+
+  return result;
 }
 
 // ---------- Server + tools ----------
@@ -665,10 +721,10 @@ Coverage caveat:
       const data = await callScan({ company_name: params.company_name });
 
       if (params.response_format === ResponseFormat.JSON) {
-        const text = JSON.stringify(data, null, 2);
+        const { text, structured } = truncateJsonIfNeeded(data);
         return {
           content: [{ type: "text", text }],
-          structuredContent: data as unknown as Record<string, unknown>,
+          structuredContent: structured as unknown as Record<string, unknown>,
         };
       }
 
@@ -726,10 +782,10 @@ Auth & limits: same as ctscout_search_company.`,
       const data = await callScan({ seed_domain: params.domains });
 
       if (params.response_format === ResponseFormat.JSON) {
-        const text = JSON.stringify(data, null, 2);
+        const { text, structured } = truncateJsonIfNeeded(data);
         return {
           content: [{ type: "text", text }],
-          structuredContent: data as unknown as Record<string, unknown>,
+          structuredContent: structured as unknown as Record<string, unknown>,
         };
       }
 

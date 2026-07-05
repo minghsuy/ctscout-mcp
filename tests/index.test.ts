@@ -31,6 +31,7 @@ import {
   explainError,
   formatScanAsMarkdown,
   truncateIfNeeded,
+  truncateJsonIfNeeded,
   getApiKey,
 } from "../src/index.ts";
 import type { DomainResult, ScanResponse } from "../src/index.ts";
@@ -569,6 +570,124 @@ describe("truncateIfNeeded", () => {
     expect(result.structured.domains.length).toBe(0);
     expect(result.structured.truncated).toBe(true);
     expect(result.structured.upgrade_hint).toContain("0 of 1 domains");
+  });
+
+  it("no longer recommends response_format='json' as the size escape hatch (#42)", () => {
+    const bigEvidence = "x".repeat(30_000);
+    const resp = proResponse([
+      {
+        org: "Big Co",
+        apex_domain: "big.example",
+        cert_count: 1,
+        subdomain_count: 0,
+        attributed_to: "Big Co",
+        enrichment: {
+          confidence_band: "verified",
+          weight_total: 5.0,
+          matched_via: ["dns_txt_brand_token"],
+          evidence: { dns_txt_brand_token: bigEvidence },
+          signal_health: {},
+          vlm_status: "cached",
+          vlm_override: false,
+        },
+      },
+    ]);
+    const md = formatScanAsMarkdown("Big Co", resp);
+    const result = truncateIfNeeded(md, resp);
+    expect(result.structured.upgrade_hint).not.toContain("response_format='json'");
+    expect(result.structured.upgrade_hint).toContain("Refine the query");
+  });
+});
+
+// ---------- JSON-format truncation (ctscout-mcp#42) ----------
+
+describe("truncateJsonIfNeeded", () => {
+  it("returns pretty-printed JSON unchanged when under the limit", () => {
+    const resp = freeResponse([
+      { org: "X", apex_domain: "x.com", cert_count: 1, subdomain_count: 1 },
+    ]);
+    const result = truncateJsonIfNeeded(resp);
+    expect(result.text).toBe(JSON.stringify(resp, null, 2));
+    expect(result.structured).toBe(resp);
+    expect(result.structured.truncated).toBe(false);
+  });
+
+  it("falls back to compact stringify without dropping domains when that alone fits", () => {
+    const domains: DomainResult[] = Array.from({ length: 220 }, (_, i) => ({
+      org: `Org ${i}`,
+      apex_domain: `domain-${i}.example`,
+      cert_count: i,
+      subdomain_count: i,
+    }));
+    const resp = freeResponse(domains);
+    // Sanity: pretty form is over the limit, compact form is under.
+    expect(JSON.stringify(resp, null, 2).length).toBeGreaterThan(25_000);
+    expect(JSON.stringify(resp).length).toBeLessThanOrEqual(25_000);
+
+    const result = truncateJsonIfNeeded(resp);
+    expect(result.text).toBe(JSON.stringify(resp));
+    expect(result.text.length).toBeLessThanOrEqual(25_000);
+    expect(result.structured.domains.length).toBe(220);
+    expect(result.structured.truncated).toBe(false);
+  });
+
+  it("halves domains when even compact JSON exceeds the limit, staying valid JSON", () => {
+    const domains: DomainResult[] = Array.from({ length: 300 }, (_, i) => ({
+      org: `Org ${i} ${"x".repeat(150)}`,
+      apex_domain: `domain-${i}.example`,
+      cert_count: i,
+      subdomain_count: i,
+    }));
+    const resp = freeResponse(domains);
+    // Sanity: even the compact form is over the limit.
+    expect(JSON.stringify(resp).length).toBeGreaterThan(25_000);
+
+    const result = truncateJsonIfNeeded(resp);
+    expect(result.text.length).toBeLessThanOrEqual(25_000);
+    expect(result.structured.truncated).toBe(true);
+    expect(result.structured.domains.length).toBeLessThan(300);
+    expect(result.structured.domains.length).toBeGreaterThan(0);
+
+    // Emitted text is valid JSON and self-describes the truncation.
+    const parsed = JSON.parse(result.text) as ScanResponse;
+    expect(parsed.truncated).toBe(true);
+    expect(parsed.upgrade_hint).toContain("Response truncated");
+    expect(parsed.upgrade_hint).not.toContain("response_format='json'");
+    expect(parsed.domains.length).toBe(result.structured.domains.length);
+  });
+
+  it("zeroes out domains when a single domain still exceeds the limit", () => {
+    const resp = freeResponse([
+      {
+        org: "Big Co",
+        apex_domain: "big.example",
+        cert_count: 1,
+        subdomain_count: 0,
+        notes: "x".repeat(30_000),
+      },
+    ]);
+    const result = truncateJsonIfNeeded(resp);
+    expect(result.text.length).toBeLessThanOrEqual(25_000);
+    expect(result.structured.domains.length).toBe(0);
+    expect(result.structured.truncated).toBe(true);
+    expect(result.structured.upgrade_hint).toContain("0 of 1 domains");
+    expect(() => JSON.parse(result.text)).not.toThrow();
+  });
+
+  it("emits a minimal valid envelope when top-level fields alone exceed the limit", () => {
+    const resp: ScanResponse = {
+      ...freeResponse([
+        { org: "X", apex_domain: "x.com", cert_count: 1, subdomain_count: 1 },
+      ]),
+      run_metadata: { blob: "x".repeat(30_000) },
+    };
+    const result = truncateJsonIfNeeded(resp);
+    expect(result.text.length).toBeLessThanOrEqual(25_000);
+    const parsed = JSON.parse(result.text) as ScanResponse;
+    expect(parsed.domains).toEqual([]);
+    expect(parsed.truncated).toBe(true);
+    expect(parsed.upgrade_hint).toContain("Response truncated");
+    expect(parsed.source).toBe("warehouse");
   });
 });
 
