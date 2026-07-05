@@ -164,8 +164,8 @@ export function getApiKey(): string {
       "CTSCOUT_API_KEY environment variable is not set. " +
         "Get a free key at https://ctscout.dev (no email, no signup) and " +
         "set it via your MCP client config (e.g. for Claude Code, " +
-        "`claude mcp add -s user` writes it to ~/.claude.json under " +
-        "env.CTSCOUT_API_KEY).",
+        "`claude mcp add ctscout -s user -e CTSCOUT_API_KEY=<key> -- npx -y ctscout-mcp-server` " +
+        "writes it to ~/.claude.json under env.CTSCOUT_API_KEY).",
     );
   }
   return key;
