@@ -37,7 +37,8 @@ version heading on release.
 
 ### Security
 
-- API key no longer forwarded on cross-origin fetch redirects (#26)
+- Fetch redirects rejected (`redirect: "error"`) so the API key can never
+  be forwarded to another origin (#26)
 - Markdown injection fixed in table formatters (#27) and `explainError` (#23)
 - Raw API error bodies bounded before rendering in `explainError` (#56)
 
