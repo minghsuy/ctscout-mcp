@@ -850,6 +850,36 @@ describe("explainError", () => {
     const msg = explainError("string error");
     expect(msg).toContain("Unexpected error: string error");
   });
+
+  it("truncates an oversized 400 response body with a marker", () => {
+    const msg = explainError(new ApiError(400, "x".repeat(30_000)));
+    expect(msg.length).toBeLessThan(1_000);
+    expect(msg).toContain("Bad request");
+    expect(msg).toContain("truncated, 30000 chars total");
+  });
+
+  it("truncates an oversized body on the default branch (unmapped status)", () => {
+    const msg = explainError(new ApiError(418, "y".repeat(30_000)));
+    expect(msg.length).toBeLessThan(1_000);
+    expect(msg).toContain("HTTP 418");
+    expect(msg).toContain("truncated, 30000 chars total");
+  });
+
+  it("truncates before escaping: marker reports raw length and escape expansion stays bounded", () => {
+    // 30k backticks: escaping doubles each char. If escaping ran first,
+    // the marker would report 60000 chars; truncate-first reports 30000
+    // and the escaped excerpt is at most 2x the 500-char cap.
+    const msg = explainError(new ApiError(400, "`".repeat(30_000)));
+    expect(msg).toContain("truncated, 30000 chars total");
+    expect(msg).toContain("\\`");
+    expect(msg.length).toBeLessThan(1_200);
+  });
+
+  it("leaves a small response body untouched (no marker)", () => {
+    const msg = explainError(new ApiError(400, "short and sweet"));
+    expect(msg).toContain("short and sweet");
+    expect(msg).not.toContain("truncated");
+  });
 });
 
 // ---------- ScoutResult-shape rendering (real Pro tier from origin) ----------

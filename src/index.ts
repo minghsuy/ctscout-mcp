@@ -30,6 +30,7 @@ const API_BASE_URL = process.env.CTSCOUT_API_URL ?? "https://ctscout.dev";
 const SCAN_URL = `${API_BASE_URL}/scan`;
 const REQUEST_TIMEOUT_MS = 30_000;
 const CHARACTER_LIMIT = 25_000;
+const ERROR_BODY_LIMIT = 500;
 const SERVER_NAME = "ctscout-mcp-server";
 const SERVER_VERSION = "0.2.5";
 const USER_AGENT = `${SERVER_NAME}/${SERVER_VERSION}`;
@@ -232,9 +233,19 @@ function escapeMarkdown(text: string): string {
   return text.replace(/([\\`*_[\]()<>!])/g, "\\$1");
 }
 
+// Bound the raw API error body before rendering. `ApiError.responseBody`
+// captures the upstream body whole (a proxy's HTML error page or a giant
+// validation payload lands here unbounded — ctscout-mcp#43). Truncate
+// BEFORE escapeMarkdown so escape expansion can't push the excerpt back
+// over the cap; the marker reports the raw (pre-escape) length.
+function truncateBody(text: string, max = ERROR_BODY_LIMIT): string {
+  if (text.length <= max) return text;
+  return `${text.slice(0, max)}…(truncated, ${text.length} chars total)`;
+}
+
 export function explainError(err: unknown): string {
   if (err instanceof ApiError) {
-    const safeBody = escapeMarkdown(err.responseBody);
+    const safeBody = escapeMarkdown(truncateBody(err.responseBody));
     switch (err.status) {
       case 400:
         return `Bad request: ${safeBody}. Check the input parameters.`;
