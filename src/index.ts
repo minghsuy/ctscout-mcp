@@ -353,15 +353,17 @@ export function formatScanAsMarkdown(
     // zeroes the list when a single result itself exceeds CHARACTER_LIMIT)
     // is NOT a "no matches" result. Explain the size-based drop and surface
     // the upgrade_hint so the visible text matches the `truncated` flag —
-    // otherwise the reader wrongly sees "No domains found".
-    if (response.truncated) {
+    // otherwise the reader wrongly sees "No domains found". Guard on BOTH
+    // `truncated` and `upgrade_hint` (mirroring the non-empty path below):
+    // truncateWithRender always sets them together, so a bare upstream
+    // `truncated` flag without a hint is not our size-drop signal and
+    // correctly falls through to the "No domains found" message.
+    if (response.truncated && response.upgrade_hint) {
       lines.push(
         "All matching domains were dropped to keep the response under the size limit.",
       );
-      if (response.upgrade_hint) {
-        lines.push("");
-        lines.push(`> ${response.upgrade_hint}`);
-      }
+      lines.push("");
+      lines.push(`> ${response.upgrade_hint}`);
       return lines.join("\n");
     }
     lines.push(

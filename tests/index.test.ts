@@ -122,6 +122,22 @@ describe("formatScanAsMarkdown — free tier", () => {
     expect(md).toContain("Try a partial company name");
   });
 
+  it("does not claim a size drop for a bare truncated flag without upgrade_hint", () => {
+    // truncateWithRender always sets `truncated` AND `upgrade_hint` together,
+    // so `truncated:true` alone (e.g. a hypothetical upstream count-cap) is
+    // NOT our size-drop signal — it must fall through to "No domains found",
+    // not emit the false "size limit" message with no blockquote.
+    const resp: ScanResponse = {
+      domains: [],
+      total: 0,
+      truncated: true,
+      source: "warehouse",
+    };
+    const md = formatScanAsMarkdown("Nonexistent Co", resp, { kind: "company" });
+    expect(md).toContain("No domains found");
+    expect(md).not.toContain("size limit");
+  });
+
   it("escapes markdown characters in domain and org fields to prevent injection", () => {
     const md = formatScanAsMarkdown(
       "Evil Inc",
