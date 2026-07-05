@@ -18,6 +18,7 @@
  */
 
 import { realpathSync } from "node:fs";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -32,7 +33,15 @@ const REQUEST_TIMEOUT_MS = 30_000;
 const CHARACTER_LIMIT = 25_000;
 const ERROR_BODY_LIMIT = 500;
 const SERVER_NAME = "ctscout-mcp-server";
-const SERVER_VERSION = "0.2.5";
+// Single-source the version from package.json — a hardcoded copy here has
+// drifted from package.json before (see scripts/release.sh history). Both
+// src/index.ts (tsx dev path) and dist/index.js (built path) sit one level
+// below the package root, so "../package.json" resolves to the same file in
+// the repo checkout and the npm-installed layout. createRequire (not an ESM
+// JSON import) avoids import attributes and tsconfig rootDir complaints.
+// Exported so tests can pin SERVER_VERSION === package.json's version.
+const require = createRequire(import.meta.url);
+export const SERVER_VERSION = (require("../package.json") as { version: string }).version;
 const USER_AGENT = `${SERVER_NAME}/${SERVER_VERSION}`;
 
 // ---------- Types ----------
