@@ -55,9 +55,6 @@ describe("isDirectlyExecuted (symlink boot)", () => {
       });
 
       let stderr = "";
-      proc.stderr.on("data", (chunk: Buffer) => {
-        stderr += chunk.toString();
-      });
 
       // Send an MCP `initialize` request — keeps the server alive long
       // enough to confirm it boots. If the guard is broken, the process
@@ -75,18 +72,32 @@ describe("isDirectlyExecuted (symlink boot)", () => {
         }) + "\n",
       );
 
-      // Give the server up to 3s to print its boot banner OR exit.
-      // `close` (not `exit`) — fires only after piped stderr has flushed,
-      // so the data event handler sees the full banner before we assert.
+      // Resolve as soon as the boot banner appears on stderr — the healthy
+      // server never exits on its own, so waiting for `close` used to burn
+      // the full 3s on every run (ctscout-mcp#50). The substring asserted
+      // below ends at "running via stdio" (the banner itself continues with
+      // "(api=...)"), and stderr accumulates in order — so once this marker
+      // is present, everything the assertion needs is already captured.
+      // The 3s timer and the `close` listener stay as backstops for the
+      // regression case (broken guard → process exits 0 with empty stderr;
+      // `close`, not `exit`, so piped stderr has flushed before we assert).
       await new Promise<void>((finish) => {
         const timer = setTimeout(() => {
           proc.kill();
           finish();
         }, 3000);
-        proc.on("close", () => {
+        const done = () => {
           clearTimeout(timer);
           finish();
+        };
+        proc.stderr.on("data", (chunk: Buffer) => {
+          stderr += chunk.toString();
+          if (stderr.includes("running via stdio")) {
+            proc.kill();
+            done();
+          }
         });
+        proc.on("close", done);
       });
 
       // The boot banner contains the version string and "running via stdio".

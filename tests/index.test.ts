@@ -1562,6 +1562,65 @@ describe("markdown-escaping chokepoint guard — free-tier table (cellSafe)", ()
   });
 });
 
+describe("markdown-escaping chokepoint guard — heading (cellSafe)", () => {
+  // The `# ctscout results for: <query>` heading is the one place a
+  // CALLER-controlled value (the LLM's own tool input) reaches the markdown
+  // output. Previously the sole unescaped interpolation in the formatter
+  // (ctscout-mcp#50): a newline in company_name could inject arbitrary
+  // markdown lines above the table. Same chokepoint as the table cells.
+  const oneRow: ScanResponse = {
+    domains: [{ org: "Safe Org", apex_domain: "safe.com", cert_count: 1, subdomain_count: 0 }],
+    total: 1, truncated: false, source: "warehouse",
+  };
+
+  it("newline in query cannot inject a markdown line above the table", () => {
+    const md = formatScanAsMarkdown("Evil\n# injected heading", oneRow);
+    const lines = md.split("\n");
+    expect(lines[0]).toBe("# ctscout results for: Evil # injected heading");
+    expect(lines.filter((l) => l.startsWith("#"))).toHaveLength(1);
+  });
+
+  it("CRLF in query is collapsed — heading stays one line", () => {
+    const md = formatScanAsMarkdown("line one\r\nline two", oneRow);
+    expect(md.split("\n")[0]).toBe("# ctscout results for: line one line two");
+  });
+
+  it("pipe in query is replaced with the Unicode lookalike (│)", () => {
+    const md = formatScanAsMarkdown("Evil | Corp", oneRow);
+    expect(md.split("\n")[0]).toBe("# ctscout results for: Evil │ Corp");
+  });
+
+  it("long query is truncated at 200 chars with ellipsis", () => {
+    const md = formatScanAsMarkdown("q".repeat(250), oneRow);
+    expect(md.split("\n")[0]).toBe(`# ctscout results for: ${"q".repeat(199)}…`);
+  });
+
+  it("empty-result path routes through the same heading chokepoint", () => {
+    const md = formatScanAsMarkdown("Evil\n# injected", {
+      domains: [], total: 0, truncated: false, source: "warehouse",
+    });
+    const lines = md.split("\n");
+    expect(lines[0]).toBe("# ctscout results for: Evil # injected");
+    expect(lines.filter((l) => l.startsWith("# "))).toHaveLength(1);
+  });
+
+  it("hinted zero-result path escapes the query in legal-entity suggestions", () => {
+    // The company hint triggers buildLegalEntitySuggestions, which
+    // interpolates the query into every suggestion line — previously raw.
+    const md = formatScanAsMarkdown(
+      "Evil\n# injected",
+      { domains: [], total: 0, truncated: false, source: "warehouse" },
+      { kind: "company" },
+    );
+    const lines = md.split("\n");
+    // No line of the output may be the injected heading on its own.
+    expect(lines.filter((l) => l.startsWith("#"))).toHaveLength(1);
+    expect(md).not.toContain("\n# injected");
+    // The suggestions themselves carry the collapsed (escaped) query.
+    expect(md).toContain("  • Evil # injected Companies");
+  });
+});
+
 describe("markdown-escaping chokepoint guard — scout-tier table (cellSafe)", () => {
   function scoutRow(overrides: Partial<DomainResult>): ScanResponse {
     return {

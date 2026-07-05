@@ -317,7 +317,13 @@ export function explainError(err: unknown): string {
 const LEGAL_ENTITY_SUFFIXES =
   /\b(Inc|Corp|Corporation|Group|Companies|Company|Co|Ltd|LLC|L\.L\.C\.|AG|SA|S\.A\.|N\.V\.|GmbH|plc|Holdings|Holding)\.?$/i;
 
-function buildLegalEntitySuggestions(input: string): string[] {
+function buildLegalEntitySuggestions(rawInput: string): string[] {
+  // The input is the caller-controlled query (the LLM's tool input) and is
+  // interpolated into every suggestion line below — route it through the
+  // cellSafe chokepoint once so a newline in company_name cannot inject
+  // markdown lines into the output (ctscout-mcp#50).
+  const input = cellSafe(rawInput, 200);
+
   // Sector-neutral suffixes.
   const variants = [
     `${input} Companies`,
@@ -366,7 +372,13 @@ export function formatScanAsMarkdown(
   hint?: FormatHint,
 ): string {
   const lines: string[] = [];
-  lines.push(`# ctscout results for: ${query}`);
+  // The query is caller-controlled (the LLM's tool input): a newline in
+  // company_name could inject arbitrary markdown lines above the table.
+  // Route it through the same cellSafe chokepoint as every API-derived
+  // value (ctscout-mcp#50). The other caller-controlled interpolation —
+  // the legal-entity suggestions on the hinted zero-result path — escapes
+  // the same way inside buildLegalEntitySuggestions.
+  lines.push(`# ctscout results for: ${cellSafe(query, 200)}`);
   lines.push("");
 
   if (response.domains.length === 0) {
@@ -402,7 +414,11 @@ export function formatScanAsMarkdown(
 
   // Shape detection. ScoutResult domain objects have `domain` (not
   // `apex_domain`); the two shapes don't overlap on this attribute.
-  // Single-field check is sufficient.
+  // Single-field check is sufficient. ASSUMPTION: arrays are homogeneous —
+  // the API never mixes ScoutResult and warehouse rows in one response.
+  // If it ever did, rows after the first would render through the wrong
+  // column mapping (formatTable's per-row `??` fallbacks degrade to "—"
+  // rather than throwing).
   const first = response.domains[0];
   const isScoutResult =
     typeof first.domain === "string" && typeof first.apex_domain !== "string";
