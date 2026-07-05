@@ -22,10 +22,14 @@
 // CTSCOUT_API_KEY at call time, so we want it available even though
 // these unit tests never make HTTP calls.
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   ApiError,
+  SERVER_VERSION,
   TimeoutError,
   callScan,
   explainError,
@@ -1735,5 +1739,19 @@ describe("markdown-escaping chokepoint guard — pro (phase-5) table (escapeForT
     expect(dataRows).toHaveLength(1);
     // Still exactly 6 unescaped pipes — structure intact.
     expect((dataRows[0].match(/(?<!\\)\|/g) ?? []).length).toBe(6);
+  });
+});
+
+// ---------- SERVER_VERSION single-sourcing ----------
+
+describe("SERVER_VERSION", () => {
+  it("matches package.json's version (single source — bump package.json only)", () => {
+    const pkg = JSON.parse(
+      readFileSync(resolve(__dirname, "..", "package.json"), "utf8"),
+    ) as { version: string };
+    // Guards against reintroducing a hardcoded version literal in
+    // src/index.ts that drifts from package.json (the failure class
+    // scripts/release.sh used to detect after the fact).
+    expect(SERVER_VERSION).toBe(pkg.version);
   });
 });

@@ -98,20 +98,22 @@ if [[ ! -f dist/index.js ]]; then
   echo "error: dist/index.js not present after build" >&2
   exit 1
 fi
-# Sanity: SERVER_VERSION baked into the compiled JS MUST match $NEW_VERSION.
-# Always fatal on mismatch — the prior version of this check had a blind
-# spot where a pre-bumped package.json + un-bumped src/index.ts would
-# silently ship a binary with the wrong SERVER_VERSION string.
-# Escape dots in the version so the grep pattern matches literally rather
-# than as wildcards (no false positives like "0X3Y0").
-ESCAPED_VER="${NEW_VERSION//./\\.}"
-if ! grep -q "SERVER_VERSION *= *\"${ESCAPED_VER}\"" dist/index.js; then
-  CURRENT_PJSON=$(node -p "require('./package.json').version")
-  CURRENT_SERVER_VERSION=$(grep -oE "SERVER_VERSION *= *\"[0-9]+\.[0-9]+\.[0-9]+\"" dist/index.js | head -1 || echo "(not found)")
-  echo "error: SERVER_VERSION in dist/index.js doesn't match $NEW_VERSION" >&2
-  echo "       dist/index.js: $CURRENT_SERVER_VERSION" >&2
-  echo "       package.json:  $CURRENT_PJSON" >&2
-  echo "       fix: bump SERVER_VERSION in src/index.ts to \"$NEW_VERSION\" and rebuild." >&2
+# Sanity: the built server must boot and report package.json's version in
+# its banner. SERVER_VERSION is read from package.json at runtime (no
+# version literal in dist/index.js anymore), so the old grep of the
+# compiled JS can't apply. Booting the real dist entry also proves
+# dist/index.js resolves ../package.json from its built location — the
+# packaging failure class this check now guards. The `npm version` bump
+# below edits that same single source, so the already-built dist reports
+# the new version with no rebuild; the old pre-bumped-package.json /
+# un-bumped-src mismatch can no longer exist.
+echo "==> boot smoke check (dist banner vs package.json version)"
+PKG_VERSION=$(node -p "require('./package.json').version")
+BOOT_BANNER=$(CTSCOUT_API_KEY=ds_free_release_smoke node dist/index.js </dev/null 2>&1 >/dev/null || true)
+if [[ "$BOOT_BANNER" != *"ctscout-mcp-server v${PKG_VERSION} running via stdio"* ]]; then
+  echo "error: built server banner doesn't report package.json's version ($PKG_VERSION)" >&2
+  echo "       banner: ${BOOT_BANNER:-(no output)}" >&2
+  echo "       dist/index.js must resolve ../package.json at runtime — check the build." >&2
   exit 1
 fi
 
@@ -193,9 +195,9 @@ fi
 # Notes: `prepublishOnly` in package.json runs `npm run clean && npm run
 # build` before packaging, so the artifact actually shipped to npm is a
 # fresh rebuild — not the dist/ produced by our earlier `npm run build`.
-# That second build is normally byte-identical to ours; the sanity check
-# above asserts the source has the right SERVER_VERSION, which is what
-# prepublishOnly will compile.
+# That second build is normally byte-identical to ours; SERVER_VERSION is
+# read from package.json at runtime (bumped above), so the shipped
+# artifact reports the right version regardless of which build it is.
 run git tag -a "v${NEW_VERSION}" -m "v${NEW_VERSION}"
 run git push origin "v${NEW_VERSION}"
 

@@ -20,13 +20,18 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
 const DIST_INDEX = resolve(__dirname, "..", "dist", "index.js");
+const PKG_VERSION = (
+  JSON.parse(readFileSync(resolve(__dirname, "..", "package.json"), "utf8")) as {
+    version: string;
+  }
+).version;
 
 describe("isDirectlyExecuted (symlink boot)", () => {
   // `npm run build` should run before `npm test` in CI / via the release
@@ -85,9 +90,11 @@ describe("isDirectlyExecuted (symlink boot)", () => {
       });
 
       // The boot banner contains the version string and "running via stdio".
-      // v0.2.0's bug produced empty stderr.
-      expect(stderr).toContain("running via stdio");
-      expect(stderr).toContain("ctscout-mcp-server");
+      // v0.2.0's bug produced empty stderr. SERVER_VERSION is read from
+      // package.json at RUNTIME, so asserting the exact version here also
+      // pins that dist/index.js resolves ../package.json from its built
+      // location — on the same symlinked-argv[1] path npx uses.
+      expect(stderr).toContain(`ctscout-mcp-server v${PKG_VERSION} running via stdio`);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }
