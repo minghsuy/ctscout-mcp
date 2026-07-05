@@ -13,18 +13,7 @@ Both work over the public ctscout.dev `/scan` API. Free tier requires an API key
 
 **Not a cyber-risk-scoring tool.** See [LIMITATIONS.md](LIMITATIONS.md) for what ctscout is and isn't, the DV-cert coverage gap, and the corrections path.
 
-### What's new in 0.2.2
-
-- Hosted MCP endpoint at `https://ctscout.dev/mcp` (Streamable HTTP) and `https://ctscout.dev/sse` (legacy SSE) — same two tools, zero local install. Auth via `X-API-Key` header (or `Authorization: Bearer …`).
-- README restructured to lead with the hosted path; the local-npm install is now a fallback for restricted networks.
-
-### What's new in 0.2.0
-
-- Pro-tier response surfacing: `confidence_band`, `evidence`, `matched_via`, `signal_health`, `vlm_status`, `vlm_override` rendered in the markdown table when present.
-- VLM-veto indicator (`🚫VLM-veto`) when a visual verdict overrode positive-signal accumulation.
-- Backward-compatible: Free-tier responses render exactly as in v0.1.0; the new fields are additive.
-- Tool descriptions updated: "attributed to" rather than "owns" (lawful, defensible language for attribution claims).
-- Test suite added (Vitest). 20 tests covering both response shapes, truncation, error paths.
+Release history: see [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
