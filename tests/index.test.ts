@@ -122,6 +122,22 @@ describe("formatScanAsMarkdown — free tier", () => {
     expect(md).toContain("Try a partial company name");
   });
 
+  it("does not claim a size drop for a bare truncated flag without upgrade_hint", () => {
+    // truncateWithRender always sets `truncated` AND `upgrade_hint` together,
+    // so `truncated:true` alone (e.g. a hypothetical upstream count-cap) is
+    // NOT our size-drop signal — it must fall through to "No domains found",
+    // not emit the false "size limit" message with no blockquote.
+    const resp: ScanResponse = {
+      domains: [],
+      total: 0,
+      truncated: true,
+      source: "warehouse",
+    };
+    const md = formatScanAsMarkdown("Nonexistent Co", resp, { kind: "company" });
+    expect(md).toContain("No domains found");
+    expect(md).not.toContain("size limit");
+  });
+
   it("escapes markdown characters in domain and org fields to prevent injection", () => {
     const md = formatScanAsMarkdown(
       "Evil Inc",
@@ -506,7 +522,7 @@ describe("truncateIfNeeded", () => {
       { org: "X", apex_domain: "x.com", cert_count: 1, subdomain_count: 1 },
     ]);
     const md = formatScanAsMarkdown("X", resp);
-    const result = truncateIfNeeded(md, resp);
+    const result = truncateIfNeeded(md, resp, "X");
     expect(result.text).toBe(md);
     expect(result.structured.truncated).toBe(false);
   });
@@ -535,7 +551,7 @@ describe("truncateIfNeeded", () => {
     const resp = proResponse(domains);
     const md = formatScanAsMarkdown("X", resp);
     expect(md.length).toBeGreaterThan(25_000); // sanity: pre-trunc IS over
-    const result = truncateIfNeeded(md, resp);
+    const result = truncateIfNeeded(md, resp, "X");
     expect(result.text.length).toBeLessThanOrEqual(25_000);
     expect(result.structured.truncated).toBe(true);
     expect(result.structured.domains.length).toBeLessThan(domains.length);
@@ -565,7 +581,7 @@ describe("truncateIfNeeded", () => {
     const resp = proResponse([domain]);
     const md = formatScanAsMarkdown("Big Co", resp);
     expect(md.length).toBeGreaterThan(25_000);
-    const result = truncateIfNeeded(md, resp);
+    const result = truncateIfNeeded(md, resp, "Big Co");
     expect(result.text.length).toBeLessThanOrEqual(25_000);
     expect(result.structured.domains.length).toBe(0);
     expect(result.structured.truncated).toBe(true);
@@ -593,9 +609,72 @@ describe("truncateIfNeeded", () => {
       },
     ]);
     const md = formatScanAsMarkdown("Big Co", resp);
-    const result = truncateIfNeeded(md, resp);
+    const result = truncateIfNeeded(md, resp, "Big Co");
     expect(result.structured.upgrade_hint).not.toContain("response_format='json'");
     expect(result.structured.upgrade_hint).toContain("Refine the query");
+  });
+
+  it("preserves the original query + a real hint in the truncated re-render (#41)", () => {
+    // Multi-halve case: re-render must keep the header query and the
+    // upgrade_hint, not fall back to the old `# ctscout results for: (truncated)`.
+    const domains: DomainResult[] = Array.from({ length: 350 }, (_, i) => ({
+      org: `Org ${i}`,
+      apex_domain: `domain-${i}.example`,
+      cert_count: i,
+      subdomain_count: i,
+      attributed_to: `Org ${i}`,
+      enrichment: {
+        confidence_band: "verified",
+        weight_total: 5.0,
+        matched_via: ["dns_txt_brand_token"],
+        evidence: { dns_txt_brand_token: "evidence" },
+        signal_health: {},
+        vlm_status: "cached",
+        vlm_override: false,
+      },
+    }));
+    const resp = proResponse(domains);
+    const md = formatScanAsMarkdown("Acme Corp", resp);
+    expect(md.length).toBeGreaterThan(25_000); // sanity: pre-trunc IS over
+    const result = truncateIfNeeded(md, resp, "Acme Corp");
+    // Header keeps the query, not the dropped "(truncated)" placeholder.
+    expect(result.text).toContain("# ctscout results for: Acme Corp");
+    expect(result.text).not.toContain("(truncated)");
+    // The hint that survives into the text is the upgrade_hint, not FormatHint.
+    expect(result.text).toContain("Response truncated");
+  });
+
+  it("markdown text explains the size-based drop (not 'No domains found') when a single domain is zeroed (#41 fold-in)", () => {
+    // 1-domain response whose markdown alone exceeds the limit → truncation
+    // zeroes domains to []. The visible text must NOT say "No domains found";
+    // it must explain the domain was dropped for exceeding the size limit and
+    // surface the upgrade_hint.
+    const bigEvidence = "x".repeat(30_000);
+    const domain: DomainResult = {
+      org: "Big Co",
+      apex_domain: "big.example",
+      cert_count: 1,
+      subdomain_count: 0,
+      attributed_to: "Big Co",
+      enrichment: {
+        confidence_band: "verified",
+        weight_total: 5.0,
+        matched_via: ["dns_txt_brand_token"],
+        evidence: { dns_txt_brand_token: bigEvidence },
+        signal_health: {},
+        vlm_status: "cached",
+        vlm_override: false,
+      },
+    };
+    const resp = proResponse([domain]);
+    const md = formatScanAsMarkdown("Big Co", resp);
+    const result = truncateIfNeeded(md, resp, "Big Co");
+    expect(result.structured.domains.length).toBe(0);
+    expect(result.text).not.toContain("No domains found");
+    expect(result.text).toContain("# ctscout results for: Big Co");
+    expect(result.text).toContain("size limit");
+    expect(result.text).toContain("dropped");
+    expect(result.text).toContain("Response truncated");
   });
 });
 

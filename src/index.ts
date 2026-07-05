@@ -349,6 +349,23 @@ export function formatScanAsMarkdown(
   lines.push("");
 
   if (response.domains.length === 0) {
+    // Empty domains from truncation (truncateWithRender's 1-domain break
+    // zeroes the list when a single result itself exceeds CHARACTER_LIMIT)
+    // is NOT a "no matches" result. Explain the size-based drop and surface
+    // the upgrade_hint so the visible text matches the `truncated` flag —
+    // otherwise the reader wrongly sees "No domains found". Guard on BOTH
+    // `truncated` and `upgrade_hint` (mirroring the non-empty path below):
+    // truncateWithRender always sets them together, so a bare upstream
+    // `truncated` flag without a hint is not our size-drop signal and
+    // correctly falls through to the "No domains found" message.
+    if (response.truncated && response.upgrade_hint) {
+      lines.push(
+        "All matching domains were dropped to keep the response under the size limit.",
+      );
+      lines.push("");
+      lines.push(`> ${response.upgrade_hint}`);
+      return lines.join("\n");
+    }
     lines.push(
       "No domains found. Try a partial company name (e.g. 'Goldman' instead of 'Goldman Sachs Group, Inc.') or a different domain.",
     );
@@ -601,12 +618,17 @@ function truncateWithRender(
 export function truncateIfNeeded(
   text: string,
   structured: ScanResponse,
+  query: string,
+  hint?: FormatHint,
 ): {
   text: string;
   structured: ScanResponse;
 } {
+  // Re-render with the ORIGINAL query + hint (not "(truncated)") so the
+  // truncated header still reads `# ctscout results for: <query>` and the
+  // call signature stops lying about the dropped context (ctscout-mcp#41).
   return truncateWithRender(text, structured, (s) =>
-    formatScanAsMarkdown("(truncated)", s),
+    formatScanAsMarkdown(query, s, hint),
   );
 }
 
@@ -731,7 +753,9 @@ Coverage caveat:
       const md = formatScanAsMarkdown(params.company_name, data, {
         kind: "company",
       });
-      const { text, structured } = truncateIfNeeded(md, data);
+      const { text, structured } = truncateIfNeeded(md, data, params.company_name, {
+        kind: "company",
+      });
       return {
         content: [{ type: "text", text }],
         structuredContent: structured as unknown as Record<string, unknown>,
@@ -792,7 +816,9 @@ Auth & limits: same as ctscout_search_company.`,
       const md = formatScanAsMarkdown(params.domains.join(", "), data, {
         kind: "domain",
       });
-      const { text, structured } = truncateIfNeeded(md, data);
+      const { text, structured } = truncateIfNeeded(md, data, params.domains.join(", "), {
+        kind: "domain",
+      });
       return {
         content: [{ type: "text", text }],
         structuredContent: structured as unknown as Record<string, unknown>,
