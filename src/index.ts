@@ -140,8 +140,8 @@ const LookupDomainInputSchema = z
       .max(10, "At most 10 domains per request")
       .describe(
         "Apex domains to look up (e.g. ['gs.com', 'goldmansachs.com']). " +
-          "Returns the organization(s) that own each domain, plus any " +
-          "sibling domains in the warehouse owned by the same orgs. Max 10.",
+          "Returns the organization(s) attributed to each domain, plus any " +
+          "sibling domains in the warehouse attributed to the same orgs. Max 10.",
       ),
     response_format: z
       .nativeEnum(ResponseFormat)
@@ -163,8 +163,9 @@ export function getApiKey(): string {
     throw new Error(
       "CTSCOUT_API_KEY environment variable is not set. " +
         "Get a free key at https://ctscout.dev (no email, no signup) and " +
-        "set it via your MCP client config (e.g. for Claude Code, in " +
-        "~/.claude/mcp.json under env.CTSCOUT_API_KEY).",
+        "set it via your MCP client config (e.g. for Claude Code, " +
+        "`claude mcp add -s user` writes it to ~/.claude.json under " +
+        "env.CTSCOUT_API_KEY).",
     );
   }
   return key;
@@ -708,7 +709,7 @@ Returns:
 Examples:
   - Use when: "Find all domains owned by Cloudflare" -> { company_name: "Cloudflare" }
   - Use when: "What domains does Goldman own?" -> { company_name: "Goldman Sachs" }
-  - Don't use when: You have a specific domain and want to find its owner — use ctscout_lookup_domain instead.
+  - Don't use when: You have a specific domain and want to find the organization it's attributed to — use ctscout_lookup_domain instead.
 
 Auth & limits:
   - Requires CTSCOUT_API_KEY env var. Get a free key (no email) at https://ctscout.dev.
@@ -790,7 +791,7 @@ Examples:
 
 Coverage caveat:
   - Returns 0 results if domain isn't in the warehouse. Either the domain is not in our index, or no OV/EV certs have been issued for it. DV-only domains (Let's Encrypt etc.) are typically not indexed.
-  - When a domain IS in the warehouse but ownership is via subsidiary (e.g. an Allianz brand domain), the 'org' field shows the cert-subject organization which may differ from the brand on the homepage.
+  - When a domain IS in the warehouse but the attributed org is a subsidiary (e.g. an Allianz brand domain), the 'org' field shows the cert-subject organization which may differ from the brand on the homepage.
 
 Auth & limits: same as ctscout_search_company.`,
     inputSchema: LookupDomainInputSchema.shape,
