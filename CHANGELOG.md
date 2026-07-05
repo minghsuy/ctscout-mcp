@@ -19,6 +19,11 @@ version heading on release.
 
 ### Changed
 
+- `SERVER_VERSION` is read from package.json at runtime instead of a
+  hardcoded string; release.sh smoke-checks the built server's banner (#49)
+- Removed stale benchmark scripts (`scripts/benchmark.ts`, `benchmarks/`)
+  and the `mitata` dev dependency (#47)
+
 - Simplified `truncateIfNeeded` recursion/retry logic (#30)
 - Combined the markdown table formatters into one code path (#31)
 - Perf: avoid array allocations in `topEvidenceLine` fallback (#35) and
