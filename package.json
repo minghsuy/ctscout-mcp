@@ -30,11 +30,14 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "lint": "biome check",
+    "format": "biome check --write",
+    "typecheck": "tsc -p tsconfig.test.json",
     "prepublishOnly": "npm run clean && npm run build",
     "inspect": "npm run build && npx @modelcontextprotocol/inspector node dist/index.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "keywords": [
     "mcp",
@@ -60,6 +63,7 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.2",
     "@types/node": "^22.10.0",
     "@vitest/coverage-v8": "^4.1.9",
     "tsx": "^4.19.2",

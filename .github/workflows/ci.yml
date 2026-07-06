@@ -26,6 +26,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Lint (biome)
+        run: npm run lint
+
+      - name: Type-check tests and config
+        run: npm run typecheck
+
       - name: TypeScript build
         run: npm run build
 

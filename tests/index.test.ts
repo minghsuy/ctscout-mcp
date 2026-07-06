@@ -26,19 +26,18 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
+import type { DomainResult, ScanResponse } from "../src/index.ts";
 import {
   ApiError,
-  SERVER_VERSION,
-  TimeoutError,
   callScan,
   explainError,
   formatScanAsMarkdown,
+  getApiKey,
+  SERVER_VERSION,
+  TimeoutError,
   truncateIfNeeded,
   truncateJsonIfNeeded,
-  getApiKey,
 } from "../src/index.ts";
-import type { DomainResult, ScanResponse } from "../src/index.ts";
 
 // ---------- Fixtures ----------
 
@@ -161,9 +160,7 @@ describe("formatScanAsMarkdown — free tier", () => {
 
   it("surfaces upgrade_hint when truncated", () => {
     const resp: ScanResponse = {
-      domains: [
-        { org: "X", apex_domain: "x.com", cert_count: 1, subdomain_count: 1 },
-      ],
+      domains: [{ org: "X", apex_domain: "x.com", cert_count: 1, subdomain_count: 1 }],
       total: 100,
       truncated: true,
       upgrade_hint: "Upgrade to Pro to see all 100 results.",
@@ -215,11 +212,7 @@ describe("formatScanAsMarkdown — Pro tier", () => {
     enrichment: {
       confidence_band: "verified",
       weight_total: 5.0,
-      matched_via: [
-        "dns_txt_brand_token",
-        "og_site_name_match",
-        "vlm_verdict_verified",
-      ],
+      matched_via: ["dns_txt_brand_token", "og_site_name_match", "vlm_verdict_verified"],
       evidence: {
         dns_txt_brand_token: "verified via google-site-verification, atlassian-domain-verification",
         og_site_name_match: 'og:site_name="Coalition"',
@@ -291,7 +284,9 @@ describe("formatScanAsMarkdown — Pro tier", () => {
       ]),
     );
     expect(md).not.toContain("undefined");
-    expect(md).toContain("| `origin-pro.com` | Origin RDAP Org | ⚪ insufficient | _none_ | _no evidence_ |");
+    expect(md).toContain(
+      "| `origin-pro.com` | Origin RDAP Org | ⚪ insufficient | _none_ | _no evidence_ |",
+    );
   });
 
   it("handles missing fields in degraded Phase 5 Pro table (undefined-cells bug) gracefully", () => {
@@ -330,7 +325,9 @@ describe("formatScanAsMarkdown — Pro tier", () => {
     };
 
     const md = formatScanAsMarkdown("Evil Inc", proResponse([evilRow]));
-    expect(md).toContain("| `evil.com│x` | Evil Inc corp | ✅ verified | dns_txt_brand_token, og_site_name_match, vlm_verdict_verified | verified via google-site-verification, atlassian-domain-verification |");
+    expect(md).toContain(
+      "| `evil.com│x` | Evil Inc corp | ✅ verified | dns_txt_brand_token, og_site_name_match, vlm_verdict_verified | verified via google-site-verification, atlassian-domain-verification |",
+    );
   });
 
   it("marks vlm_override=true with a 🚫VLM-veto tag", () => {
@@ -390,10 +387,7 @@ describe("formatScanAsMarkdown — Pro tier", () => {
       attributed_to: "Test Co",
       // No enrichment field — degraded path
     };
-    const md = formatScanAsMarkdown(
-      "Test Co",
-      proResponse([verifiedRow, degradedRow]),
-    );
+    const md = formatScanAsMarkdown("Test Co", proResponse([verifiedRow, degradedRow]));
     // Both rows present; the degraded one uses _missing_ band
     expect(md).toContain("`coalition.com`");
     expect(md).toContain("`broken.example`");
@@ -406,7 +400,7 @@ describe("formatScanAsMarkdown — Pro tier", () => {
       enrichment: {
         ...verifiedRow.enrichment!,
         evidence: {
-          dns_txt_brand_token: 'verified | including spurious | pipe characters',
+          dns_txt_brand_token: "verified | including spurious | pipe characters",
         },
       },
     };
@@ -759,9 +753,7 @@ describe("truncateJsonIfNeeded", () => {
 
   it("emits a minimal valid envelope when top-level fields alone exceed the limit", () => {
     const resp: ScanResponse = {
-      ...freeResponse([
-        { org: "X", apex_domain: "x.com", cert_count: 1, subdomain_count: 1 },
-      ]),
+      ...freeResponse([{ org: "X", apex_domain: "x.com", cert_count: 1, subdomain_count: 1 }]),
       run_metadata: { blob: "x".repeat(30_000) },
     };
     const result = truncateJsonIfNeeded(resp);
@@ -796,7 +788,8 @@ describe("explainError", () => {
   });
 
   it("escapes markdown characters in 400 response body to prevent injection", () => {
-    const maliciousBody = "Error `code` with [link](https://evil.com) and ![img](foo) and _italic_ and *bold*";
+    const maliciousBody =
+      "Error `code` with [link](https://evil.com) and ![img](foo) and _italic_ and *bold*";
     const msg = explainError(new ApiError(400, maliciousBody));
     expect(msg).toContain("Bad request");
     expect(msg).not.toContain("`code`");
@@ -838,9 +831,7 @@ describe("explainError", () => {
   });
 
   it("preserves CTSCOUT_API_KEY missing message verbatim", () => {
-    const err = new Error(
-      "CTSCOUT_API_KEY environment variable is not set. ...",
-    );
+    const err = new Error("CTSCOUT_API_KEY environment variable is not set. ...");
     const msg = explainError(err);
     expect(msg).toBe(err.message);
   });
@@ -908,8 +899,7 @@ const SCOUT_RESULT_FIXTURE: ScanResponse = {
       evidence: [
         {
           source_type: "ct_org_match",
-          description:
-            "Cert org 'CNA Financial Corporation' matches target (score=1.00)",
+          description: "Cert org 'CNA Financial Corporation' matches target (score=1.00)",
           signal_type: "cert_org_match",
           signal_weight: 0.8,
         },
@@ -935,8 +925,7 @@ const SCOUT_RESULT_FIXTURE: ScanResponse = {
       evidence: [
         {
           source_type: "ct_org_match",
-          description:
-            "Cert org 'CNA Financial Corporation' matches target (score=1.00)",
+          description: "Cert org 'CNA Financial Corporation' matches target (score=1.00)",
           signal_type: "cert_org_match",
           signal_weight: 0.8,
         },
@@ -984,9 +973,7 @@ describe("formatScanAsMarkdown — Pro tier (real ScoutResult shape)", () => {
   });
 
   it("renders the first evidence description", () => {
-    expect(md).toContain(
-      "Cert org 'CNA Financial Corporation' matches target",
-    );
+    expect(md).toContain("Cert org 'CNA Financial Corporation' matches target");
   });
 
   it("marks the response as Pro tier in the header", () => {
@@ -1026,9 +1013,7 @@ describe("formatScanAsMarkdown — ScoutResult confidence band thresholds", () =
     );
   });
   it("0.80 -> likely", () => {
-    expect(formatScanAsMarkdown("Test", scoutResultWithConfidence(0.8))).toContain(
-      "likely (0.80)",
-    );
+    expect(formatScanAsMarkdown("Test", scoutResultWithConfidence(0.8))).toContain("likely (0.80)");
   });
   it("0.60 -> possible", () => {
     expect(formatScanAsMarkdown("Test", scoutResultWithConfidence(0.6))).toContain(
@@ -1036,9 +1021,7 @@ describe("formatScanAsMarkdown — ScoutResult confidence band thresholds", () =
     );
   });
   it("0.30 -> low", () => {
-    expect(formatScanAsMarkdown("Test", scoutResultWithConfidence(0.3))).toContain(
-      "low (0.30)",
-    );
+    expect(formatScanAsMarkdown("Test", scoutResultWithConfidence(0.3))).toContain("low (0.30)");
   });
   it("null confidence does not crash (regression guard for .toFixed on null)", () => {
     // Pre-fix this would throw `TypeError: Cannot read properties of null
@@ -1196,9 +1179,7 @@ describe("formatScanAsMarkdown - ScoutResult description type guard", () => {
   }
 
   it("string description renders as-is", () => {
-    expect(withEvidenceDescription("real evidence text")).toContain(
-      "real evidence text",
-    );
+    expect(withEvidenceDescription("real evidence text")).toContain("real evidence text");
   });
 
   it("number description does NOT leak as '42' or similar - em-dash instead", () => {
@@ -1426,7 +1407,7 @@ describe("callScan", () => {
           "Content-Type": "application/json",
         }),
         body: JSON.stringify({ company_name: "Test" }),
-      })
+      }),
     );
     expect(result).toEqual(mockResponse);
   });
@@ -1434,14 +1415,14 @@ describe("callScan", () => {
   it("throws error if CTSCOUT_API_KEY is not set", async () => {
     delete process.env.CTSCOUT_API_KEY;
     await expect(callScan({ company_name: "Test" })).rejects.toThrow(
-      "CTSCOUT_API_KEY environment variable is not set"
+      "CTSCOUT_API_KEY environment variable is not set",
     );
   });
 
   it("throws error if CTSCOUT_API_KEY is empty", async () => {
     process.env.CTSCOUT_API_KEY = "   ";
     await expect(callScan({ company_name: "Test" })).rejects.toThrow(
-      "CTSCOUT_API_KEY environment variable is not set"
+      "CTSCOUT_API_KEY environment variable is not set",
     );
   });
 
@@ -1473,9 +1454,7 @@ describe("callScan", () => {
 
     globalThis.fetch = vi.fn().mockRejectedValue(abortError);
 
-    await expect(callScan({ company_name: "Test" })).rejects.toThrowError(
-      TimeoutError
-    );
+    await expect(callScan({ company_name: "Test" })).rejects.toThrowError(TimeoutError);
   });
 });
 
@@ -1505,8 +1484,17 @@ describe("markdown-escaping chokepoint guard — free-tier table (cellSafe)", ()
 
   it("pipe in org is replaced with Unicode lookalike (│), not bare |", () => {
     const md = formatScanAsMarkdown("Test", {
-      domains: [{ org: "Evil | injected column", apex_domain: "safe.com", cert_count: 1, subdomain_count: 0 }],
-      total: 1, truncated: false, source: "warehouse",
+      domains: [
+        {
+          org: "Evil | injected column",
+          apex_domain: "safe.com",
+          cert_count: 1,
+          subdomain_count: 0,
+        },
+      ],
+      total: 1,
+      truncated: false,
+      source: "warehouse",
     });
     const rows = md.split("\n").filter((l) => l.startsWith("| `safe.com`"));
     expect(rows).toHaveLength(1);
@@ -1517,8 +1505,12 @@ describe("markdown-escaping chokepoint guard — free-tier table (cellSafe)", ()
 
   it("newline in org is collapsed to space — no row split", () => {
     const md = formatScanAsMarkdown("Test", {
-      domains: [{ org: "line one\nline two", apex_domain: "safe.com", cert_count: 1, subdomain_count: 0 }],
-      total: 1, truncated: false, source: "warehouse",
+      domains: [
+        { org: "line one\nline two", apex_domain: "safe.com", cert_count: 1, subdomain_count: 0 },
+      ],
+      total: 1,
+      truncated: false,
+      source: "warehouse",
     });
     const rows = md.split("\n").filter((l) => l.startsWith("| `safe.com`"));
     expect(rows).toHaveLength(1);
@@ -1528,8 +1520,12 @@ describe("markdown-escaping chokepoint guard — free-tier table (cellSafe)", ()
 
   it("CRLF in org is collapsed to space — no row split", () => {
     const md = formatScanAsMarkdown("Test", {
-      domains: [{ org: "line one\r\nline two", apex_domain: "safe.com", cert_count: 1, subdomain_count: 0 }],
-      total: 1, truncated: false, source: "warehouse",
+      domains: [
+        { org: "line one\r\nline two", apex_domain: "safe.com", cert_count: 1, subdomain_count: 0 },
+      ],
+      total: 1,
+      truncated: false,
+      source: "warehouse",
     });
     const rows = md.split("\n").filter((l) => l.startsWith("| `safe.com`"));
     expect(rows).toHaveLength(1);
@@ -1539,7 +1535,9 @@ describe("markdown-escaping chokepoint guard — free-tier table (cellSafe)", ()
   it("pipe in domain is replaced with │ inside the code-span cell", () => {
     const md = formatScanAsMarkdown("Test", {
       domains: [{ org: "Safe Org", apex_domain: "evil.com|x", cert_count: 1, subdomain_count: 0 }],
-      total: 1, truncated: false, source: "warehouse",
+      total: 1,
+      truncated: false,
+      source: "warehouse",
     });
     // The domain cell is wrapped in backticks: | `evil.com│x` |
     // Filter lines that contain the Safe Org (unique anchor).
@@ -1552,8 +1550,12 @@ describe("markdown-escaping chokepoint guard — free-tier table (cellSafe)", ()
 
   it("newline in domain is collapsed inside the code-span cell", () => {
     const md = formatScanAsMarkdown("Test", {
-      domains: [{ org: "Safe Org", apex_domain: "evil.com\nmalicious", cert_count: 1, subdomain_count: 0 }],
-      total: 1, truncated: false, source: "warehouse",
+      domains: [
+        { org: "Safe Org", apex_domain: "evil.com\nmalicious", cert_count: 1, subdomain_count: 0 },
+      ],
+      total: 1,
+      truncated: false,
+      source: "warehouse",
     });
     const rows = md.split("\n").filter((l) => l.includes("Safe Org"));
     expect(rows).toHaveLength(1);
@@ -1570,7 +1572,9 @@ describe("markdown-escaping chokepoint guard — heading (cellSafe)", () => {
   // markdown lines above the table. Same chokepoint as the table cells.
   const oneRow: ScanResponse = {
     domains: [{ org: "Safe Org", apex_domain: "safe.com", cert_count: 1, subdomain_count: 0 }],
-    total: 1, truncated: false, source: "warehouse",
+    total: 1,
+    truncated: false,
+    source: "warehouse",
   };
 
   it("newline in query cannot inject a markdown line above the table", () => {
@@ -1597,7 +1601,10 @@ describe("markdown-escaping chokepoint guard — heading (cellSafe)", () => {
 
   it("empty-result path routes through the same heading chokepoint", () => {
     const md = formatScanAsMarkdown("Evil\n# injected", {
-      domains: [], total: 0, truncated: false, source: "warehouse",
+      domains: [],
+      total: 0,
+      truncated: false,
+      source: "warehouse",
     });
     const lines = md.split("\n");
     expect(lines[0]).toBe("# ctscout results for: Evil # injected");
@@ -1624,14 +1631,16 @@ describe("markdown-escaping chokepoint guard — heading (cellSafe)", () => {
 describe("markdown-escaping chokepoint guard — scout-tier table (cellSafe)", () => {
   function scoutRow(overrides: Partial<DomainResult>): ScanResponse {
     return {
-      domains: [{
-        domain: "safe.com",
-        confidence: 0.9,
-        sources: ["ct_org_match"],
-        evidence: [{ description: "safe evidence" }],
-        cert_org_names: ["Safe Org"],
-        ...overrides,
-      }],
+      domains: [
+        {
+          domain: "safe.com",
+          confidence: 0.9,
+          sources: ["ct_org_match"],
+          evidence: [{ description: "safe evidence" }],
+          cert_org_names: ["Safe Org"],
+          ...overrides,
+        },
+      ],
     };
   }
 
@@ -1640,8 +1649,16 @@ describe("markdown-escaping chokepoint guard — scout-tier table (cellSafe)", (
     ["org with newline", "org\nnewline", { cert_org_names: ["org\nnewline"] }],
     ["domain with pipe", "safe.com|evil", { domain: "safe.com|evil" }],
     ["domain with newline", "safe.com\nevil", { domain: "safe.com\nevil" }],
-    ["evidence description with pipe", "evidence | injected", { evidence: [{ description: "evidence | injected" }] }],
-    ["evidence description with newline", "line1\nline2", { evidence: [{ description: "line1\nline2" }] }],
+    [
+      "evidence description with pipe",
+      "evidence | injected",
+      { evidence: [{ description: "evidence | injected" }] },
+    ],
+    [
+      "evidence description with newline",
+      "line1\nline2",
+      { evidence: [{ description: "line1\nline2" }] },
+    ],
     ["sources with pipe", "src|evil", { sources: ["src|evil"] }],
     ["org with CRLF", "org\r\nnewline", { cert_org_names: ["org\r\nnewline"] }],
   ];
@@ -1650,7 +1667,9 @@ describe("markdown-escaping chokepoint guard — scout-tier table (cellSafe)", (
     it(`scout-tier: ${label} does not break the table row`, () => {
       const md = formatScanAsMarkdown("Test", scoutRow(overrides));
       // Find any data rows (lines with table cells after the header).
-      const dataRows = md.split("\n").filter((l) => l.startsWith("|") && !l.startsWith("| Domain") && !l.startsWith("|---|"));
+      const dataRows = md
+        .split("\n")
+        .filter((l) => l.startsWith("|") && !l.startsWith("| Domain") && !l.startsWith("|---|"));
       expect(dataRows, `${label}: expected exactly 1 data row`).toHaveLength(1);
       const row = dataRows[0];
       // Scout rows have 5 cells → 6 pipes.
@@ -1673,16 +1692,20 @@ describe("markdown-escaping chokepoint guard — pro (phase-5) table (escapeForT
 
   it("pipe in evidence value is escaped (escapeForTable path)", () => {
     const md = formatScanAsMarkdown("Test", {
-      domains: [{
-        apex_domain: "safe.com",
-        attributed_to: "Safe Org",
-        enrichment: { ...baseEnrichment, evidence: { dns_txt_brand_token: "a | b | c" } },
-      }],
+      domains: [
+        {
+          apex_domain: "safe.com",
+          attributed_to: "Safe Org",
+          enrichment: { ...baseEnrichment, evidence: { dns_txt_brand_token: "a | b | c" } },
+        },
+      ],
       total: 1,
       truncated: false,
       source: "live-enriched",
     });
-    const dataRows = md.split("\n").filter((l) => l.startsWith("|") && !l.startsWith("| Domain") && !l.startsWith("|---|"));
+    const dataRows = md
+      .split("\n")
+      .filter((l) => l.startsWith("|") && !l.startsWith("| Domain") && !l.startsWith("|---|"));
     expect(dataRows).toHaveLength(1);
     const row = dataRows[0];
     // Pro rows have 5 cells → 6 pipes; escaped \| inside cell should not add extra bare pipes.
@@ -1692,16 +1715,23 @@ describe("markdown-escaping chokepoint guard — pro (phase-5) table (escapeForT
 
   it("newline in evidence value is collapsed (escapeForTable path)", () => {
     const md = formatScanAsMarkdown("Test", {
-      domains: [{
-        apex_domain: "safe.com",
-        attributed_to: "Safe Org",
-        enrichment: { ...baseEnrichment, evidence: { dns_txt_brand_token: "line1\r\nline2\nline3" } },
-      }],
+      domains: [
+        {
+          apex_domain: "safe.com",
+          attributed_to: "Safe Org",
+          enrichment: {
+            ...baseEnrichment,
+            evidence: { dns_txt_brand_token: "line1\r\nline2\nline3" },
+          },
+        },
+      ],
       total: 1,
       truncated: false,
       source: "live-enriched",
     });
-    const dataRows = md.split("\n").filter((l) => l.startsWith("|") && !l.startsWith("| Domain") && !l.startsWith("|---|"));
+    const dataRows = md
+      .split("\n")
+      .filter((l) => l.startsWith("|") && !l.startsWith("| Domain") && !l.startsWith("|---|"));
     expect(dataRows).toHaveLength(1);
     expect(dataRows[0]).not.toMatch(/[\r\n]/);
     expect(dataRows[0]).toContain("line1 line2 line3");
@@ -1709,16 +1739,20 @@ describe("markdown-escaping chokepoint guard — pro (phase-5) table (escapeForT
 
   it("pipe in attributed_to is neutralised (cellSafe path)", () => {
     const md = formatScanAsMarkdown("Test", {
-      domains: [{
-        apex_domain: "safe.com",
-        attributed_to: "Org | Inc | Evil",
-        enrichment: baseEnrichment,
-      }],
+      domains: [
+        {
+          apex_domain: "safe.com",
+          attributed_to: "Org | Inc | Evil",
+          enrichment: baseEnrichment,
+        },
+      ],
       total: 1,
       truncated: false,
       source: "live-enriched",
     });
-    const dataRows = md.split("\n").filter((l) => l.startsWith("|") && !l.startsWith("| Domain") && !l.startsWith("|---|"));
+    const dataRows = md
+      .split("\n")
+      .filter((l) => l.startsWith("|") && !l.startsWith("| Domain") && !l.startsWith("|---|"));
     expect(dataRows).toHaveLength(1);
     // No bare pipe inside the cell (all replaced with │).
     expect(dataRows[0]).not.toContain("Org | Inc");
@@ -1728,16 +1762,20 @@ describe("markdown-escaping chokepoint guard — pro (phase-5) table (escapeForT
 
   it("newline in attributed_to is collapsed (cellSafe path)", () => {
     const md = formatScanAsMarkdown("Test", {
-      domains: [{
-        apex_domain: "safe.com",
-        attributed_to: "Org\nnewline",
-        enrichment: baseEnrichment,
-      }],
+      domains: [
+        {
+          apex_domain: "safe.com",
+          attributed_to: "Org\nnewline",
+          enrichment: baseEnrichment,
+        },
+      ],
       total: 1,
       truncated: false,
       source: "live-enriched",
     });
-    const dataRows = md.split("\n").filter((l) => l.startsWith("|") && !l.startsWith("| Domain") && !l.startsWith("|---|"));
+    const dataRows = md
+      .split("\n")
+      .filter((l) => l.startsWith("|") && !l.startsWith("| Domain") && !l.startsWith("|---|"));
     expect(dataRows).toHaveLength(1);
     expect(dataRows[0]).not.toMatch(/[\r\n]/);
     expect(dataRows[0]).toContain("Org newline");
@@ -1748,16 +1786,20 @@ describe("markdown-escaping chokepoint guard — pro (phase-5) table (escapeForT
     // would break the markdown table. This test would have FAILED before the
     // production fix that routed signalSummary through cellSafe().
     const md = formatScanAsMarkdown("Test", {
-      domains: [{
-        apex_domain: "safe.com",
-        attributed_to: "Safe Org",
-        enrichment: { ...baseEnrichment, matched_via: ["signal|one", "signal|two"] },
-      }],
+      domains: [
+        {
+          apex_domain: "safe.com",
+          attributed_to: "Safe Org",
+          enrichment: { ...baseEnrichment, matched_via: ["signal|one", "signal|two"] },
+        },
+      ],
       total: 1,
       truncated: false,
       source: "live-enriched",
     });
-    const dataRows = md.split("\n").filter((l) => l.startsWith("|") && !l.startsWith("| Domain") && !l.startsWith("|---|"));
+    const dataRows = md
+      .split("\n")
+      .filter((l) => l.startsWith("|") && !l.startsWith("| Domain") && !l.startsWith("|---|"));
     expect(dataRows).toHaveLength(1);
     const row = dataRows[0];
     // Pro rows have 5 cells → 6 unescaped pipes.
@@ -1769,32 +1811,40 @@ describe("markdown-escaping chokepoint guard — pro (phase-5) table (escapeForT
 
   it("newline in signalSummary (matched_via) is collapsed — no row split", () => {
     const md = formatScanAsMarkdown("Test", {
-      domains: [{
-        apex_domain: "safe.com",
-        attributed_to: "Safe Org",
-        enrichment: { ...baseEnrichment, matched_via: ["signal\none", "sig\r\ntwo"] },
-      }],
+      domains: [
+        {
+          apex_domain: "safe.com",
+          attributed_to: "Safe Org",
+          enrichment: { ...baseEnrichment, matched_via: ["signal\none", "sig\r\ntwo"] },
+        },
+      ],
       total: 1,
       truncated: false,
       source: "live-enriched",
     });
-    const dataRows = md.split("\n").filter((l) => l.startsWith("|") && !l.startsWith("| Domain") && !l.startsWith("|---|"));
+    const dataRows = md
+      .split("\n")
+      .filter((l) => l.startsWith("|") && !l.startsWith("| Domain") && !l.startsWith("|---|"));
     expect(dataRows).toHaveLength(1);
     expect(dataRows[0]).not.toMatch(/[\r\n]/);
   });
 
   it("backtick and hash in signalSummary pass through cellSafe without breaking structure", () => {
     const md = formatScanAsMarkdown("Test", {
-      domains: [{
-        apex_domain: "safe.com",
-        attributed_to: "Safe Org",
-        enrichment: { ...baseEnrichment, matched_via: ["`backtick`", "# hash"] },
-      }],
+      domains: [
+        {
+          apex_domain: "safe.com",
+          attributed_to: "Safe Org",
+          enrichment: { ...baseEnrichment, matched_via: ["`backtick`", "# hash"] },
+        },
+      ],
       total: 1,
       truncated: false,
       source: "live-enriched",
     });
-    const dataRows = md.split("\n").filter((l) => l.startsWith("|") && !l.startsWith("| Domain") && !l.startsWith("|---|"));
+    const dataRows = md
+      .split("\n")
+      .filter((l) => l.startsWith("|") && !l.startsWith("| Domain") && !l.startsWith("|---|"));
     expect(dataRows).toHaveLength(1);
     // Still exactly 6 unescaped pipes — structure intact.
     expect((dataRows[0].match(/(?<!\\)\|/g) ?? []).length).toBe(6);
@@ -1805,9 +1855,9 @@ describe("markdown-escaping chokepoint guard — pro (phase-5) table (escapeForT
 
 describe("SERVER_VERSION", () => {
   it("matches package.json's version (single source — bump package.json only)", () => {
-    const pkg = JSON.parse(
-      readFileSync(resolve(__dirname, "..", "package.json"), "utf8"),
-    ) as { version: string };
+    const pkg = JSON.parse(readFileSync(resolve(__dirname, "..", "package.json"), "utf8")) as {
+      version: string;
+    };
     // Guards against reintroducing a hardcoded version literal in
     // src/index.ts that drifts from package.json (the failure class
     // scripts/release.sh used to detect after the fact).

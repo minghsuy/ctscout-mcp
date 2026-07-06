@@ -13,6 +13,8 @@ version heading on release.
 
 ### Added
 
+- Biome lint/format gate (`npm run lint`) and test-file type-checking
+  (`npm run typecheck` via `tsconfig.test.json`), both enforced in CI (#46)
 - Vitest coverage gate in CI (#38)
 - Markdown-escaping guard test covering all table formatter paths (#39)
 - Unit tests for `callScan` (#29) and `getApiKey` (#24)
@@ -21,6 +23,8 @@ version heading on release.
 
 ### Changed
 
+- **Node floor raised to `>=20`** in `engines` (18 is EOL since April 2025;
+  CI has only ever tested 20) (#46)
 - `SERVER_VERSION` is read from package.json at runtime instead of a
   hardcoded string; release.sh smoke-checks the built server's banner (#49)
 - Removed stale benchmark scripts (`scripts/benchmark.ts`, `benchmarks/`)
