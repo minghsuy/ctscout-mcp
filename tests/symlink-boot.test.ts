@@ -37,77 +37,80 @@ describe("isDirectlyExecuted (symlink boot)", () => {
   // `npm run build` should run before `npm test` in CI / via the release
   // script. Skip explicitly (so Vitest reports skipped, not 0-assertion pass)
   // if dist isn't there.
-  it.skipIf(!existsSync(DIST_INDEX))("boots when invoked via a symlink (npx / npm install -g case)", async () => {
-    const tmpDir = mkdtempSync(join(tmpdir(), "ctscout-symlink-"));
-    const symlinkPath = join(tmpDir, "ctscout-mcp-server");
-    try {
-      symlinkSync(DIST_INDEX, symlinkPath);
+  it.skipIf(!existsSync(DIST_INDEX))(
+    "boots when invoked via a symlink (npx / npm install -g case)",
+    async () => {
+      const tmpDir = mkdtempSync(join(tmpdir(), "ctscout-symlink-"));
+      const symlinkPath = join(tmpDir, "ctscout-mcp-server");
+      try {
+        symlinkSync(DIST_INDEX, symlinkPath);
 
-      // Spawn the binary VIA THE SYMLINK — this is the exact code path
-      // that v0.2.0 broke. With realpath-aware comparison, main() runs
-      // and the server prints its boot banner to stderr.
-      const proc = spawn("node", [symlinkPath], {
-        env: {
-          ...process.env,
-          CTSCOUT_API_KEY: "ds_free_test",
-        },
-        stdio: ["pipe", "pipe", "pipe"],
-      });
-
-      let stderr = "";
-
-      // Send an MCP `initialize` request — keeps the server alive long
-      // enough to confirm it boots. If the guard is broken, the process
-      // exits 0 before we even see stderr.
-      proc.stdin.write(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          method: "initialize",
-          params: {
-            protocolVersion: "2024-11-05",
-            capabilities: {},
-            clientInfo: { name: "vitest-symlink-regression", version: "0.0.1" },
+        // Spawn the binary VIA THE SYMLINK — this is the exact code path
+        // that v0.2.0 broke. With realpath-aware comparison, main() runs
+        // and the server prints its boot banner to stderr.
+        const proc = spawn("node", [symlinkPath], {
+          env: {
+            ...process.env,
+            CTSCOUT_API_KEY: "ds_free_test",
           },
-          id: 1,
-        }) + "\n",
-      );
-
-      // Resolve as soon as the boot banner appears on stderr — the healthy
-      // server never exits on its own, so waiting for `close` used to burn
-      // the full 3s on every run (ctscout-mcp#50). The substring asserted
-      // below ends at "running via stdio" (the banner itself continues with
-      // "(api=...)"), and stderr accumulates in order — so once this marker
-      // is present, everything the assertion needs is already captured.
-      // The 3s timer and the `close` listener stay as backstops for the
-      // regression case (broken guard → process exits 0 with empty stderr;
-      // `close`, not `exit`, so piped stderr has flushed before we assert).
-      await new Promise<void>((finish) => {
-        const timer = setTimeout(() => {
-          proc.kill();
-          finish();
-        }, 3000);
-        const done = () => {
-          clearTimeout(timer);
-          finish();
-        };
-        proc.stderr.on("data", (chunk: Buffer) => {
-          stderr += chunk.toString();
-          if (stderr.includes("running via stdio")) {
-            proc.kill();
-            done();
-          }
+          stdio: ["pipe", "pipe", "pipe"],
         });
-        proc.on("close", done);
-      });
 
-      // The boot banner contains the version string and "running via stdio".
-      // v0.2.0's bug produced empty stderr. SERVER_VERSION is read from
-      // package.json at RUNTIME, so asserting the exact version here also
-      // pins that dist/index.js resolves ../package.json from its built
-      // location — on the same symlinked-argv[1] path npx uses.
-      expect(stderr).toContain(`ctscout-mcp-server v${PKG_VERSION} running via stdio`);
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
-    }
-  });
+        let stderr = "";
+
+        // Send an MCP `initialize` request — keeps the server alive long
+        // enough to confirm it boots. If the guard is broken, the process
+        // exits 0 before we even see stderr.
+        proc.stdin.write(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            method: "initialize",
+            params: {
+              protocolVersion: "2024-11-05",
+              capabilities: {},
+              clientInfo: { name: "vitest-symlink-regression", version: "0.0.1" },
+            },
+            id: 1,
+          }) + "\n",
+        );
+
+        // Resolve as soon as the boot banner appears on stderr — the healthy
+        // server never exits on its own, so waiting for `close` used to burn
+        // the full 3s on every run (ctscout-mcp#50). The substring asserted
+        // below ends at "running via stdio" (the banner itself continues with
+        // "(api=...)"), and stderr accumulates in order — so once this marker
+        // is present, everything the assertion needs is already captured.
+        // The 3s timer and the `close` listener stay as backstops for the
+        // regression case (broken guard → process exits 0 with empty stderr;
+        // `close`, not `exit`, so piped stderr has flushed before we assert).
+        await new Promise<void>((finish) => {
+          const timer = setTimeout(() => {
+            proc.kill();
+            finish();
+          }, 3000);
+          const done = () => {
+            clearTimeout(timer);
+            finish();
+          };
+          proc.stderr.on("data", (chunk: Buffer) => {
+            stderr += chunk.toString();
+            if (stderr.includes("running via stdio")) {
+              proc.kill();
+              done();
+            }
+          });
+          proc.on("close", done);
+        });
+
+        // The boot banner contains the version string and "running via stdio".
+        // v0.2.0's bug produced empty stderr. SERVER_VERSION is read from
+        // package.json at RUNTIME, so asserting the exact version here also
+        // pins that dist/index.js resolves ../package.json from its built
+        // location — on the same symlinked-argv[1] path npx uses.
+        expect(stderr).toContain(`ctscout-mcp-server v${PKG_VERSION} running via stdio`);
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
 });

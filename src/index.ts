@@ -350,7 +350,7 @@ function buildLegalEntitySuggestions(rawInput: string): string[] {
       "",
       `  • ${input} Insurance Company`,
       `  • ${input} Financial Services Group`,
-      `  • The ${input} Financial Services Group, Inc.`
+      `  • The ${input} Financial Services Group, Inc.`,
     );
   }
 
@@ -392,9 +392,7 @@ export function formatScanAsMarkdown(
     // `truncated` flag without a hint is not our size-drop signal and
     // correctly falls through to the "No domains found" message.
     if (response.truncated && response.upgrade_hint) {
-      lines.push(
-        "All matching domains were dropped to keep the response under the size limit.",
-      );
+      lines.push("All matching domains were dropped to keep the response under the size limit.");
       lines.push("");
       lines.push(`> ${response.upgrade_hint}`);
       return lines.join("\n");
@@ -420,8 +418,7 @@ export function formatScanAsMarkdown(
   // column mapping (formatTable's per-row `??` fallbacks degrade to "—"
   // rather than throwing).
   const first = response.domains[0];
-  const isScoutResult =
-    typeof first.domain === "string" && typeof first.apex_domain !== "string";
+  const isScoutResult = typeof first.domain === "string" && typeof first.apex_domain !== "string";
 
   // Phase-5 fictional Pro detection (kept for backward compat). Only
   // considered when the response isn't already ScoutResult-shaped.
@@ -483,9 +480,7 @@ function formatTable(domains: DomainResult[], kind: TableKind): string {
       const enriched = d.enrichment;
       if (enriched == null) {
         // Mixed-tier response (degraded apex from `_degraded()` in Pro /scan).
-        rows.push(
-          `| \`${cellSafe(domain, 60)}\` | ${cellSafe(org, 50)} | _missing_ | — | — |`,
-        );
+        rows.push(`| \`${cellSafe(domain, 60)}\` | ${cellSafe(org, 50)} | _missing_ | — | — |`);
       } else {
         const bandEmoji = bandIndicator(enriched.confidence_band);
         const overrideTag = enriched.vlm_override ? " 🚫VLM-veto" : "";
@@ -505,8 +500,7 @@ function formatTable(domains: DomainResult[], kind: TableKind): string {
       // turns undefined into "—" so we don't need a trailing `?? undefined`.
       const org = certOrgs[0] ?? d.rdap_org ?? d.org;
       const conf = d.confidence;
-      const confCell =
-        conf != null ? `${confidenceBand(conf)} (${conf.toFixed(2)})` : "—";
+      const confCell = conf != null ? `${confidenceBand(conf)} (${conf.toFixed(2)})` : "—";
       const sources = d.sources ?? [];
       // Show first N sources and append a "+M" indicator for any overflow,
       // so callers can tell when they're looking at an incomplete list.
@@ -519,8 +513,7 @@ function formatTable(domains: DomainResult[], kind: TableKind): string {
       // origin ever sends a non-string description (number, object, null),
       // we fall back to em-dash instead of stringifying via cellSafe.
       const rawDescription = d.evidence?.[0]?.description;
-      const firstDescription =
-        typeof rawDescription === "string" ? rawDescription : undefined;
+      const firstDescription = typeof rawDescription === "string" ? rawDescription : undefined;
       rows.push(
         `| \`${cellSafe(domain, 60)}\` | ${cellSafe(org, 50)} | ${confCell} | ${cellSafe(sourcesCell, 40)} | ${cellSafe(firstDescription, 80)} |`,
       );
@@ -548,7 +541,10 @@ function confidenceBand(c: number | null | undefined): string {
 // null/undefined/empty inputs, and truncate with ellipsis past `maxLen`.
 function cellSafe(s: string | null | undefined, maxLen = 80): string {
   if (s == null) return "—";
-  const stripped = String(s).replace(/\|/g, "│").replace(/[\r\n]+/g, " ").trim();
+  const stripped = String(s)
+    .replace(/\|/g, "│")
+    .replace(/[\r\n]+/g, " ")
+    .trim();
   if (stripped.length === 0) return "—";
   return stripped.length > maxLen ? `${stripped.slice(0, maxLen - 1)}…` : stripped;
 }
@@ -664,9 +660,7 @@ export function truncateIfNeeded(
   // Re-render with the ORIGINAL query + hint (not "(truncated)") so the
   // truncated header still reads `# ctscout results for: <query>` and the
   // call signature stops lying about the dropped context (ctscout-mcp#41).
-  return truncateWithRender(text, structured, (s) =>
-    formatScanAsMarkdown(query, s, hint),
-  );
+  return truncateWithRender(text, structured, (s) => formatScanAsMarkdown(query, s, hint));
 }
 
 // JSON-format responses must respect CHARACTER_LIMIT too (ctscout-mcp#42).
@@ -877,17 +871,13 @@ async function main(): Promise<void> {
   try {
     getApiKey();
   } catch (err) {
-    console.error(
-      err instanceof Error ? err.message : `Startup error: ${String(err)}`,
-    );
+    console.error(err instanceof Error ? err.message : `Startup error: ${String(err)}`);
     process.exit(1);
   }
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error(
-    `${SERVER_NAME} v${SERVER_VERSION} running via stdio (api=${API_BASE_URL})`,
-  );
+  console.error(`${SERVER_NAME} v${SERVER_VERSION} running via stdio (api=${API_BASE_URL})`);
 }
 
 // Only auto-boot when invoked directly (e.g. via `node dist/index.js`
