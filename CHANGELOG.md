@@ -16,6 +16,8 @@ version heading on release.
 - Vitest coverage gate in CI (#38)
 - Markdown-escaping guard test covering all table formatter paths (#39)
 - Unit tests for `callScan` (#29) and `getApiKey` (#24)
+- `types` field and a minimal `exports` map in package.json for library
+  consumers of the exported formatter/API types (#50)
 
 ### Changed
 
@@ -38,6 +40,10 @@ version heading on release.
 - Truncated renders preserve the original query and format hint context (#54)
 - Attribution wording in the `lookup_domain` schema and the config path
   shown in the `getApiKey` error (#55)
+- The caller-controlled query is now escaped through the cellSafe
+  chokepoint in both places it was interpolated raw — the results heading
+  and the legal-entity did-you-mean suggestions — so a newline in
+  `company_name` can no longer inject markdown lines into the output (#50)
 
 ### Security
 
