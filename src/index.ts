@@ -302,8 +302,8 @@ function escapeMarkdown(text: string): string {
 }
 
 // Bound the raw API error body before rendering. `ApiError.responseBody`
-// captures the upstream body whole (a proxy's HTML error page or a giant
-// validation payload lands here unbounded — ctscout-mcp#43). Truncate
+// captures the upstream body up to ERROR_BODY_CAPTURE_LIMIT (see
+// readBoundedText, ctscout-mcp#57; render-side excerpt bound: #56/#43). Truncate
 // BEFORE escapeMarkdown so escape expansion can't push the excerpt back
 // over the cap; the marker reports the raw (pre-escape) length.
 function truncateBody(text: string, max = ERROR_BODY_LIMIT): string {
