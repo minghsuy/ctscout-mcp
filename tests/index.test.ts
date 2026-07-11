@@ -1428,11 +1428,10 @@ describe("callScan", () => {
 
   it("throws ApiError if fetch responds with non-200 status", async () => {
     process.env.CTSCOUT_API_KEY = "test-key";
-    globalThis.fetch = vi.fn().mockResolvedValue({
-      ok: false,
-      status: 401,
-      text: async () => "Unauthorized",
-    } as Response);
+    // A real Response gives `readBoundedText` an actual ReadableStream
+    // body, exercising the bounded-reader path (not just the response.text()
+    // fallback) for the common case of a small error body.
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response("Unauthorized", { status: 401 }));
 
     let caughtError: unknown;
     try {
@@ -1444,6 +1443,63 @@ describe("callScan", () => {
     expect(caughtError).toBeInstanceOf(ApiError);
     expect((caughtError as ApiError).status).toBe(401);
     expect((caughtError as ApiError).responseBody).toBe("Unauthorized");
+  });
+
+  it("bounds an oversized error body captured from the response stream (#57)", async () => {
+    process.env.CTSCOUT_API_KEY = "test-key";
+    // 200,000 bytes is far larger than any reasonable capture cap; if
+    // callScan still buffered this via response.text() before bounding,
+    // this would pass too (only stream inspection or memory profiling
+    // would catch that) — the assertion below is on the *result*: the
+    // captured responseBody must be bounded, not on how it was captured.
+    const hugeBody = "e".repeat(200_000);
+    // status 400 (not 5xx) so explainError's body-including branch runs
+    // below and actually exercises the #56/#57 interplay, rather than
+    // hitting a branch that ignores responseBody entirely.
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response(hugeBody, { status: 400 }));
+
+    let caughtError: unknown;
+    try {
+      await callScan({ company_name: "Test" });
+    } catch (err) {
+      caughtError = err;
+    }
+
+    expect(caughtError).toBeInstanceOf(ApiError);
+    expect((caughtError as ApiError).status).toBe(400);
+    const captured = (caughtError as ApiError).responseBody;
+    expect(captured.length).toBeLessThan(hugeBody.length);
+    expect(captured.length).toBeLessThanOrEqual(4096);
+    // Still renders through explainError with a truncation marker: the
+    // render-time bound from #56 (truncateBody, 500 chars) applies on top
+    // of the capture-time bound from #57 (4096 bytes) — the marker's
+    // "chars total" reflects the captured (already-clamped) length, not
+    // the original 200,000-byte body, since capture already discarded the
+    // rest.
+    const msg = explainError(caughtError);
+    expect(msg).toContain("Bad request");
+    expect(msg).toContain(`truncated, ${captured.length} chars total`);
+  });
+
+  it("handles a body-less error response without throwing", async () => {
+    process.env.CTSCOUT_API_KEY = "test-key";
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 503,
+      body: null,
+      text: async () => "",
+    } as unknown as Response);
+
+    let caughtError: unknown;
+    try {
+      await callScan({ company_name: "Test" });
+    } catch (err) {
+      caughtError = err;
+    }
+
+    expect(caughtError).toBeInstanceOf(ApiError);
+    expect((caughtError as ApiError).status).toBe(503);
+    expect((caughtError as ApiError).responseBody).toBe("");
   });
 
   it("throws TimeoutError if fetch throws AbortError", async () => {

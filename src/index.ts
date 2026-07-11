@@ -32,6 +32,14 @@ const SCAN_URL = `${API_BASE_URL}/scan`;
 const REQUEST_TIMEOUT_MS = 30_000;
 const CHARACTER_LIMIT = 25_000;
 const ERROR_BODY_LIMIT = 500;
+// Cap how many bytes of an error-response body we pull off the wire and
+// hold in memory before `truncateBody` (render time) gets to trim it for
+// display. Set well above ERROR_BODY_LIMIT so ordinary error bodies (JSON
+// validation payloads, small HTML error pages) are captured whole and
+// truncateBody's "(truncated, N chars total)" marker keeps reporting an
+// accurate count; only bodies larger than this cap have their marker's
+// total clamped to what was actually read — ctscout-mcp#57.
+const ERROR_BODY_CAPTURE_LIMIT = 4096;
 const SERVER_NAME = "ctscout-mcp-server";
 // Single-source the version from package.json — a hardcoded copy here has
 // drifted from package.json before (see scripts/release.sh history). Both
@@ -186,6 +194,53 @@ interface ScanRequestBody {
   seed_domain?: string[];
 }
 
+// Read at most `maxBytes` off a Response's body stream, then cancel the
+// rest instead of buffering the whole thing via response.text() — a
+// hostile or misbehaving origin streaming a multi-MB (or unbounded) error
+// body would otherwise sit fully in memory before `truncateBody` ever
+// gets a chance to trim it — ctscout-mcp#57. Falls back to response.text()
+// when there's no readable stream to bound (a body-less response, or a
+// Response-like object that doesn't expose `.body`, as some test doubles
+// don't) since there's nothing to cap in that case.
+async function readBoundedText(response: Response, maxBytes: number): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) return response.text();
+
+  const chunks: Uint8Array[] = [];
+  let bytesRead = 0;
+
+  try {
+    while (bytesRead < maxBytes) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value || value.byteLength === 0) continue;
+      chunks.push(value);
+      bytesRead += value.byteLength;
+    }
+  } finally {
+    // Stop pulling more data regardless of how the loop exited (cap hit,
+    // natural end, or a read error) — don't let the rest of a huge body
+    // keep streaming in just because we've read enough.
+    await reader.cancel().catch(() => {});
+  }
+
+  // Chunk sizes aren't guaranteed to align with the budget, so the last
+  // chunk read may push `bytesRead` past `maxBytes` — hard-clip when
+  // concatenating. A decode boundary that lands mid-UTF-8-sequence just
+  // becomes a replacement character (TextDecoder's default, non-fatal
+  // behavior); acceptable for a truncated excerpt.
+  const capped = new Uint8Array(Math.min(bytesRead, maxBytes));
+  let offset = 0;
+  for (const chunk of chunks) {
+    if (offset >= capped.length) break;
+    const take = Math.min(chunk.byteLength, capped.length - offset);
+    capped.set(chunk.subarray(0, take), offset);
+    offset += take;
+  }
+
+  return new TextDecoder().decode(capped);
+}
+
 export async function callScan(body: ScanRequestBody): Promise<ScanResponse> {
   const apiKey = getApiKey();
   const controller = new AbortController();
@@ -206,7 +261,10 @@ export async function callScan(body: ScanRequestBody): Promise<ScanResponse> {
     });
 
     if (!response.ok) {
-      throw new ApiError(response.status, await response.text());
+      throw new ApiError(
+        response.status,
+        await readBoundedText(response, ERROR_BODY_CAPTURE_LIMIT),
+      );
     }
 
     return (await response.json()) as ScanResponse;
