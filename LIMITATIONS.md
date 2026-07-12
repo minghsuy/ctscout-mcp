@@ -43,7 +43,7 @@ In practice, this means **cloud-native modern infrastructure is largely invisibl
 
 The warehouse is best at: established US/EU enterprise, government, financial services, traditional infrastructure, education, defense — anyone who buys OV/EV certs as a matter of policy.
 
-As of 2026-05, the warehouse covers approximately 5,976 organizations across 329,000 org-domain pairs.
+As of 2026-07, the warehouse covers approximately 157,000 organizations across 478,000 org-domain pairs (live figures: https://ctscout.dev/stats).
 
 ### Temporal fields mean "when we observed it"
 
