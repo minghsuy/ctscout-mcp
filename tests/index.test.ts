@@ -2151,6 +2151,18 @@ describe("formatBatchAsMarkdown", () => {
     expect(md).toContain("strict\\_match\\_org\\_only");
   });
 
+  it("neutralizes newline injection in a hostile error message", () => {
+    const batch = batchEnvelope([
+      batchErr("Evil Co", 500, "boom\n\n## Injected Heading\n\n| pwned | row |"),
+    ]);
+    const md = formatBatchAsMarkdown(["Evil Co"], batch);
+    // Exactly one H1 (batch header); the injected heading must not become a
+    // real heading line, and the newline must not break out of the blockquote.
+    const headingLines = md.split("\n").filter((l) => /^#{1,6} /.test(l));
+    expect(headingLines).toHaveLength(2); // batch H1 + the "Evil Co" H2 only
+    expect(md).not.toMatch(/^## Injected Heading/m);
+  });
+
   it("uses singular wording for a one-company batch", () => {
     const md = formatBatchAsMarkdown(
       ["Solo"],
@@ -2247,5 +2259,42 @@ describe("truncateBatchJsonIfNeeded", () => {
     const failed = structured.results[1] as { error: { code: number; message: string } };
     expect(failed.error.code).toBe(503);
     expect(failed.error.message).toBe("Batch subrequest budget exceeded");
+  });
+
+  it("bounds a result whose non-domain bulk (candidates[]) exceeds its slice, no eviction", () => {
+    // A large semantic `candidates[]` (legitimate Pro data) with zero domains
+    // can't be trimmed by halving — it must fall back to a minimal envelope,
+    // not stay oversized and evict the sibling via the drop-trailing backstop.
+    const bigCandidates = Array.from({ length: 4000 }, (_, i) => ({
+      org: `Candidate Organization Number ${i} ${"x".repeat(20)}`,
+      similarity: 0.5,
+    }));
+    const heavy = {
+      query: { company_name: "Heavy" },
+      domains: [],
+      total: 0,
+      match_type: "semantic",
+      candidates: bigCandidates,
+    } as unknown as BatchResultItem;
+    const batch = batchEnvelope([heavy, batchOk("Sibling", [oneWarehouseDomain("sibling")])]);
+
+    const { text, structured } = truncateBatchJsonIfNeeded(batch);
+    expect(text.length).toBeLessThanOrEqual(CHARACTER_LIMIT);
+    expect(() => JSON.parse(text)).not.toThrow();
+    // The sibling is NOT dropped to make room for the oversized item.
+    expect(structured.results).toHaveLength(2);
+    expect(text).toContain("sibling.example.com");
+  });
+
+  it("bounds a huge error message rather than dropping siblings", () => {
+    const batch = batchEnvelope([
+      batchErr("Verbose", 500, "e".repeat(200_000)),
+      batchOk("Sibling", [oneWarehouseDomain("sibling")]),
+    ]);
+    const { text, structured } = truncateBatchJsonIfNeeded(batch);
+    expect(text.length).toBeLessThanOrEqual(CHARACTER_LIMIT);
+    expect(() => JSON.parse(text)).not.toThrow();
+    expect(structured.results).toHaveLength(2);
+    expect(text).toContain("sibling.example.com");
   });
 });

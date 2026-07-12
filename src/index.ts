@@ -899,7 +899,12 @@ function renderBatchErrorSection(
 ): string {
   const heading = `## ctscout results for: ${cellSafe(name, 200)}`;
   const codeSafe = Number.isFinite(error?.code) ? error.code : "unknown";
-  const msg = escapeMarkdown(truncateBody(String(error?.message ?? "")));
+  // Collapse line terminators FIRST: a newline in the upstream message would
+  // otherwise break out of the `> ` blockquote and let a hostile/buggy origin
+  // inject a heading or table row (the #50 untrusted-string threat model).
+  // Then bound + escape exactly as explainError does for a single-scan body.
+  const flat = String(error?.message ?? "").replace(/[\r\n]+/g, " ");
+  const msg = escapeMarkdown(truncateBody(flat));
   const block = `${heading}\n\n> ⚠️ This query failed (HTTP ${codeSafe}): ${msg}`;
   return block.length > limit ? `${block.slice(0, Math.max(0, limit - 1))}…` : block;
 }
@@ -932,30 +937,15 @@ function batchQuotaFooter(remaining: number | null): string {
     : `_Remaining quota today: ${remaining}._`;
 }
 
-// Join header + sections + footer, but stop adding sections once the total
-// would breach CHARACTER_LIMIT and note how many were dropped — a defensive
-// backstop for the rare case where per-section rounding + demote chars push
-// the assembled document a hair over budget (mirrors truncateJsonIfNeeded's
-// minimal-envelope guard). With fair-share upstream this is almost never hit.
+// Assemble header + sections + footer. The fair-share split bounds each
+// section to its slice, and the slices plus the reserved envelope overhead sum
+// to <= CHARACTER_LIMIT, so `joined` is already within budget. The hard clamp
+// is a last-resort byte guard in case that invariant is ever broken upstream —
+// it keeps the character-limit contract absolute rather than trusting the
+// arithmetic.
 function assembleBatchMarkdown(header: string, sections: string[], footer: string): string {
-  const parts = [header];
-  let length = header.length + footer.length + 2; // "\n\n" joiner before footer
-  let shown = 0;
-  for (const section of sections) {
-    const add = section.length + 2; // "\n\n" joiner + section
-    if (length + add > CHARACTER_LIMIT) break;
-    parts.push(section);
-    length += add;
-    shown += 1;
-  }
-  if (shown < sections.length) {
-    parts.push(
-      `_${sections.length - shown} of ${sections.length} companies omitted to stay ` +
-        `under the ${CHARACTER_LIMIT}-char limit. Split into smaller batches._`,
-    );
-  }
-  parts.push(footer);
-  return parts.join("\n\n");
+  const joined = [header, ...sections, footer].join("\n\n");
+  return joined.length <= CHARACTER_LIMIT ? joined : joined.slice(0, CHARACTER_LIMIT);
 }
 
 export function formatBatchAsMarkdown(companyNames: string[], batch: ScanBatchResponse): string {
@@ -991,11 +981,24 @@ export function formatBatchAsMarkdown(companyNames: string[], batch: ScanBatchRe
   return assembleBatchMarkdown(header, sections, footer);
 }
 
-// Bound one batch result item's compact JSON to `limit` by halving its domains
-// (reusing truncateWithRender). Error items carry no domains and are already
-// small, so they pass through untouched.
+// Bound one batch result item's compact JSON to `limit`. Every item is
+// guaranteed <= its slice on return, so no item can stay oversized and trip
+// the drop-trailing backstop in truncateBatchJsonIfNeeded (which would silently
+// evict good siblings — the batch-level analogue of the starvation fair-share
+// exists to prevent).
 function truncateResultJson(item: BatchResultItem, limit: number): BatchResultItem {
-  if (isBatchError(item)) return item;
+  if (isBatchError(item)) {
+    if (JSON.stringify(item).length <= limit) return item;
+    // A huge upstream error.message would otherwise blow the slice. Cap it to
+    // ERROR_BODY_LIMIT (as the markdown error section does) — always << slice.
+    return {
+      query: item.query,
+      error: {
+        code: item.error.code,
+        message: truncateBody(String(item.error.message ?? "")),
+      },
+    };
+  }
   const resp: ScanResponse = {
     ...item,
     domains: Array.isArray(item.domains) ? item.domains : [],
@@ -1006,6 +1009,21 @@ function truncateResultJson(item: BatchResultItem, limit: number): BatchResultIt
     (s) => JSON.stringify(s),
     limit,
   );
+  // Halving only trims `domains`. If non-domain bulk (a large `candidates[]`,
+  // the echoed `query`, or arbitrary top-level ScoutResult fields) still
+  // exceeds the slice with zero domains, emit a minimal bounded envelope of
+  // known-small fields — mirrors the single-scan minimal-envelope guard in
+  // truncateJsonIfNeeded so the item never stays oversized.
+  if (JSON.stringify(structured).length > limit) {
+    const originalDomainCount = Array.isArray(item.domains) ? item.domains.length : 0;
+    return {
+      query: item.query,
+      domains: [],
+      total: item.total,
+      truncated: true,
+      upgrade_hint: truncationHint(0, originalDomainCount),
+    };
+  }
   return structured as BatchResultItem;
 }
 
