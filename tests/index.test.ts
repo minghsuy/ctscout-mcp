@@ -26,15 +26,25 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { DomainResult, ScanResponse } from "../src/index.ts";
+import type {
+  BatchResultItem,
+  DomainResult,
+  ScanBatchResponse,
+  ScanResponse,
+} from "../src/index.ts";
 import {
   ApiError,
   callScan,
+  callScanBatch,
   explainError,
+  fairShareBudgets,
+  formatBatchAsMarkdown,
   formatScanAsMarkdown,
   getApiKey,
   SERVER_VERSION,
+  SearchCompanyBatchInputSchema,
   TimeoutError,
+  truncateBatchJsonIfNeeded,
   truncateIfNeeded,
   truncateJsonIfNeeded,
 } from "../src/index.ts";
@@ -1918,5 +1928,324 @@ describe("SERVER_VERSION", () => {
     // src/index.ts that drifts from package.json (the failure class
     // scripts/release.sh used to detect after the fact).
     expect(SERVER_VERSION).toBe(pkg.version);
+  });
+});
+
+// ---------- Batch tool (ctscout_search_company_batch, #19) ----------
+
+const CHARACTER_LIMIT = 25_000; // mirror of the src-side constant
+
+function warehouseDomains(prefix: string, count: number): DomainResult[] {
+  return Array.from({ length: count }, (_, i) => ({
+    org: `${prefix} Legal Entity Corporation Number ${i}`,
+    apex_domain: `${prefix}-${i}.example.com`,
+    cert_count: 10 + i,
+    subdomain_count: 5 + i,
+    first_seen: "2020-01-01T00:00:00Z",
+    last_seen: "2026-01-01T00:00:00Z",
+  }));
+}
+
+function oneWarehouseDomain(apex: string): DomainResult {
+  return {
+    org: `${apex} Corp`,
+    apex_domain: `${apex}.example.com`,
+    cert_count: 1,
+    subdomain_count: 1,
+  };
+}
+
+function batchOk(company: string, domains: DomainResult[]): BatchResultItem {
+  return {
+    query: { company_name: company },
+    domains,
+    total: domains.length,
+    match_type: "exact",
+  } as BatchResultItem;
+}
+
+function batchErr(company: string, code: number, message: string): BatchResultItem {
+  return { query: { company_name: company }, error: { code, message } };
+}
+
+function batchEnvelope(
+  results: BatchResultItem[],
+  remaining: number | null = 4242,
+): ScanBatchResponse {
+  return { results, remaining_quota: remaining };
+}
+
+describe("callScanBatch", () => {
+  let originalFetch: typeof globalThis.fetch;
+  let originalApiKey: string | undefined;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    originalApiKey = process.env.CTSCOUT_API_KEY;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    if (originalApiKey === undefined) {
+      delete process.env.CTSCOUT_API_KEY;
+    } else {
+      process.env.CTSCOUT_API_KEY = originalApiKey;
+    }
+  });
+
+  it("POSTs /scan/batch with a {queries} body and returns the envelope", async () => {
+    process.env.CTSCOUT_API_KEY = "test-key";
+    const envelope = batchEnvelope([batchOk("Cloudflare", warehouseDomains("cf", 1))], 99);
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => envelope,
+    } as Response);
+
+    const result = await callScanBatch([{ company_name: "Cloudflare" }]);
+
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/scan/batch"),
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          "X-API-Key": "test-key",
+          "Content-Type": "application/json",
+        }),
+        body: JSON.stringify({ queries: [{ company_name: "Cloudflare" }] }),
+      }),
+    );
+    expect(result).toEqual(envelope);
+  });
+
+  it("bounds an oversized batch error body captured from the stream (inherits #57)", async () => {
+    process.env.CTSCOUT_API_KEY = "test-key";
+    const hugeBody = "z".repeat(200_000);
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response(hugeBody, { status: 400 }));
+
+    let caught: unknown;
+    try {
+      await callScanBatch([{ company_name: "Test" }]);
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(ApiError);
+    expect((caught as ApiError).status).toBe(400);
+    const captured = (caught as ApiError).responseBody;
+    expect(captured.length).toBeLessThan(hugeBody.length);
+    expect(captured.length).toBeLessThanOrEqual(4096);
+  });
+
+  it("throws if CTSCOUT_API_KEY is not set", async () => {
+    delete process.env.CTSCOUT_API_KEY;
+    await expect(callScanBatch([{ company_name: "Test" }])).rejects.toThrow(
+      "CTSCOUT_API_KEY environment variable is not set",
+    );
+  });
+});
+
+describe("SearchCompanyBatchInputSchema — client-side cap (belt-and-suspenders)", () => {
+  it("rejects more than 10 company names without a network call", () => {
+    const names = Array.from({ length: 11 }, (_, i) => `Company ${i}`);
+    expect(SearchCompanyBatchInputSchema.safeParse({ company_names: names }).success).toBe(false);
+  });
+
+  it("accepts exactly 10 company names", () => {
+    const names = Array.from({ length: 10 }, (_, i) => `Company ${i}`);
+    expect(SearchCompanyBatchInputSchema.safeParse({ company_names: names }).success).toBe(true);
+  });
+
+  it("rejects an empty company_names array", () => {
+    expect(SearchCompanyBatchInputSchema.safeParse({ company_names: [] }).success).toBe(false);
+  });
+
+  it("rejects a name shorter than 2 characters", () => {
+    expect(SearchCompanyBatchInputSchema.safeParse({ company_names: ["X"] }).success).toBe(false);
+  });
+});
+
+describe("fairShareBudgets — anti-starvation budget split", () => {
+  it("caps a greedy section so small sections keep their full floor", () => {
+    // One section wants 100k chars; three want ~10 each. Shared budget 20k.
+    const budgets = fairShareBudgets([100_000, 10, 10, 10], 20_000);
+    const floor = Math.floor(20_000 / 4); // 5000
+    // Small sections keep exactly their floor — never starved below budget/N.
+    expect(budgets[1]).toBe(floor);
+    expect(budgets[2]).toBe(floor);
+    expect(budgets[3]).toBe(floor);
+    // The greedy section gets redistributed surplus but cannot swallow the
+    // whole budget — its actual usage stays below the shared total.
+    expect(budgets[0]).toBeGreaterThan(floor);
+    expect(budgets[0]).toBeLessThan(20_000);
+  });
+
+  it("splits the surplus equally among multiple over-floor sections", () => {
+    const budgets = fairShareBudgets([100_000, 100_000, 10, 10], 20_000);
+    const floor = Math.floor(20_000 / 4); // 5000
+    expect(budgets[2]).toBe(floor);
+    expect(budgets[3]).toBe(floor);
+    expect(budgets[0]).toBe(budgets[1]); // symmetric
+    expect(budgets[0]).toBeGreaterThan(floor);
+  });
+
+  it("gives an equal floor when every section fits under it", () => {
+    expect(fairShareBudgets([100, 100, 100], 30_000)).toEqual([10_000, 10_000, 10_000]);
+  });
+
+  it("returns [] for no sections", () => {
+    expect(fairShareBudgets([], 25_000)).toEqual([]);
+  });
+
+  it("leaves every section at the floor when all overflow (no surplus)", () => {
+    // Every section wants more than its floor → no donor slack to redistribute.
+    const budgets = fairShareBudgets([9_000, 9_000, 9_000], 15_000);
+    const floor = Math.floor(15_000 / 3); // 5000
+    expect(budgets).toEqual([floor, floor, floor]);
+  });
+});
+
+describe("formatBatchAsMarkdown", () => {
+  it("renders one section per company with a batch header and quota footer", () => {
+    const batch = batchEnvelope(
+      [
+        batchOk("Cloudflare", warehouseDomains("cf", 2)),
+        batchOk("Fastly", warehouseDomains("fastly", 1)),
+      ],
+      4242,
+    );
+    const md = formatBatchAsMarkdown(["Cloudflare", "Fastly"], batch);
+
+    expect(md).toContain("# ctscout batch results (2 companies)");
+    expect(md).toContain("## ctscout results for: Cloudflare");
+    expect(md).toContain("## ctscout results for: Fastly");
+    expect(md).toContain("cf-0.example.com");
+    expect(md).toContain("fastly-0.example.com");
+    expect(md).toContain("_Remaining quota today: 4242._");
+
+    // Exactly one H1 (the batch header) — the single-company renderer's H1 is
+    // demoted to H2 so it nests instead of leaking a second top-level heading.
+    const h1Lines = md.split("\n").filter((l) => /^# /.test(l));
+    expect(h1Lines).toHaveLength(1);
+    expect(h1Lines[0]).toContain("batch results");
+  });
+
+  it("renders a failed query as an error section, siblings intact (partial failure)", () => {
+    const batch = batchEnvelope([
+      batchOk("Cloudflare", warehouseDomains("cf", 1)),
+      batchErr(
+        "Doomed Co",
+        503,
+        "Batch subrequest budget exceeded. Retry with strict_match_org_only:true or send a smaller batch",
+      ),
+    ]);
+    const md = formatBatchAsMarkdown(["Cloudflare", "Doomed Co"], batch);
+
+    expect(md).toContain("## ctscout results for: Cloudflare");
+    expect(md).toContain("cf-0.example.com"); // successful sibling still rendered
+    expect(md).toContain("## ctscout results for: Doomed Co");
+    expect(md).toContain("This query failed (HTTP 503)");
+    // The upstream retry guidance survives; underscores are markdown-escaped
+    // (injection guard, same as explainError), so assert on a plain substring.
+    expect(md).toContain("send a smaller batch");
+    expect(md).toContain("strict\\_match\\_org\\_only");
+  });
+
+  it("uses singular wording for a one-company batch", () => {
+    const md = formatBatchAsMarkdown(
+      ["Solo"],
+      batchEnvelope([batchOk("Solo", warehouseDomains("solo", 1))], 7),
+    );
+    expect(md).toContain("# ctscout batch results (1 company)");
+    expect(md).toContain("## ctscout results for: Solo");
+  });
+
+  it("falls back to the echoed query name when inputs and results misalign", () => {
+    // companyNames shorter than results (defensive): label from the echoed
+    // query, then "(unnamed)" when even that is absent.
+    const batch = batchEnvelope([
+      batchOk("Echoed Co", warehouseDomains("echoed", 1)),
+      { query: {}, domains: [oneWarehouseDomain("nameless")], total: 1 } as BatchResultItem,
+    ]);
+    const md = formatBatchAsMarkdown([], batch);
+    expect(md).toContain("## ctscout results for: Echoed Co");
+    expect(md).toContain("## ctscout results for: (unnamed)");
+  });
+
+  it("handles an empty results envelope", () => {
+    const md = formatBatchAsMarkdown([], batchEnvelope([], null));
+    expect(md).toContain("# ctscout batch results (0 companies)");
+    expect(md).toContain("_No results returned._");
+    expect(md).toContain("unlimited (Pro tier)");
+  });
+
+  it("truncates a single huge company's section under the shared limit", () => {
+    const batch = batchEnvelope([batchOk("Giant", warehouseDomains("giant", 5000))]);
+    const md = formatBatchAsMarkdown(["Giant"], batch);
+    expect(md.length).toBeLessThanOrEqual(CHARACTER_LIMIT);
+    expect(md).toContain("Response truncated");
+  });
+
+  it("keeps small companies fully visible when one company floods the batch", () => {
+    // The adversarial case: one company returns thousands of domains; two
+    // others return one each. Fair-share must stop the flood from starving
+    // the small companies out of the shared budget.
+    const batch = batchEnvelope([
+      batchOk("Flood", warehouseDomains("flood", 5000)),
+      batchOk("Small B", [oneWarehouseDomain("beacon-b")]),
+      batchOk("Small C", [oneWarehouseDomain("beacon-c")]),
+    ]);
+    const md = formatBatchAsMarkdown(["Flood", "Small B", "Small C"], batch);
+
+    expect(md.length).toBeLessThanOrEqual(CHARACTER_LIMIT);
+    // Both small companies survive — their single domains still render.
+    expect(md).toContain("beacon-b.example.com");
+    expect(md).toContain("beacon-c.example.com");
+    expect(md).toContain("## ctscout results for: Small B");
+    expect(md).toContain("## ctscout results for: Small C");
+    // The flooding company was truncated to fit its share.
+    expect(md).toContain("## ctscout results for: Flood");
+    expect(md).toContain("Response truncated");
+  });
+});
+
+describe("truncateBatchJsonIfNeeded", () => {
+  it("pretty-prints a small batch unchanged", () => {
+    const batch = batchEnvelope([batchOk("Cloudflare", warehouseDomains("cf", 1))], 50);
+    const { text, structured } = truncateBatchJsonIfNeeded(batch);
+    expect(() => JSON.parse(text)).not.toThrow();
+    expect(structured).toEqual(batch);
+    expect(text).toContain("\n  "); // indented pretty-print
+  });
+
+  it("bounds an oversized batch to the limit, stays valid JSON, no starvation (#53)", () => {
+    const batch = batchEnvelope([
+      batchOk("Giant", warehouseDomains("giant", 5000)),
+      batchOk("Tiny", [oneWarehouseDomain("tiny")]),
+    ]);
+    const { text, structured } = truncateBatchJsonIfNeeded(batch);
+
+    expect(text.length).toBeLessThanOrEqual(CHARACTER_LIMIT);
+    const parsed = JSON.parse(text) as ScanBatchResponse;
+    // Both results survive — the tiny company is not dropped to make room.
+    expect(parsed.results).toHaveLength(2);
+    expect(text).toContain("tiny.example.com");
+    expect(structured.remaining_quota).toBe(batch.remaining_quota);
+  });
+
+  it("passes a failed query through untouched when bounding an oversized batch", () => {
+    const batch = batchEnvelope([
+      batchOk("Giant", warehouseDomains("giant", 5000)),
+      batchErr("Failed Co", 503, "Batch subrequest budget exceeded"),
+    ]);
+    const { text, structured } = truncateBatchJsonIfNeeded(batch);
+
+    expect(text.length).toBeLessThanOrEqual(CHARACTER_LIMIT);
+    const parsed = JSON.parse(text) as ScanBatchResponse;
+    expect(parsed.results).toHaveLength(2);
+    // The error item survives verbatim (no domains to halve).
+    const failed = structured.results[1] as { error: { code: number; message: string } };
+    expect(failed.error.code).toBe(503);
+    expect(failed.error.message).toBe("Batch subrequest budget exceeded");
   });
 });

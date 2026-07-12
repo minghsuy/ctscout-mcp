@@ -22,13 +22,19 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-const DIST_INDEX = resolve(__dirname, "..", "dist", "index.js");
+// ESM-native replacement for the CommonJS `__dirname` global. Vitest injects
+// `__dirname` into test files, but the package is native ESM (`"type":
+// "module"`) and the rest of the codebase resolves paths this way — see
+// src/index.ts's `fileURLToPath(import.meta.url)` (ctscout-mcp#6).
+const CURRENT_DIR = dirname(fileURLToPath(import.meta.url));
+const DIST_INDEX = resolve(CURRENT_DIR, "..", "dist", "index.js");
 const PKG_VERSION = (
-  JSON.parse(readFileSync(resolve(__dirname, "..", "package.json"), "utf8")) as {
+  JSON.parse(readFileSync(resolve(CURRENT_DIR, "..", "package.json"), "utf8")) as {
     version: string;
   }
 ).version;
