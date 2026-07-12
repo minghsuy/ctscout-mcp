@@ -2,10 +2,11 @@
 /**
  * MCP Server for ctscout.dev — domain discovery via Certificate Transparency.
  *
- * Wraps the public ctscout.dev /scan API. Two tools:
+ * Wraps the public ctscout.dev /scan API. Three tools:
  *
- * - ctscout_search_company: find domains attributed to an organization by name
- * - ctscout_lookup_domain:  reverse lookup — find the organization for one or more domains
+ * - ctscout_search_company:       find domains attributed to an organization by name
+ * - ctscout_search_company_batch: same, for up to 10 organization names in one call
+ * - ctscout_lookup_domain:        reverse lookup — find the organization for one or more domains
  *
  * Auth: requires an API key via the CTSCOUT_API_KEY environment variable.
  * Get a free key (no email, no signup) at https://ctscout.dev.
@@ -29,6 +30,16 @@ import { z } from "zod";
 
 const API_BASE_URL = process.env.CTSCOUT_API_URL ?? "https://ctscout.dev";
 const SCAN_URL = `${API_BASE_URL}/scan`;
+const SCAN_BATCH_URL = `${API_BASE_URL}/scan/batch`;
+// Max company names accepted per batch. The upstream ctscout-worker enforces
+// this server-side (>N → 400 without a partial quota debit); it caps at 10
+// because the Worker runs on the free plan (50 subrequests/request) and a
+// worst-case all-semantic batch is ~11 subrequests/query — see
+// ctscout-worker src/index.ts `MAX_BATCH_SIZE`. Issue ctscout-mcp#19 proposed
+// 50, but that was the original #128 target before the free-plan cap landed;
+// the live contract is 10. Enforcing it client-side is belt-and-suspenders
+// (a clean validation error before a network round-trip), not load-bearing.
+const MAX_BATCH_QUERIES = 10;
 const REQUEST_TIMEOUT_MS = 30_000;
 const CHARACTER_LIMIT = 25_000;
 const ERROR_BODY_LIMIT = 500;
@@ -126,6 +137,36 @@ export interface ScanResponse {
   [k: string]: unknown;
 }
 
+// The query object the batch endpoint echoes back per result. Loosely typed:
+// the worker echoes the full ScanBody it ran (company_name plus any matching
+// modifiers), and we only read company_name for display.
+export interface BatchQuery {
+  company_name?: string;
+  seed_domain?: string[];
+  [k: string]: unknown;
+}
+
+// One item in a /scan/batch response, in input order. Mirrors ctscout-worker's
+// `ScanBatchResultItem`: a successful query spreads the ScanResponse fields
+// (domains, total, match_type, candidates?) next to the echoed `query`; a
+// failed query carries an `error` object and NO `domains` (207-style
+// mixed-result envelope — partial failure is expected, not all-or-nothing).
+export type BatchResultItem =
+  | ({ query: BatchQuery } & ScanResponse)
+  | { query: BatchQuery; error: { code: number; message: string } };
+
+export interface ScanBatchResponse {
+  results: BatchResultItem[];
+  // Remaining daily quota for the calling key; null for unlimited (Pro tier).
+  remaining_quota: number | null;
+}
+
+function isBatchError(
+  item: BatchResultItem,
+): item is { query: BatchQuery; error: { code: number; message: string } } {
+  return "error" in item && item.error != null;
+}
+
 // ---------- Zod schemas ----------
 
 const SearchCompanyInputSchema = z
@@ -172,6 +213,38 @@ const LookupDomainInputSchema = z
   .strict();
 
 type LookupDomainInput = z.infer<typeof LookupDomainInputSchema>;
+
+// Exported so tests can drive the client-side cap (MAX_BATCH_QUERIES) without
+// going through the registered tool handler.
+export const SearchCompanyBatchInputSchema = z
+  .object({
+    company_names: z
+      .array(
+        z
+          .string()
+          .min(2, "each company_name must be at least 2 characters")
+          .max(200, "each company_name must not exceed 200 characters"),
+      )
+      .min(1, "At least one company_name required")
+      .max(MAX_BATCH_QUERIES, `At most ${MAX_BATCH_QUERIES} company names per batch`)
+      .describe(
+        "Company / organization names to look up in one call (1–" +
+          `${MAX_BATCH_QUERIES}). Each is matched exactly as in ` +
+          "ctscout_search_company (partial, case-insensitive). Results come " +
+          "back in input order; individual names can fail independently " +
+          "(partial-failure envelope), so a failed name doesn't sink the batch.",
+      ),
+    response_format: z
+      .nativeEnum(ResponseFormat)
+      .default(ResponseFormat.MARKDOWN)
+      .describe(
+        "Output format: 'markdown' for a per-company summary, 'json' for the " +
+          "raw batch envelope (useful for programmatic processing).",
+      ),
+  })
+  .strict();
+
+type SearchCompanyBatchInput = z.infer<typeof SearchCompanyBatchInputSchema>;
 
 // ---------- Shared utilities ----------
 
@@ -241,13 +314,17 @@ async function readBoundedText(response: Response, maxBytes: number): Promise<st
   return new TextDecoder().decode(capped);
 }
 
-export async function callScan(body: ScanRequestBody): Promise<ScanResponse> {
+// Shared POST core for /scan and /scan/batch: identical auth, headers,
+// timeout, and bounded-error-body handling (readBoundedText, #57). The two
+// endpoints differ only in URL and request/response shape, so both tools
+// inherit the same error-capture bound rather than duplicating it.
+async function postScan<T>(url: string, body: unknown): Promise<T> {
   const apiKey = getApiKey();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
   try {
-    const response = await fetch(SCAN_URL, {
+    const response = await fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -267,7 +344,7 @@ export async function callScan(body: ScanRequestBody): Promise<ScanResponse> {
       );
     }
 
-    return (await response.json()) as ScanResponse;
+    return (await response.json()) as T;
   } catch (err) {
     if (err instanceof ApiError) throw err;
     if (err instanceof Error && err.name === "AbortError") {
@@ -277,6 +354,18 @@ export async function callScan(body: ScanRequestBody): Promise<ScanResponse> {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+export async function callScan(body: ScanRequestBody): Promise<ScanResponse> {
+  return postScan<ScanResponse>(SCAN_URL, body);
+}
+
+// POST /scan/batch: one envelope, per-query results in input order. The
+// caller (the batch tool) has already bounded `queries` to MAX_BATCH_QUERIES;
+// the worker re-enforces server-side (>10 → 400) and debits quota by the
+// batch length.
+export async function callScanBatch(queries: ScanRequestBody[]): Promise<ScanBatchResponse> {
+  return postScan<ScanBatchResponse>(SCAN_BATCH_URL, { queries });
 }
 
 export class ApiError extends Error {
@@ -673,6 +762,9 @@ function truncateWithRender(
   text: string,
   structured: ScanResponse,
   render: (s: ScanResponse) => string,
+  // Defaults to the whole-response budget. The batch renderer passes a smaller
+  // per-company slice so one company's huge result can't starve the others.
+  limit: number = CHARACTER_LIMIT,
 ): {
   text: string;
   structured: ScanResponse;
@@ -680,7 +772,7 @@ function truncateWithRender(
   let currentText = text;
   let currentStructured = structured;
 
-  while (currentText.length > CHARACTER_LIMIT && currentStructured.domains.length > 0) {
+  while (currentText.length > limit && currentStructured.domains.length > 0) {
     // If we're down to 1 domain and still over the limit, we must break to avoid infinite loop
     if (currentStructured.domains.length === 1) {
       currentStructured = {
@@ -755,6 +847,224 @@ export function truncateJsonIfNeeded(structured: ScanResponse): {
   }
 
   return result;
+}
+
+// ---------- Batch rendering + fair-share budgeting ----------
+
+// Anti-starvation budget split for N batch sections sharing one character
+// budget. Every section gets an equal floor (`totalBudget / N`); sections
+// that fit under their floor donate the slack into a pool that is split once,
+// equally, among the sections that would otherwise be truncated. Single pass
+// (no iterative water-filling) and monotonic — redistribution only ever RAISES
+// a section's budget above the floor, so the floor guarantee (no section
+// starved below `budget / N`) always holds. This is what stops one company's
+// huge result from crowding the others out of the shared response budget.
+export function fairShareBudgets(fullLengths: number[], totalBudget: number): number[] {
+  const n = fullLengths.length;
+  if (n === 0) return [];
+  const floor = Math.floor(Math.max(0, totalBudget) / n);
+  const overflow: number[] = [];
+  let surplus = 0;
+  for (let i = 0; i < n; i++) {
+    if (fullLengths[i] <= floor) {
+      surplus += floor - fullLengths[i];
+    } else {
+      overflow.push(i);
+    }
+  }
+  const budgets = new Array<number>(n).fill(floor);
+  if (overflow.length > 0 && surplus > 0) {
+    const bonus = Math.floor(surplus / overflow.length);
+    for (const i of overflow) {
+      budgets[i] = floor + bonus;
+    }
+  }
+  return budgets;
+}
+
+// Demote the single-company renderer's H1 to an H2 so each section nests under
+// the batch-level H1. Only the first line is an H1, so no multiline flag.
+function demoteHeading(md: string): string {
+  return md.startsWith("# ") ? `#${md}` : md;
+}
+
+// Render a per-query failure (the 207-style partial-failure envelope: a query
+// can fail while the batch as a whole succeeds). Bound + escape the upstream
+// message exactly as explainError does for a single-scan error body (#56):
+// truncateBody first, then escapeMarkdown.
+function renderBatchErrorSection(
+  name: string,
+  error: { code: number; message: string },
+  limit: number,
+): string {
+  const heading = `## ctscout results for: ${cellSafe(name, 200)}`;
+  const codeSafe = Number.isFinite(error?.code) ? error.code : "unknown";
+  // Collapse line terminators FIRST: a newline in the upstream message would
+  // otherwise break out of the `> ` blockquote and let a hostile/buggy origin
+  // inject a heading or table row (the #50 untrusted-string threat model).
+  // Then bound + escape exactly as explainError does for a single-scan body.
+  const flat = String(error?.message ?? "").replace(/[\r\n]+/g, " ");
+  const msg = escapeMarkdown(truncateBody(flat));
+  const block = `${heading}\n\n> ⚠️ This query failed (HTTP ${codeSafe}): ${msg}`;
+  return block.length > limit ? `${block.slice(0, Math.max(0, limit - 1))}…` : block;
+}
+
+// Render one company's section within its allotted slice. Success reuses the
+// single-company markdown renderer (cellSafe / shape detection / empty-result
+// handling / the #54 query-context idiom all come for free) bounded via the
+// shared halving loop; failure renders an error block.
+function renderCompanySection(name: string, item: BatchResultItem, limit: number): string {
+  if (isBatchError(item)) {
+    return renderBatchErrorSection(name, item.error, limit);
+  }
+  const resp: ScanResponse = {
+    ...item,
+    domains: Array.isArray(item.domains) ? item.domains : [],
+  };
+  const full = formatScanAsMarkdown(name, resp, { kind: "company" });
+  const { text } = truncateWithRender(
+    full,
+    resp,
+    (s) => formatScanAsMarkdown(name, s, { kind: "company" }),
+    limit,
+  );
+  return demoteHeading(text);
+}
+
+function batchQuotaFooter(remaining: number | null): string {
+  return remaining == null
+    ? "_Remaining quota: unlimited (Pro tier)._"
+    : `_Remaining quota today: ${remaining}._`;
+}
+
+// Assemble header + sections + footer. The fair-share split bounds each
+// section to its slice, and the slices plus the reserved envelope overhead sum
+// to <= CHARACTER_LIMIT, so `joined` is already within budget. The hard clamp
+// is a last-resort byte guard in case that invariant is ever broken upstream —
+// it keeps the character-limit contract absolute rather than trusting the
+// arithmetic.
+function assembleBatchMarkdown(header: string, sections: string[], footer: string): string {
+  const joined = [header, ...sections, footer].join("\n\n");
+  return joined.length <= CHARACTER_LIMIT ? joined : joined.slice(0, CHARACTER_LIMIT);
+}
+
+export function formatBatchAsMarkdown(companyNames: string[], batch: ScanBatchResponse): string {
+  const results = batch.results;
+  const n = results.length;
+  const header = `# ctscout batch results (${n} ${n === 1 ? "company" : "companies"})`;
+  const footer = batchQuotaFooter(batch.remaining_quota);
+
+  if (n === 0) {
+    return `${header}\n\n_No results returned._\n\n${footer}`;
+  }
+
+  // Reserve the envelope overhead (header + footer + the "\n\n" joiners around
+  // n + 2 pieces, plus 1 char/section for the H1→H2 demote) before dividing
+  // the rest equally among companies.
+  const joinerOverhead = (n + 1) * 2 + n;
+  const budget = Math.max(0, CHARACTER_LIMIT - header.length - footer.length - joinerOverhead);
+
+  // The company name is the caller's own input (already sanitized via cellSafe
+  // downstream); fall back to the echoed query only if inputs and results
+  // misalign in length.
+  const nameFor = (i: number): string =>
+    companyNames[i] ?? results[i].query?.company_name ?? "(unnamed)";
+
+  // Pass 1: measure each section's full demand. Pass 2: re-render each within
+  // its fair share so no company can crowd out the rest.
+  const fullLengths = results.map(
+    (item, i) => renderCompanySection(nameFor(i), item, CHARACTER_LIMIT).length,
+  );
+  const budgets = fairShareBudgets(fullLengths, budget);
+  const sections = results.map((item, i) => renderCompanySection(nameFor(i), item, budgets[i]));
+
+  return assembleBatchMarkdown(header, sections, footer);
+}
+
+// Bound one batch result item's compact JSON to `limit`. Every item is
+// guaranteed <= its slice on return, so no item can stay oversized and trip
+// the drop-trailing backstop in truncateBatchJsonIfNeeded (which would silently
+// evict good siblings — the batch-level analogue of the starvation fair-share
+// exists to prevent).
+function truncateResultJson(item: BatchResultItem, limit: number): BatchResultItem {
+  if (isBatchError(item)) {
+    if (JSON.stringify(item).length <= limit) return item;
+    // A huge upstream error.message would otherwise blow the slice. Cap it to
+    // ERROR_BODY_LIMIT (as the markdown error section does) — always << slice.
+    return {
+      query: item.query,
+      error: {
+        code: item.error.code,
+        message: truncateBody(String(item.error.message ?? "")),
+      },
+    };
+  }
+  const resp: ScanResponse = {
+    ...item,
+    domains: Array.isArray(item.domains) ? item.domains : [],
+  };
+  const { structured } = truncateWithRender(
+    JSON.stringify(resp),
+    resp,
+    (s) => JSON.stringify(s),
+    limit,
+  );
+  // Halving only trims `domains`. If non-domain bulk (a large `candidates[]`,
+  // the echoed `query`, or arbitrary top-level ScoutResult fields) still
+  // exceeds the slice with zero domains, emit a minimal bounded envelope of
+  // known-small fields — mirrors the single-scan minimal-envelope guard in
+  // truncateJsonIfNeeded so the item never stays oversized.
+  if (JSON.stringify(structured).length > limit) {
+    const originalDomainCount = Array.isArray(item.domains) ? item.domains.length : 0;
+    return {
+      query: item.query,
+      domains: [],
+      total: item.total,
+      truncated: true,
+      upgrade_hint: truncationHint(0, originalDomainCount),
+    };
+  }
+  return structured as BatchResultItem;
+}
+
+// JSON-format batch output respects CHARACTER_LIMIT too (#53), via the same
+// fair-share split as the markdown path: pretty-print when it fits, else bound
+// each result's domains to an equal slice, then drop whole trailing results as
+// a final backstop. Truncated output stays valid JSON.
+export function truncateBatchJsonIfNeeded(batch: ScanBatchResponse): {
+  text: string;
+  structured: ScanBatchResponse;
+} {
+  const pretty = JSON.stringify(batch, null, 2);
+  if (pretty.length <= CHARACTER_LIMIT) {
+    return { text: pretty, structured: batch };
+  }
+
+  const results = batch.results;
+  const n = results.length;
+  const skeleton = JSON.stringify({ results: [], remaining_quota: batch.remaining_quota });
+  const budget = Math.max(0, CHARACTER_LIMIT - skeleton.length - n); // ≈ per-item commas
+  const fullLengths = results.map((item) => JSON.stringify(item).length);
+  const budgets = fairShareBudgets(fullLengths, budget);
+  const truncatedResults = results.map((item, i) => truncateResultJson(item, budgets[i]));
+
+  let structured: ScanBatchResponse = {
+    results: truncatedResults,
+    remaining_quota: batch.remaining_quota,
+  };
+  let text = JSON.stringify(structured);
+
+  // Backstop: if envelope framing still pushes us over, drop whole trailing
+  // results until it fits (always leaves valid JSON).
+  while (text.length > CHARACTER_LIMIT && structured.results.length > 0) {
+    structured = {
+      ...structured,
+      results: structured.results.slice(0, -1),
+    };
+    text = JSON.stringify(structured);
+  }
+
+  return { text, structured };
 }
 
 // ---------- Server + tools ----------
@@ -845,6 +1155,81 @@ Coverage caveat:
       const { text, structured } = truncateIfNeeded(md, data, params.company_name, {
         kind: "company",
       });
+      return {
+        content: [{ type: "text", text }],
+        structuredContent: structured as unknown as Record<string, unknown>,
+      };
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: explainError(err) }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.registerTool(
+  "ctscout_search_company_batch",
+  {
+    title: "Search ctscout by multiple company names in one call",
+    description: `Look up apex domains for up to ${MAX_BATCH_QUERIES} organization names in a single call, via ctscout.dev's /scan/batch endpoint. Each name is matched exactly like ctscout_search_company; results come back in input order.
+
+Args:
+  - company_names (string[], required): 1–${MAX_BATCH_QUERIES} organization names. Partial matches work — 'Goldman' matches 'Goldman Sachs'. Each 2–200 chars.
+  - response_format ('markdown' | 'json', default 'markdown'): output format.
+
+Returns:
+  - In markdown: one section per company (heading + the same table as ctscout_search_company), followed by remaining quota. Names that failed render an error line instead of a table.
+  - In JSON, the raw batch envelope:
+    {
+      "results": [
+        { "query": {...}, "domains": [...], "total": number, "match_type": "exact"|"semantic"|"none", "candidates"?: [...] },
+        { "query": {...}, "error": { "code": number, "message": string } }
+      ],
+      "remaining_quota": number | null   // null = unlimited (Pro)
+    }
+
+Partial-failure semantics (important):
+  - This is a 207-style mixed-result envelope, NOT all-or-nothing: one name can fail (its result carries an "error" object with no "domains") while the rest succeed.
+  - Quota debits by the number of names in the batch — every name counts once, even zero-result ones. No free riders.
+
+Examples:
+  - Use when: "Look up Cloudflare, Fastly, and Akamai" -> { company_names: ["Cloudflare", "Fastly", "Akamai"] }
+  - Don't use when: you have a single name (use ctscout_search_company) or a specific domain (use ctscout_lookup_domain).
+
+Auth & limits:
+  - Requires CTSCOUT_API_KEY, same as ctscout_search_company.
+  - Oversized batches (>${MAX_BATCH_QUERIES} names) are rejected with a validation error before any network call and without a partial quota debit.
+  - Bulk caveat: a batch where many names fall back to semantic matching can exceed the endpoint's per-request subrequest budget, in which case the trailing names come back as per-query HTTP 503 errors (with retry guidance in the message). If you see those, split into smaller batches. High-volume bulk callers should prefer the REST /scan/batch endpoint directly (it accepts a strict_match_org_only flag that suppresses the semantic fallback).
+
+Legal-vs-brand and coverage caveats are identical to ctscout_search_company — brand names may need legal-entity variants ("X Companies", "X Group", "The X"), and coverage is best for established US/EU entities with OV/EV certs.`,
+    inputSchema: SearchCompanyBatchInputSchema.shape,
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  async (params: SearchCompanyBatchInput) => {
+    try {
+      const queries: ScanRequestBody[] = params.company_names.map((company_name) => ({
+        company_name,
+      }));
+      const data = await callScanBatch(queries);
+
+      if (params.response_format === ResponseFormat.JSON) {
+        const { text, structured } = truncateBatchJsonIfNeeded(data);
+        return {
+          content: [{ type: "text", text }],
+          structuredContent: structured as unknown as Record<string, unknown>,
+        };
+      }
+
+      const text = formatBatchAsMarkdown(params.company_names, data);
+      // structuredContent mirrors the single tool: a bounded machine-readable
+      // envelope alongside the human-readable markdown.
+      const { structured } = truncateBatchJsonIfNeeded(data);
       return {
         content: [{ type: "text", text }],
         structuredContent: structured as unknown as Record<string, unknown>,

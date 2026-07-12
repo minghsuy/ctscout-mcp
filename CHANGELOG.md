@@ -13,6 +13,11 @@ version heading on release.
 
 ### Added
 
+- `ctscout_search_company_batch` tool — look up apex domains for up to 10
+  organization names in one `/scan/batch` call. Per-company sections are
+  fair-shared under the response character budget so one company's large
+  result can't starve the others; partial failures render per-company (the
+  207-style envelope), and JSON output is bounded the same way (#19)
 - Biome lint/format gate (`npm run lint`) and test-file type-checking
   (`npm run typecheck` via `tsconfig.test.json`), both enforced in CI (#46)
 - Vitest coverage gate in CI (#38)
@@ -33,6 +38,8 @@ version heading on release.
 - Combined the markdown table formatters into one code path (#31)
 - Perf: avoid array allocations in `topEvidenceLine` fallback (#35) and
   evidence rendering (#28); precompute the `User-Agent` string (#20)
+- `tests/symlink-boot.test.ts` uses the ESM-native `import.meta.url` idiom
+  instead of the Vitest-injected `__dirname` global (#6)
 
 ### Fixed
 

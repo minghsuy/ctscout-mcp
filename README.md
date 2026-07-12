@@ -4,12 +4,13 @@ MCP server for [ctscout.dev](https://ctscout.dev) — **named-entity attribution
 
 DV-only infrastructure (Let's Encrypt, ZeroSSL, cloud-native shops) is invisible to ctscout by design. See [LIMITATIONS.md](LIMITATIONS.md) for what that means in practice.
 
-Two tools:
+Three tools:
 
 - **`ctscout_search_company`** — find apex domains attributed to an organization by name
+- **`ctscout_search_company_batch`** — the same, for up to 10 organization names in one call
 - **`ctscout_lookup_domain`** — reverse-lookup the organization attributed to one or more domains
 
-Both work over the public ctscout.dev `/scan` API. Free tier requires an API key (no email, no signup). Pro tier returns a `confidence_band` per attribution plus the underlying signal evidence (DNS brand tokens, og:site_name match, RDAP, IP/ASN, VLM verdict).
+All three work over the public ctscout.dev `/scan` API (the batch tool wraps `/scan/batch`). Free tier requires an API key (no email, no signup). Pro tier returns a `confidence_band` per attribution plus the underlying signal evidence (DNS brand tokens, og:site_name match, RDAP, IP/ASN, VLM verdict).
 
 **Not a cyber-risk-scoring tool.** See [LIMITATIONS.md](LIMITATIONS.md) for what ctscout is and isn't, the DV-cert coverage gap, and the corrections path.
 
