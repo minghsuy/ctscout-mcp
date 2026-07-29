@@ -4,8 +4,10 @@
 
 Before starting any task:
 
-1. Run `gh pr list --repo minghsuy/ctscout-mcp --state open` and stop if an
-   open PR already touches the target files.
+1. Run `gh pr list --repo minghsuy/ctscout-mcp --state open`. For
+   implementation work, stop if a different open PR already touches the
+   target files. When reviewing or addressing the current PR, do not treat
+   that PR itself as a collision.
 2. Run `git status --short --branch` and preserve unrelated local files.
 3. Read `README.md`, `LIMITATIONS.md`, and `CHANGELOG.md` for the public package
    contract relevant to the change.
