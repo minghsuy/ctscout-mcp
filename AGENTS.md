@@ -6,9 +6,12 @@ Before starting any task:
 
 1. Run `gh pr list --repo minghsuy/ctscout-mcp --state open`. For
    implementation work, stop if a different open PR already touches the
-   target files. When reviewing or addressing the current PR, do not treat
-   that PR itself as a collision.
-2. Run `git status --short --branch` and preserve unrelated local files.
+   planned target files (the files the current task would modify). When
+   reviewing or addressing the current PR, do not treat that PR itself as a
+   collision.
+2. Run `git status --short --branch`. If the tree is dirty, do not stash,
+   clean, reset, or overwrite local files; work from an isolated worktree
+   based on the current upstream branch.
 3. Read `README.md`, `LIMITATIONS.md`, and `CHANGELOG.md` for the public package
    contract relevant to the change.
 
@@ -25,6 +28,8 @@ npm audit --audit-level=low
 ```
 
 Tests must not depend on a real API key or live ctscout.dev traffic.
+For focused iteration, use `npx vitest run <path>`; still run the full gate
+above before pushing.
 
 ## Repository Boundaries
 
