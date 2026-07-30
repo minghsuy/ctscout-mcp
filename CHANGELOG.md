@@ -13,6 +13,9 @@ version heading on release.
 
 ### Added
 
+- Hosted-compatible `strict_match_org_only`, `org_match_field`,
+  `org_match_mode`, and `purpose` inputs on `ctscout_search_company`, plus
+  protocol-level and packed-artifact contract tests (#75)
 - `ctscout_search_company_batch` tool — look up apex domains for up to 10
   organization names in one `/scan/batch` call. Per-company sections are
   fair-shared under the response character budget so one company's large
@@ -28,6 +31,8 @@ version heading on release.
 
 ### Changed
 
+- Documented hosted MCP as the authoritative contract and qualified the
+  temporary stdio-only batch compatibility exception (#75)
 - **Node floor raised to `>=20`** in `engines` (18 is EOL since April 2025;
   CI has only ever tested 20) (#46)
 - `SERVER_VERSION` is read from package.json at runtime instead of a

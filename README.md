@@ -64,7 +64,9 @@ After adding, **fully quit and restart your MCP client** (not just close the win
 
 ### 2b. Local npm (fallback — if you can't use the hosted endpoint)
 
-If you're behind a network policy that blocks `ctscout.dev`, prefer running the published Node binary locally:
+If your MCP client does not support remote HTTP transport, run the published
+Node compatibility binary locally. It still calls `https://ctscout.dev`, so
+your network must allow that origin:
 
 ```bash
 claude mcp add ctscout \
@@ -87,7 +89,15 @@ Or in JSON config:
 }
 ```
 
-The two paths talk to the same `/scan` API on the backend — feature-parity is automatic. The hosted endpoint just skips the Node install.
+The hosted endpoint is the authoritative MCP contract and is the recommended
+path. The stdio package is a compatibility adapter over the same ctscout.dev
+API for clients that cannot connect to remote MCP servers yet.
+
+During the current migration, stdio retains
+`ctscout_search_company_batch` for compatibility while hosted MCP exposes the
+two single-query tools. Do not assume tool discovery is identical across
+transports; let your client use `tools/list`. The remaining convergence work is
+tracked in [#72](https://github.com/minghsuy/ctscout-mcp/issues/72).
 
 ### 3. Use it
 
@@ -186,7 +196,11 @@ Should respond with the server's capabilities + tool registration. (Tool calls t
 
 ## How it relates to ctscout.dev
 
-This MCP server is a thin client over the public ctscout.dev `/scan` API. It does no auth-handling magic, no caching, no extra logic — just translates MCP tool calls into HTTP requests and formats the response for an LLM consumer.
+This MCP server is a local stdio compatibility adapter over the public
+ctscout.dev `/scan` API. It does no auth-handling magic or caching — it
+translates MCP tool calls into HTTP requests and formats the response for an
+LLM consumer. Hosted `https://ctscout.dev/mcp` is the authoritative MCP
+surface.
 
 If you're building your own integration in Python or another language, you can hit the same `/scan` endpoint directly. See [ctscout.dev](https://ctscout.dev) for `curl` examples.
 
