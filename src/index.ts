@@ -831,6 +831,15 @@ function truncationHint(kept: number, total: number, kind = "domains"): string {
   );
 }
 
+function fullyTruncatedHint(response: Pick<ScanResponse, "domains" | "candidates">): string {
+  const candidateCount = Array.isArray(response.candidates) ? response.candidates.length : 0;
+  if (candidateCount > 0) {
+    return truncationHint(0, candidateCount, "semantic candidates");
+  }
+  const domainCount = Array.isArray(response.domains) ? response.domains.length : 0;
+  return truncationHint(0, domainCount);
+}
+
 // Shared halving loop: drop whole trailing domain entries, then semantic
 // candidates, and re-render until the text fits. Parameterizing the renderer
 // keeps Markdown and JSON bounds identical.
@@ -941,7 +950,7 @@ export function truncateJsonIfNeeded(structured: ScanResponse): {
       domains: [],
       total: structured.total,
       truncated: true,
-      upgrade_hint: truncationHint(0, structured.domains.length),
+      upgrade_hint: fullyTruncatedHint(structured),
       source: structured.source,
       match_type: structured.match_type,
       org_match_strategy: structured.org_match_strategy,
@@ -1123,13 +1132,12 @@ function truncateResultJson(item: BatchResultItem, limit: number): BatchResultIt
   // top-level ScoutResult fields still exceed the slice, emit a minimal
   // bounded envelope — mirrors the single-scan guard in truncateJsonIfNeeded.
   if (JSON.stringify(structured).length > limit) {
-    const originalDomainCount = Array.isArray(item.domains) ? item.domains.length : 0;
     return {
       query: item.query,
       domains: [],
       total: item.total,
       truncated: true,
-      upgrade_hint: truncationHint(0, originalDomainCount),
+      upgrade_hint: fullyTruncatedHint(item),
       source: item.source,
       match_type: item.match_type,
       org_match_strategy: item.org_match_strategy,
@@ -1191,7 +1199,7 @@ export function truncateBatchJsonIfNeeded(batch: ScanBatchResponse): {
               domains: [],
               total: item.total,
               truncated: true,
-              upgrade_hint: truncationHint(0, item.domains.length),
+              upgrade_hint: fullyTruncatedHint(item),
               source: item.source,
               match_type: item.match_type,
               org_match_strategy: item.org_match_strategy,

@@ -829,6 +829,8 @@ describe("truncateJsonIfNeeded", () => {
     expect(parsed.org_match_strategy).toBe("semantic");
     expect(parsed.empty_reason).toBe("semantic_offered");
     expect(parsed.candidates).toEqual([]);
+    expect(parsed.upgrade_hint).toContain("0 of 1 semantic candidates");
+    expect(parsed.upgrade_hint).not.toContain("0 of 0 domains");
   });
 });
 
@@ -2480,6 +2482,7 @@ describe("truncateBatchJsonIfNeeded", () => {
       empty_reason: "semantic_offered",
       candidates: [],
       truncated: true,
+      upgrade_hint: expect.stringContaining("0 of 1 semantic candidates"),
     });
     expect(text).not.toContain("opaque_metadata");
     expect(text).toContain("sibling.example.com");
