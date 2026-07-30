@@ -66,7 +66,8 @@ After adding, **fully quit and restart your MCP client** (not just close the win
 
 If your MCP client does not support remote HTTP transport, run the published
 Node compatibility binary locally. It still calls `https://ctscout.dev`, so
-your network must allow that origin:
+your network must allow that origin. Version 0.3.0 and newer require Node.js
+20 or newer:
 
 ```bash
 claude mcp add ctscout \
@@ -99,6 +100,10 @@ ordered partial-failure results). Contract tests pin the stdio schema and
 quota-sensitive annotations against the hosted surface. The remaining
 shared-core/forwarding and automated cross-repository comparison work is tracked
 in [#72](https://github.com/minghsuy/ctscout-mcp/issues/72).
+
+The stdio package accepts both MCP protocol eras: current clients can discover
+the server through the stateless 2026-07-28 `server/discover` flow, while
+existing clients keep the 2025 `initialize` handshake.
 
 ### 3. Use it
 
@@ -173,6 +178,9 @@ npm run build
 
 # Run the test suite (Vitest, no network)
 npm test
+
+# Maintainer-only, non-publishing 0.3.0 release preflight
+npm run release:check
 
 # Run the server (will fail without CTSCOUT_API_KEY)
 node dist/index.js

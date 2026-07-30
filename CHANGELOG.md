@@ -6,13 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Changes that warrant a release line should add a bullet under `[Unreleased]`
-in the same PR — `scripts/release.sh` rotates that section into a dated
-version heading on release.
+in the same PR. A release-preparation PR rotates that section into a dated
+version heading so the exact package metadata and notes are reviewed together;
+`scripts/release.sh` refuses to publish when the heading is missing.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-30
+
 ### Added
 
+- MCP 2026-07-28 stdio discovery via `server/discover`, while preserving the
+  legacy 2025 `initialize` handshake for existing clients (#73)
+- Reproducible release verification that installs the exact npm tarball in a
+  clean offline consumer project, boots through its installed `.bin`, and
+  protocol-tests modern discovery plus legacy/modern tool calls (#73)
+- A non-publishing `npm run release:check` gate that requires pre-reviewed
+  package/changelog metadata and detects npm/tag/GitHub partial release state;
+  the release path can safely resume after npm succeeds for the same exact
+  `gitHead` (#73)
 - Hosted-compatible `strict_match_org_only`, `org_match_field`,
   `org_match_mode`, and `purpose` inputs on `ctscout_search_company`, plus
   protocol-level and packed-artifact contract tests (#75)
@@ -31,6 +43,12 @@ version heading on release.
 
 ### Changed
 
+- Migrated the stdio adapter from the monolithic MCP TypeScript SDK v1 to the
+  v2 server package and Zod 4 so one factory can serve modern stateless
+  discovery and legacy sessionful clients (#73)
+- Pinned the MCP v2 server transport to the exact reviewed `2.0.0` runtime and
+  made the packed-artifact contract reject dependency-range or installed-runtime
+  drift (#79)
 - Aligned the existing stdio `ctscout_search_company_batch` contract with
   hosted MCP: quota-debiting tools are read-only but non-idempotent, semantic
   candidates survive default Markdown, full/compact responses are preserved
@@ -38,10 +56,11 @@ version heading on release.
   1–10-name schema (#76)
 - Documented hosted MCP as the authoritative contract and qualified the
   then-current stdio-only batch compatibility exception (#75)
-- **Node floor raised to `>=20`** in `engines` (18 is EOL since April 2025;
-  CI has only ever tested 20) (#46)
+- **Compatibility boundary: Node floor raised from `>=18` to `>=20`** in
+  `engines` (18 is EOL since April 2025; CI has only ever tested 20) (#46)
 - `SERVER_VERSION` is read from package.json at runtime instead of a
-  hardcoded string; release.sh smoke-checks the built server's banner (#49)
+  hardcoded string; packed-artifact verification smoke-checks the installed
+  server's exact banner (#49, #73)
 - Removed stale benchmark scripts (`scripts/benchmark.ts`, `benchmarks/`)
   and the `mitata` dev dependency (#47)
 - Simplified `truncateIfNeeded` recursion/retry logic (#30)
