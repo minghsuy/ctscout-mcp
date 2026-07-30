@@ -36,5 +36,8 @@ jobs:
       - name: TypeScript build
         run: npm run build
 
+      - name: Packed npm artifact contract
+        run: npm run test:package
+
       - name: Unit tests with coverage gate
         run: npm run test:coverage

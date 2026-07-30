@@ -11,11 +11,11 @@
  * Auth: requires an API key via the CTSCOUT_API_KEY environment variable.
  * Get a free key (no email, no signup) at https://ctscout.dev.
  *
- * Distribution: stdio transport for local use (invoked via npx by an MCP
- * client such as Claude Code or Claude Desktop). For zero-install access
- * the same tools are also served over HTTP at https://ctscout.dev/mcp
- * (Streamable HTTP transport) and https://ctscout.dev/sse (SSE legacy).
- * This binary is the local-execution path; the README documents both.
+ * Distribution: stdio compatibility transport for local use (invoked via
+ * npx by an MCP client such as Claude Code or Claude Desktop). The
+ * authoritative hosted contract is served at https://ctscout.dev/mcp
+ * (Streamable HTTP transport). During migration, this package retains the
+ * batch tool while hosted MCP exposes the two single-query tools; see #72.
  */
 
 import { realpathSync } from "node:fs";
@@ -179,6 +179,36 @@ const SearchCompanyInputSchema = z
         "Company / organization name to search for. Partial matches work " +
           "(e.g. 'Goldman' matches 'Goldman Sachs'). Case-insensitive.",
       ),
+    strict_match_org_only: z
+      .boolean()
+      .optional()
+      .describe(
+        "Optional, default false. When true, suppress the semantic-name fallback " +
+          "and return only authoritative warehouse organization matches.",
+      ),
+    org_match_field: z
+      .enum(["verbatim", "normalized"])
+      .optional()
+      .describe(
+        "Optional, default 'verbatim'. Leave unset to try the raw cert subject " +
+          "first and automatically retry its locale-normalized form after an empty result. " +
+          "Set 'normalized' only to skip the verbatim attempt.",
+      ),
+    org_match_mode: z
+      .enum(["substring", "word"])
+      .optional()
+      .describe(
+        "Optional, default 'substring'. Use 'word' for short or common-token names " +
+          "to avoid unrelated substring matches. Applies only to verbatim matching.",
+      ),
+    purpose: z
+      .enum(["underwriting", "corporate_family"])
+      .optional()
+      .describe(
+        "Optional persona preset. 'underwriting' defaults to a tight operational " +
+          "attack-surface set; 'corporate_family' defaults to a broad brand, regional, " +
+          "and family set. Explicitly supplied matching controls always win.",
+      ),
     response_format: z
       .nativeEnum(ResponseFormat)
       .default(ResponseFormat.MARKDOWN)
@@ -265,6 +295,10 @@ export function getApiKey(): string {
 interface ScanRequestBody {
   company_name?: string;
   seed_domain?: string[];
+  strict_match_org_only?: boolean;
+  org_match_field?: "verbatim" | "normalized";
+  org_match_mode?: "substring" | "word";
+  purpose?: "underwriting" | "corporate_family";
 }
 
 // Read at most `maxBytes` off a Response's body stream, then cancel the
@@ -1069,19 +1103,31 @@ export function truncateBatchJsonIfNeeded(batch: ScanBatchResponse): {
 
 // ---------- Server + tools ----------
 
-const server = new McpServer({
-  name: SERVER_NAME,
-  version: SERVER_VERSION,
-});
+/**
+ * Build one stdio compatibility server.
+ *
+ * A factory keeps protocol tests isolated and makes the registered contract
+ * inspectable without booting process-global stdio. Production still creates
+ * exactly one instance below.
+ */
+export function createServer(): McpServer {
+  const server = new McpServer({
+    name: SERVER_NAME,
+    version: SERVER_VERSION,
+  });
 
-server.registerTool(
-  "ctscout_search_company",
-  {
-    title: "Search ctscout by company name",
-    description: `Search ctscout.dev's domain-attribution warehouse by organization name. Returns apex domains attributed to that organization based on Certificate Transparency log analysis (OV/EV cert subjects matched to entity names).
+  server.registerTool(
+    "ctscout_search_company",
+    {
+      title: "Search ctscout by company name",
+      description: `Search ctscout.dev's domain-attribution warehouse by organization name. Returns apex domains attributed to that organization based on Certificate Transparency log analysis (OV/EV cert subjects matched to entity names).
 
 Args:
   - company_name (string, required): organization name. Partial matches work — 'Goldman' matches 'Goldman Sachs'. Min 2 chars, max 200.
+  - strict_match_org_only (boolean, optional): suppress semantic candidates and return only authoritative warehouse org matches.
+  - org_match_field ('verbatim' | 'normalized', optional): choose raw cert-subject matching or normalized legal-form matching. Leave unset for automatic verbatim-then-normalized fallback.
+  - org_match_mode ('substring' | 'word', optional): use word-boundary matching to reduce noise from short/common names.
+  - purpose ('underwriting' | 'corporate_family', optional): choose tight operational-attribution defaults or broader corporate-family defaults. Explicit matching controls override the preset.
   - response_format ('markdown' | 'json', default 'markdown'): output format.
 
 Returns:
@@ -1129,50 +1175,64 @@ Coverage caveat:
   - Best for established US/EU tech companies with OV/EV certs (~5,976 entities indexed).
   - Limited coverage on small private companies, cyber MGAs, and entities using only DV (Let's Encrypt) certs.
   - See https://ctscout.dev for current coverage map.`,
-    inputSchema: SearchCompanyInputSchema.shape,
-    annotations: {
-      readOnlyHint: true,
-      destructiveHint: false,
-      idempotentHint: true,
-      openWorldHint: true,
+      inputSchema: SearchCompanyInputSchema.shape,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
     },
-  },
-  async (params: SearchCompanyInput) => {
-    try {
-      const data = await callScan({ company_name: params.company_name });
+    async (params: SearchCompanyInput) => {
+      try {
+        const data = await callScan({
+          company_name: params.company_name,
+          ...(params.strict_match_org_only !== undefined && {
+            strict_match_org_only: params.strict_match_org_only,
+          }),
+          ...(params.org_match_field !== undefined && {
+            org_match_field: params.org_match_field,
+          }),
+          ...(params.org_match_mode !== undefined && {
+            org_match_mode: params.org_match_mode,
+          }),
+          ...(params.purpose !== undefined && {
+            purpose: params.purpose,
+          }),
+        });
 
-      if (params.response_format === ResponseFormat.JSON) {
-        const { text, structured } = truncateJsonIfNeeded(data);
+        if (params.response_format === ResponseFormat.JSON) {
+          const { text, structured } = truncateJsonIfNeeded(data);
+          return {
+            content: [{ type: "text", text }],
+            structuredContent: structured as unknown as Record<string, unknown>,
+          };
+        }
+
+        const md = formatScanAsMarkdown(params.company_name, data, {
+          kind: "company",
+        });
+        const { text, structured } = truncateIfNeeded(md, data, params.company_name, {
+          kind: "company",
+        });
         return {
           content: [{ type: "text", text }],
           structuredContent: structured as unknown as Record<string, unknown>,
         };
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: explainError(err) }],
+          isError: true,
+        };
       }
+    },
+  );
 
-      const md = formatScanAsMarkdown(params.company_name, data, {
-        kind: "company",
-      });
-      const { text, structured } = truncateIfNeeded(md, data, params.company_name, {
-        kind: "company",
-      });
-      return {
-        content: [{ type: "text", text }],
-        structuredContent: structured as unknown as Record<string, unknown>,
-      };
-    } catch (err) {
-      return {
-        content: [{ type: "text", text: explainError(err) }],
-        isError: true,
-      };
-    }
-  },
-);
-
-server.registerTool(
-  "ctscout_search_company_batch",
-  {
-    title: "Search ctscout by multiple company names in one call",
-    description: `Look up apex domains for up to ${MAX_BATCH_QUERIES} organization names in a single call, via ctscout.dev's /scan/batch endpoint. Each name is matched exactly like ctscout_search_company; results come back in input order.
+  server.registerTool(
+    "ctscout_search_company_batch",
+    {
+      title: "Search ctscout by multiple company names in one call",
+      description: `Look up apex domains for up to ${MAX_BATCH_QUERIES} organization names in a single call, via ctscout.dev's /scan/batch endpoint. Each name is matched exactly like ctscout_search_company; results come back in input order.
 
 Args:
   - company_names (string[], required): 1–${MAX_BATCH_QUERIES} organization names. Partial matches work — 'Goldman' matches 'Goldman Sachs'. Each 2–200 chars.
@@ -1203,51 +1263,51 @@ Auth & limits:
   - Bulk caveat: a batch where many names fall back to semantic matching can exceed the endpoint's per-request subrequest budget, in which case the trailing names come back as per-query HTTP 503 errors (with retry guidance in the message). If you see those, split into smaller batches. High-volume bulk callers should prefer the REST /scan/batch endpoint directly (it accepts a strict_match_org_only flag that suppresses the semantic fallback).
 
 Legal-vs-brand and coverage caveats are identical to ctscout_search_company — brand names may need legal-entity variants ("X Companies", "X Group", "The X"), and coverage is best for established US/EU entities with OV/EV certs.`,
-    inputSchema: SearchCompanyBatchInputSchema.shape,
-    annotations: {
-      readOnlyHint: true,
-      destructiveHint: false,
-      idempotentHint: true,
-      openWorldHint: true,
+      inputSchema: SearchCompanyBatchInputSchema.shape,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
     },
-  },
-  async (params: SearchCompanyBatchInput) => {
-    try {
-      const queries: ScanRequestBody[] = params.company_names.map((company_name) => ({
-        company_name,
-      }));
-      const data = await callScanBatch(queries);
+    async (params: SearchCompanyBatchInput) => {
+      try {
+        const queries: ScanRequestBody[] = params.company_names.map((company_name) => ({
+          company_name,
+        }));
+        const data = await callScanBatch(queries);
 
-      if (params.response_format === ResponseFormat.JSON) {
-        const { text, structured } = truncateBatchJsonIfNeeded(data);
+        if (params.response_format === ResponseFormat.JSON) {
+          const { text, structured } = truncateBatchJsonIfNeeded(data);
+          return {
+            content: [{ type: "text", text }],
+            structuredContent: structured as unknown as Record<string, unknown>,
+          };
+        }
+
+        const text = formatBatchAsMarkdown(params.company_names, data);
+        // structuredContent mirrors the single tool: a bounded machine-readable
+        // envelope alongside the human-readable markdown.
+        const { structured } = truncateBatchJsonIfNeeded(data);
         return {
           content: [{ type: "text", text }],
           structuredContent: structured as unknown as Record<string, unknown>,
         };
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: explainError(err) }],
+          isError: true,
+        };
       }
+    },
+  );
 
-      const text = formatBatchAsMarkdown(params.company_names, data);
-      // structuredContent mirrors the single tool: a bounded machine-readable
-      // envelope alongside the human-readable markdown.
-      const { structured } = truncateBatchJsonIfNeeded(data);
-      return {
-        content: [{ type: "text", text }],
-        structuredContent: structured as unknown as Record<string, unknown>,
-      };
-    } catch (err) {
-      return {
-        content: [{ type: "text", text: explainError(err) }],
-        isError: true,
-      };
-    }
-  },
-);
-
-server.registerTool(
-  "ctscout_lookup_domain",
-  {
-    title: "Reverse-lookup organization for one or more domains",
-    description: `Reverse-lookup ctscout.dev's domain-attribution warehouse: given one or more apex domains, return the organization(s) attributed to each.
+  server.registerTool(
+    "ctscout_lookup_domain",
+    {
+      title: "Reverse-lookup organization for one or more domains",
+      description: `Reverse-lookup ctscout.dev's domain-attribution warehouse: given one or more apex domains, return the organization(s) attributed to each.
 
 Args:
   - domains (string[], required): apex domains to look up. Each between 3 and 253 chars. Max 10 per call. Examples: ["gs.com"], ["coalition.com", "at-bay.com"].
@@ -1267,44 +1327,49 @@ Coverage caveat:
   - When a domain IS in the warehouse but the attributed org is a subsidiary (e.g. an Allianz brand domain), the 'org' field shows the cert-subject organization which may differ from the brand on the homepage.
 
 Auth & limits: same as ctscout_search_company.`,
-    inputSchema: LookupDomainInputSchema.shape,
-    annotations: {
-      readOnlyHint: true,
-      destructiveHint: false,
-      idempotentHint: true,
-      openWorldHint: true,
+      inputSchema: LookupDomainInputSchema.shape,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
     },
-  },
-  async (params: LookupDomainInput) => {
-    try {
-      const data = await callScan({ seed_domain: params.domains });
+    async (params: LookupDomainInput) => {
+      try {
+        const data = await callScan({ seed_domain: params.domains });
 
-      if (params.response_format === ResponseFormat.JSON) {
-        const { text, structured } = truncateJsonIfNeeded(data);
+        if (params.response_format === ResponseFormat.JSON) {
+          const { text, structured } = truncateJsonIfNeeded(data);
+          return {
+            content: [{ type: "text", text }],
+            structuredContent: structured as unknown as Record<string, unknown>,
+          };
+        }
+
+        const md = formatScanAsMarkdown(params.domains.join(", "), data, {
+          kind: "domain",
+        });
+        const { text, structured } = truncateIfNeeded(md, data, params.domains.join(", "), {
+          kind: "domain",
+        });
         return {
           content: [{ type: "text", text }],
           structuredContent: structured as unknown as Record<string, unknown>,
         };
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: explainError(err) }],
+          isError: true,
+        };
       }
+    },
+  );
 
-      const md = formatScanAsMarkdown(params.domains.join(", "), data, {
-        kind: "domain",
-      });
-      const { text, structured } = truncateIfNeeded(md, data, params.domains.join(", "), {
-        kind: "domain",
-      });
-      return {
-        content: [{ type: "text", text }],
-        structuredContent: structured as unknown as Record<string, unknown>,
-      };
-    } catch (err) {
-      return {
-        content: [{ type: "text", text: explainError(err) }],
-        isError: true,
-      };
-    }
-  },
-);
+  return server;
+}
+
+const server = createServer();
 
 // ---------- Main ----------
 
