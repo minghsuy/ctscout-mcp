@@ -4,10 +4,32 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import { join } from "node:path";
 
-const [packageRoot, installedBin, contentsPath, expectedVersion] = process.argv.slice(2);
+const [
+  packageRoot,
+  installedBin,
+  contentsPath,
+  expectedVersion,
+  expectedMcpServerVersion,
+  lockedMcpServerSpecifier,
+] = process.argv.slice(2);
 assert.ok(
-  packageRoot && installedBin && contentsPath && expectedVersion,
-  "packed artifact paths and expected version are required",
+  packageRoot &&
+    installedBin &&
+    contentsPath &&
+    expectedVersion &&
+    expectedMcpServerVersion &&
+    lockedMcpServerSpecifier,
+  "packed artifact paths and expected versions are required",
+);
+assert.match(
+  expectedMcpServerVersion,
+  /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/,
+  "the MCP server dependency must be an exact SemVer pin",
+);
+assert.equal(
+  lockedMcpServerSpecifier,
+  expectedMcpServerVersion,
+  "the package lock must preserve the exact MCP server manifest pin",
 );
 
 const API_KEY = "ds_free_packed_contract_test";
@@ -39,12 +61,31 @@ assert.equal(packedPackage.name, "ctscout-mcp-server");
 assert.equal(packedPackage.version, expectedVersion);
 assert.equal(packedPackage.engines.node, ">=20");
 assert.equal(packedPackage.bin["ctscout-mcp-server"], "dist/index.js");
-assert.match(packedPackage.dependencies["@modelcontextprotocol/server"], /^\^2\./);
+assert.equal(
+  packedPackage.dependencies["@modelcontextprotocol/server"],
+  expectedMcpServerVersion,
+  "the packed manifest must preserve the exact MCP server pin",
+);
 assert.match(packedPackage.dependencies.zod, /^\^4\./);
 assert.equal(packedPackage.dependencies["@modelcontextprotocol/sdk"], undefined);
+const installedMcpPackagePath = join(
+  packageRoot,
+  "..",
+  "@modelcontextprotocol",
+  "server",
+  "package.json",
+);
 assert.ok(
-  existsSync(join(packageRoot, "..", "@modelcontextprotocol", "server")),
+  existsSync(installedMcpPackagePath),
   "clean install omitted the MCP server runtime dependency",
+);
+const installedMcpPackage = JSON.parse(
+  readFileSync(installedMcpPackagePath, "utf8"),
+);
+assert.equal(
+  installedMcpPackage.version,
+  expectedMcpServerVersion,
+  "the installed MCP server runtime must match the exact packed manifest pin",
 );
 
 const apiRequests = [];

@@ -22,6 +22,8 @@ INSTALL_ROOT="$PACK_TMP/consumer"
 INSTALLED_PACKAGE="$INSTALL_ROOT/node_modules/ctscout-mcp-server"
 INSTALLED_BIN="$INSTALL_ROOT/node_modules/.bin/ctscout-mcp-server"
 EXPECTED_VERSION="$(node -p "require('$REPO_ROOT/package.json').version")"
+EXPECTED_MCP_SERVER_VERSION="$(node -p "require('$REPO_ROOT/package.json').dependencies['@modelcontextprotocol/server']")"
+LOCKED_MCP_SERVER_SPECIFIER="$(node -p "require('$REPO_ROOT/package-lock.json').packages[''].dependencies['@modelcontextprotocol/server']")"
 RUNTIME_PACKS="$PACK_TMP/runtime-packs"
 CONSUMER_CACHE="$PACK_TMP/consumer-cache"
 
@@ -59,4 +61,6 @@ node "$REPO_ROOT/scripts/assert-packed-artifact.mjs" \
   "$INSTALLED_PACKAGE" \
   "$INSTALLED_BIN" \
   "$PACK_LIST" \
-  "$EXPECTED_VERSION"
+  "$EXPECTED_VERSION" \
+  "$EXPECTED_MCP_SERVER_VERSION" \
+  "$LOCKED_MCP_SERVER_SPECIFIER"

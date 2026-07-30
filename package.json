@@ -61,7 +61,7 @@
     "url": "https://github.com/minghsuy/ctscout-mcp/issues"
   },
   "dependencies": {
-    "@modelcontextprotocol/server": "^2.0.0",
+    "@modelcontextprotocol/server": "2.0.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {

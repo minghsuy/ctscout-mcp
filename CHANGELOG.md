@@ -46,6 +46,9 @@ version heading so the exact package metadata and notes are reviewed together;
 - Migrated the stdio adapter from the monolithic MCP TypeScript SDK v1 to the
   v2 server package and Zod 4 so one factory can serve modern stateless
   discovery and legacy sessionful clients (#73)
+- Pinned the MCP v2 server transport to the exact reviewed `2.0.0` runtime and
+  made the packed-artifact contract reject dependency-range or installed-runtime
+  drift (#79)
 - Aligned the existing stdio `ctscout_search_company_batch` contract with
   hosted MCP: quota-debiting tools are read-only but non-idempotent, semantic
   candidates survive default Markdown, full/compact responses are preserved
