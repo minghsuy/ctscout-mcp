@@ -55,6 +55,39 @@ assert.deepEqual(search.inputSchema.properties.purpose.enum, [
   "underwriting",
   "corporate_family",
 ]);
+assert.deepEqual(search.inputSchema.properties.response_format.enum, [
+  "markdown",
+  "json",
+]);
+
+const batch = list.result.tools.find(
+  (tool) => tool.name === "ctscout_search_company_batch",
+);
+assert.ok(batch, "packed server omitted ctscout_search_company_batch");
+assert.deepEqual(batch.inputSchema.required, ["company_names"]);
+assert.equal(batch.inputSchema.properties.company_names.minItems, 1);
+assert.equal(batch.inputSchema.properties.company_names.maxItems, 10);
+assert.equal(
+  batch.inputSchema.properties.company_names.items.minLength,
+  2,
+);
+assert.equal(
+  batch.inputSchema.properties.company_names.items.maxLength,
+  200,
+);
+assert.deepEqual(batch.inputSchema.properties.response_format.enum, [
+  "markdown",
+  "json",
+]);
+
+for (const tool of list.result.tools) {
+  assert.deepEqual(tool.annotations, {
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: true,
+  });
+}
 
 const stderr = readFileSync(stderrPath, "utf8");
 assert.match(stderr, /running via stdio/);
