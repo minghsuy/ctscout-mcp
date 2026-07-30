@@ -20,12 +20,6 @@ PACK_TARBALL="$PACK_TMP/$PACK_NAME"
 PACK_LIST="$PACK_TMP/contents.txt"
 
 tar -tzf "$PACK_TARBALL" >"$PACK_LIST"
-rg -Fx "package/dist/index.js" "$PACK_LIST" >/dev/null
-rg -Fx "package/dist/index.d.ts" "$PACK_LIST" >/dev/null
-if rg -q '^package/(src|tests)/' "$PACK_LIST"; then
-  echo "packed artifact unexpectedly includes source or tests" >&2
-  exit 1
-fi
 
 tar -xzf "$PACK_TARBALL" -C "$PACK_TMP"
 ln -s "$REPO_ROOT/node_modules" "$PACK_TMP/package/node_modules"
@@ -43,4 +37,5 @@ ln -s "$PACK_TMP/package/dist/index.js" "$PACK_TMP/ctscout-mcp-server"
 node "$REPO_ROOT/scripts/assert-packed-artifact.mjs" \
   "$PACK_TMP/package" \
   "$PACK_TMP/stdout.jsonl" \
-  "$PACK_TMP/stderr.txt"
+  "$PACK_TMP/stderr.txt" \
+  "$PACK_LIST"

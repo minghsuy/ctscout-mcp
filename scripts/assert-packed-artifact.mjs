@@ -2,8 +2,19 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const [packageRoot, stdoutPath, stderrPath] = process.argv.slice(2);
-assert.ok(packageRoot && stdoutPath && stderrPath, "packed artifact paths are required");
+const [packageRoot, stdoutPath, stderrPath, contentsPath] = process.argv.slice(2);
+assert.ok(
+  packageRoot && stdoutPath && stderrPath && contentsPath,
+  "packed artifact paths are required",
+);
+
+const packedPaths = readFileSync(contentsPath, "utf8").trim().split("\n");
+assert.ok(packedPaths.includes("package/dist/index.js"));
+assert.ok(packedPaths.includes("package/dist/index.d.ts"));
+assert.equal(
+  packedPaths.some((path) => /^package\/(?:src|tests)\//.test(path)),
+  false,
+);
 
 assert.ok(existsSync(join(packageRoot, "dist", "index.js")));
 assert.ok(existsSync(join(packageRoot, "dist", "index.d.ts")));
