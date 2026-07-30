@@ -28,7 +28,7 @@
     "dev": "tsx watch src/index.ts",
     "clean": "rm -rf dist",
     "test": "vitest run && npm run test:package",
-    "test:package": "bash scripts/test-packed-artifact.sh",
+    "test:package": "npm run build && bash scripts/test-packed-artifact.sh",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "lint": "biome check",
