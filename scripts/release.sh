@@ -1,241 +1,239 @@
 #!/usr/bin/env bash
-# Single-repo npm release for ctscout-mcp.
+# Publish one already-reviewed ctscout-mcp commit to npm, git, and GitHub.
 #
-# Mirrors HSA's scripts/release.sh pattern but npm-flavored:
-#   pre-flight gates -> verify -> bump version -> bump CHANGELOG ->
-#   commit -> push main -> npm publish -> tag -> push tag -> gh release.
-#
-# Note: tag is pushed AFTER npm publish so a publish failure leaves the
-# repo cleanly retryable (no orphan tag on origin to clean up).
+# Release metadata must be prepared and reviewed in a PR. This script never
+# edits package.json, package-lock.json, or CHANGELOG.md and never creates a
+# release commit. That invariant makes npm's gitHead, the git tag, and the
+# GitHub release point at the same reviewed commit.
 #
 # Usage:
-#   scripts/release.sh <new-version>      e.g. scripts/release.sh 0.3.0
-#   scripts/release.sh --check <version>  dry run, no writes
-#
-# The version in package.json may already match (e.g. you bumped it inside
-# the merged feature PR, like v0.2.0 did). In that case this script skips
-# the bump+commit step but still does tag + publish + release.
+#   scripts/release.sh --check <version>  verify only; no external writes
+#   scripts/release.sh <version>          publish/resume from clean synced main
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_DIR"
 
-DRY_RUN=0
+CHECK_ONLY=0
 if [[ "${1:-}" == "--check" ]]; then
-  DRY_RUN=1
-  shift || true
+  CHECK_ONLY=1
+  shift
 fi
 
 NEW_VERSION="${1:-}"
 if [[ -z "$NEW_VERSION" ]]; then
-  echo "usage: scripts/release.sh [--check] <new-version>" >&2
-  echo "current package.json version: $(node -p "require('./package.json').version")" >&2
-  exit 2
+  if (( CHECK_ONLY )); then
+    NEW_VERSION="$(node -p "require('./package.json').version")"
+  else
+    echo "usage: scripts/release.sh [--check] <new-version>" >&2
+    exit 2
+  fi
 fi
-
 if [[ ! "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "error: version must be MAJOR.MINOR.PATCH (got: $NEW_VERSION)" >&2
   exit 2
 fi
 
-run() {
-  if (( DRY_RUN )); then
-    echo "+ $*"
-  else
-    echo "+ $*"
-    "$@"
-  fi
-}
+PACKAGE_NAME="$(node -p "require('./package.json').name")"
+PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+TAG="v${NEW_VERSION}"
+HEAD_SHA="$(git rev-parse HEAD)"
 
-# --- Pre-flight gates ---
+if [[ "$PACKAGE_NAME" != "ctscout-mcp-server" ]]; then
+  echo "error: unexpected package name: $PACKAGE_NAME" >&2
+  exit 1
+fi
+if [[ "$PACKAGE_VERSION" != "$NEW_VERSION" ]]; then
+  echo "error: package.json is $PACKAGE_VERSION, expected $NEW_VERSION" >&2
+  echo "       prepare and review the version bump before releasing" >&2
+  exit 1
+fi
+if ! grep -q "^## \\[$NEW_VERSION\\] - [0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}$" CHANGELOG.md; then
+  echo "error: CHANGELOG.md has no dated [$NEW_VERSION] release heading" >&2
+  exit 1
+fi
 if [[ -n "$(git status --porcelain)" ]]; then
-  echo "error: working tree dirty — commit or stash first" >&2
-  git status --short
+  echo "error: working tree dirty — release only a reviewed commit" >&2
+  git status --short >&2
   exit 1
 fi
 
-CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-if [[ "$CURRENT_BRANCH" != "main" ]]; then
-  echo "error: must release from main (current: $CURRENT_BRANCH)" >&2
+echo "==> fetching release refs"
+git fetch origin main --tags
+
+if (( ! CHECK_ONLY )); then
+  CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+  REMOTE_MAIN="$(git rev-parse origin/main)"
+  if [[ "$CURRENT_BRANCH" != "main" ]]; then
+    echo "error: must release from main (current: $CURRENT_BRANCH)" >&2
+    exit 1
+  fi
+  if [[ "$HEAD_SHA" != "$REMOTE_MAIN" ]]; then
+    echo "error: local main is not the exact origin/main commit" >&2
+    echo "       local:  $HEAD_SHA" >&2
+    echo "       remote: $REMOTE_MAIN" >&2
+    exit 1
+  fi
+else
+  echo "==> check-only candidate commit: $HEAD_SHA"
+fi
+
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ctscout-release.XXXXXX")"
+trap 'rm -rf -- "$TMP_DIR"' EXIT
+
+# npm is the first external mutation in the release sequence. A prior npm
+# version is acceptable only when it names this exact git commit: that is the
+# recoverable "npm succeeded, tag/release did not" state.
+NPM_EXISTS=0
+NPM_GIT_HEAD=""
+if npm view "${PACKAGE_NAME}@${NEW_VERSION}" version --json \
+  >"$TMP_DIR/npm-version.json" 2>"$TMP_DIR/npm-version.err"; then
+  NPM_EXISTS=1
+  NPM_GIT_HEAD="$(
+    npm view "${PACKAGE_NAME}@${NEW_VERSION}" gitHead --json \
+      | node -e 'const c=[];process.stdin.on("data",x=>c.push(x));process.stdin.on("end",()=>{const v=JSON.parse(Buffer.concat(c));process.stdout.write(typeof v==="string"?v:"")})'
+  )"
+  if [[ "$NPM_GIT_HEAD" != "$HEAD_SHA" ]]; then
+    echo "error: npm ${PACKAGE_NAME}@${NEW_VERSION} already exists from another commit" >&2
+    echo "       npm gitHead: ${NPM_GIT_HEAD:-(missing)}" >&2
+    echo "       local HEAD:  $HEAD_SHA" >&2
+    exit 1
+  fi
+elif ! grep -q "E404" "$TMP_DIR/npm-version.err"; then
+  echo "error: could not determine npm release state" >&2
+  sed -n '1,20p' "$TMP_DIR/npm-version.err" >&2
   exit 1
 fi
 
-git fetch origin main
-LOCAL=$(git rev-parse HEAD)
-REMOTE=$(git rev-parse origin/main)
-if [[ "$LOCAL" != "$REMOTE" ]]; then
-  echo "error: local main not in sync with origin/main" >&2
-  echo "       run: git pull --ff-only" >&2
+LOCAL_TAG_EXISTS=0
+LOCAL_TAG_SHA=""
+if git rev-parse --verify --quiet "${TAG}^{commit}" >"$TMP_DIR/tag-sha"; then
+  LOCAL_TAG_EXISTS=1
+  LOCAL_TAG_SHA="$(cat "$TMP_DIR/tag-sha")"
+  if [[ "$LOCAL_TAG_SHA" != "$HEAD_SHA" ]]; then
+    echo "error: local $TAG exists on a different commit" >&2
+    echo "       tag:  $LOCAL_TAG_SHA" >&2
+    echo "       HEAD: $HEAD_SHA" >&2
+    exit 1
+  fi
+fi
+
+REMOTE_TAG_EXISTS=0
+REMOTE_TAG_SHA=""
+git ls-remote --tags origin "refs/tags/$TAG" "refs/tags/${TAG}^{}" \
+  >"$TMP_DIR/remote-tags"
+if [[ -s "$TMP_DIR/remote-tags" ]]; then
+  REMOTE_TAG_EXISTS=1
+  REMOTE_TAG_SHA="$(
+    awk '
+      /\^\{\}$/ { peeled=$1 }
+      !/\^\{\}$/ { direct=$1 }
+      END { print peeled != "" ? peeled : direct }
+    ' "$TMP_DIR/remote-tags"
+  )"
+  if [[ "$REMOTE_TAG_SHA" != "$HEAD_SHA" ]]; then
+    echo "error: origin $TAG exists on a different commit" >&2
+    echo "       tag:  $REMOTE_TAG_SHA" >&2
+    echo "       HEAD: $HEAD_SHA" >&2
+    exit 1
+  fi
+fi
+
+RELEASE_EXISTS=0
+if gh release view "$TAG" --json tagName >"$TMP_DIR/release.json" 2>"$TMP_DIR/release.err"; then
+  RELEASE_EXISTS=1
+elif ! grep -qi "release not found\\|not found" "$TMP_DIR/release.err"; then
+  echo "error: could not determine GitHub release state" >&2
+  sed -n '1,20p' "$TMP_DIR/release.err" >&2
   exit 1
 fi
 
-if git rev-parse "v${NEW_VERSION}" >/dev/null 2>&1; then
-  echo "error: tag v${NEW_VERSION} already exists locally" >&2
+echo "==> release state"
+echo "    npm ${NEW_VERSION}: $([[ "$NPM_EXISTS" == 1 ]] && echo "present at $NPM_GIT_HEAD" || echo absent)"
+echo "    local git ${TAG}: $([[ "$LOCAL_TAG_EXISTS" == 1 ]] && echo "present at $LOCAL_TAG_SHA" || echo absent)"
+echo "    origin git ${TAG}: $([[ "$REMOTE_TAG_EXISTS" == 1 ]] && echo "present at $REMOTE_TAG_SHA" || echo absent)"
+echo "    GitHub ${TAG}: $([[ "$RELEASE_EXISTS" == 1 ]] && echo present || echo absent)"
+
+if (( CHECK_ONLY )) && (( NPM_EXISTS || LOCAL_TAG_EXISTS || REMOTE_TAG_EXISTS || RELEASE_EXISTS )); then
+  echo "error: check-only expects an unpublished version; release state is already partial or complete" >&2
   exit 1
 fi
-
-if git ls-remote --tags origin "v${NEW_VERSION}" | grep -q "v${NEW_VERSION}"; then
-  echo "error: tag v${NEW_VERSION} already exists on origin" >&2
+if (( ! NPM_EXISTS )) && (( LOCAL_TAG_EXISTS || REMOTE_TAG_EXISTS || RELEASE_EXISTS )); then
+  echo "error: tag/release exists without the immutable npm version; stop for manual audit" >&2
   exit 1
 fi
-
-# --- Quality gates ---
-# Run unconditionally (also in --check) so a dry-run actually validates
-# the release would succeed. Only the WRITE ops below go through run().
-echo "==> python3 available"
-command -v python3 >/dev/null 2>&1 || { echo "error: python3 required for CHANGELOG rewrite" >&2; exit 1; }
+if (( RELEASE_EXISTS )) && (( ! REMOTE_TAG_EXISTS )); then
+  echo "error: GitHub release exists without its remote tag; stop for manual audit" >&2
+  exit 1
+fi
 
 echo "==> npm ci"
 npm ci
-
-echo "==> npm test"
-npm test
-
+echo "==> npm run lint"
+npm run lint
+echo "==> npm run typecheck"
+npm run typecheck
 echo "==> npm run build"
 npm run build
+echo "==> npm test (includes exact-tarball clean install and protocol checks)"
+npm test
+echo "==> npm audit --audit-level=low"
+npm audit --audit-level=low
 
-if [[ ! -f dist/index.js ]]; then
-  echo "error: dist/index.js not present after build" >&2
-  exit 1
-fi
-# Sanity: the built server must boot and report package.json's version in
-# its banner. SERVER_VERSION is read from package.json at runtime (no
-# version literal in dist/index.js anymore), so the old grep of the
-# compiled JS can't apply. Booting the real dist entry also proves
-# dist/index.js resolves ../package.json from its built location — the
-# packaging failure class this check now guards. The `npm version` bump
-# below edits that same single source, so the already-built dist reports
-# the new version with no rebuild; the old pre-bumped-package.json /
-# un-bumped-src mismatch can no longer exist.
-echo "==> boot smoke check (dist banner vs package.json version)"
-PKG_VERSION=$(node -p "require('./package.json').version")
-BOOT_BANNER=$(CTSCOUT_API_KEY=ds_free_release_smoke node dist/index.js </dev/null 2>&1 >/dev/null || true)
-if [[ "$BOOT_BANNER" != *"ctscout-mcp-server v${PKG_VERSION} running via stdio"* ]]; then
-  echo "error: built server banner doesn't report package.json's version ($PKG_VERSION)" >&2
-  echo "       banner: ${BOOT_BANNER:-(no output)}" >&2
-  echo "       dist/index.js must resolve ../package.json at runtime — check the build." >&2
-  exit 1
-fi
-
-# --- Bump version (idempotent: skip if already at target) ---
-CURRENT_PJSON=$(node -p "require('./package.json').version")
-if [[ "$CURRENT_PJSON" == "$NEW_VERSION" ]]; then
-  echo "==> package.json already at $NEW_VERSION (presumably bumped in the merged PR), skipping bump+commit"
-  VERSION_BUMPED=0
-else
-  echo "==> bumping package.json $CURRENT_PJSON -> $NEW_VERSION"
-  if (( DRY_RUN )); then
-    echo "+ would set package.json.version = \"$NEW_VERSION\""
-  else
-    # Use npm version --no-git-tag-version so we control the tag step below.
-    # Don't suppress output — errors from npm version should surface.
-    npm version --no-git-tag-version "$NEW_VERSION"
-    run git add package.json package-lock.json
-  fi
-  VERSION_BUMPED=1
-fi
-
-# --- Bump CHANGELOG.md (best-effort; skip if no [Unreleased] section) ---
-TODAY=$(date -u +%Y-%m-%d)
-CHANGELOG_BUMPED=0
-if [[ -f CHANGELOG.md ]] && grep -q '^## \[Unreleased\]' CHANGELOG.md; then
-  if (( DRY_RUN )); then
-    echo "+ would bump CHANGELOG.md: [Unreleased] -> [$NEW_VERSION] - $TODAY"
-  else
-    python3 -c "
-import re, pathlib
-p = pathlib.Path('CHANGELOG.md')
-text = p.read_text(encoding='utf-8')
-new = re.sub(
-    r'^## \[Unreleased\]\$',
-    '## [Unreleased]\n\n## [$NEW_VERSION] - $TODAY',
-    text, count=1, flags=re.M)
-p.write_text(new, encoding='utf-8')
-"
-    run git add CHANGELOG.md
-  fi
-  CHANGELOG_BUMPED=1
-elif [[ -f CHANGELOG.md ]]; then
-  echo "warn: CHANGELOG.md has no [Unreleased] section — skipping CHANGELOG bump"
-else
-  echo "warn: no CHANGELOG.md — skipping CHANGELOG bump"
-fi
-
-# Single commit when either bump happened. Use run() (which handles
-# DRY_RUN itself) instead of guarding the whole block — keeps --check
-# output coherent: the `would-commit` line appears between `would-add`
-# and `git push`, matching the actual execution order.
-if (( VERSION_BUMPED || CHANGELOG_BUMPED )); then
-  run git commit -m "Release v${NEW_VERSION}"
-fi
-
-# Push the Release commit before publishing so any merge-back conflict
-# surfaces BEFORE we mutate npm. Tagging waits until after publish.
-if (( VERSION_BUMPED || CHANGELOG_BUMPED )); then
-  run git push origin main
-fi
-
-# --- npm publish (BEFORE tagging) ---
-# Rationale: pushing the tag is an irreversible publication of intent.
-# If `npm publish` fails (auth, network, registry hiccup) AFTER the tag
-# was pushed, the next attempt is rejected by the tag-exists pre-flight
-# and the user has to manually delete the tag from origin to retry.
-# Publishing FIRST means a failure leaves the state cleanly retryable:
-# Release commit + bumped package.json on main, no tag, no npm release.
-echo "==> npm publish (public, default tag = latest)"
-# `npm publish` reads .npmrc for auth. Skip the actual call in dry-run;
-# auth would fail in --check anyway and the simulation isn't useful.
-if (( DRY_RUN )); then
-  echo "+ would run: npm publish --access public"
-else
-  run npm publish --access public
-fi
-
-# --- Tag and push (AFTER successful publish) ---
-# Notes: `prepublishOnly` in package.json runs `npm run clean && npm run
-# build` before packaging, so the artifact actually shipped to npm is a
-# fresh rebuild — not the dist/ produced by our earlier `npm run build`.
-# That second build is normally byte-identical to ours; SERVER_VERSION is
-# read from package.json at runtime (bumped above), so the shipped
-# artifact reports the right version regardless of which build it is.
-run git tag -a "v${NEW_VERSION}" -m "v${NEW_VERSION}"
-run git push origin "v${NEW_VERSION}"
-
-# --- GitHub release ---
-if (( DRY_RUN )); then
-  echo "+ would generate release notes from git log and create GitHub release"
+if (( CHECK_ONLY )); then
   echo
-  echo "==> dry run complete"
+  echo "==> release check passed for ${PACKAGE_NAME}@${NEW_VERSION} at $HEAD_SHA"
+  echo "    no npm publish, tag, push, or GitHub release was performed"
   exit 0
 fi
 
-NOTES_FILE=$(mktemp)
-trap 'rm -f "$NOTES_FILE"' EXIT
-{
-  echo "## What's changed in v${NEW_VERSION}"
-  echo
-  echo "**npm**: \`npm install ctscout-mcp-server@${NEW_VERSION}\` or \`npx ctscout-mcp-server@${NEW_VERSION}\`"
-  echo
-  PREV_TAG=$(git describe --tags --abbrev=0 "v${NEW_VERSION}^" 2>/dev/null || echo "")
-  if [[ -n "$PREV_TAG" ]]; then
-    echo "### Commits since ${PREV_TAG}"
-    echo
-    git log "$PREV_TAG..v${NEW_VERSION}" --pretty="format:- %s" --no-merges
-  else
-    echo "Initial release."
-  fi
-} > "$NOTES_FILE"
+if (( ! NPM_EXISTS )); then
+  echo "==> publishing ${PACKAGE_NAME}@${NEW_VERSION}"
+  npm publish --access public
 
-# gh defaults to the current repo when run from the working tree. No
-# --repo flag means forks/mirrors release against themselves, not upstream.
-run gh release create "v${NEW_VERSION}" \
-  --title "v${NEW_VERSION}" \
-  --notes-file "$NOTES_FILE"
+  PUBLISHED_GIT_HEAD="$(
+    npm view "${PACKAGE_NAME}@${NEW_VERSION}" gitHead --json \
+      | node -e 'const c=[];process.stdin.on("data",x=>c.push(x));process.stdin.on("end",()=>{const v=JSON.parse(Buffer.concat(c));process.stdout.write(typeof v==="string"?v:"")})'
+  )"
+  if [[ "$PUBLISHED_GIT_HEAD" != "$HEAD_SHA" ]]; then
+    echo "error: npm published, but registry gitHead verification failed" >&2
+    echo "       expected: $HEAD_SHA" >&2
+    echo "       observed: ${PUBLISHED_GIT_HEAD:-(missing)}" >&2
+    echo "       do not create a tag; rerun after registry metadata is visible" >&2
+    exit 1
+  fi
+else
+  echo "==> npm version already exists at this exact commit; resuming"
+fi
+
+if (( ! LOCAL_TAG_EXISTS )); then
+  echo "==> creating local tag $TAG"
+  git tag -a "$TAG" -m "$TAG"
+fi
+if (( ! REMOTE_TAG_EXISTS )); then
+  echo "==> pushing $TAG"
+  git push origin "$TAG"
+else
+  echo "==> origin $TAG already points at this exact commit; resuming"
+fi
+
+if (( ! RELEASE_EXISTS )); then
+  NOTES_FILE="$TMP_DIR/notes.md"
+  {
+    echo "## What's changed in $TAG"
+    echo
+    echo "**npm**: \`npm install ${PACKAGE_NAME}@${NEW_VERSION}\` or \`npx ${PACKAGE_NAME}@${NEW_VERSION}\`"
+    echo
+    awk -v version="$NEW_VERSION" '
+      $0 ~ "^## \\[" version "\\] - " { found=1; next }
+      found && /^## \[/ { exit }
+      found { print }
+    ' CHANGELOG.md
+  } >"$NOTES_FILE"
+  gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$NOTES_FILE"
+else
+  echo "==> GitHub release $TAG already exists"
+fi
 
 echo
-echo "==> released v${NEW_VERSION}"
-echo "    npm:    https://www.npmjs.com/package/ctscout-mcp-server/v/${NEW_VERSION}"
-# `.git` suffix is optional: SSH remotes (`git@host:org/repo.git`)
-# always include it, HTTPS remotes copied from the GitHub UI often don't.
-ORIGIN_SLUG=$(git remote get-url origin | sed -E 's|.*github\.com[:/](.+)|\1|; s|\.git$||')
-echo "    github: https://github.com/${ORIGIN_SLUG}/releases/tag/v${NEW_VERSION}"
+echo "==> released ${PACKAGE_NAME}@${NEW_VERSION} from $HEAD_SHA"

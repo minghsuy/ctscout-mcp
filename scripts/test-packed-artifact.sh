@@ -18,27 +18,28 @@ PACK_NAME="$(
 )"
 PACK_TARBALL="$PACK_TMP/$PACK_NAME"
 PACK_LIST="$PACK_TMP/contents.txt"
+INSTALL_ROOT="$PACK_TMP/consumer"
+INSTALLED_PACKAGE="$INSTALL_ROOT/node_modules/ctscout-mcp-server"
+INSTALLED_BIN="$INSTALL_ROOT/node_modules/.bin/ctscout-mcp-server"
+EXPECTED_VERSION="$(node -p "require('$REPO_ROOT/package.json').version")"
 
 tar -tzf "$PACK_TARBALL" >"$PACK_LIST"
 
-tar -xzf "$PACK_TARBALL" -C "$PACK_TMP"
-ln -s "$REPO_ROOT/node_modules" "$PACK_TMP/package/node_modules"
-ln -s "$PACK_TMP/package/dist/index.js" "$PACK_TMP/ctscout-mcp-server"
-
-# Intentional: the stdio adapter still uses SDK v1's sessionful compatibility
-# path, so this exercises its latest 2025-11-25 revision. The older
-# 2024-11-05 fixture in symlink-boot.test.ts separately guards old clients.
-{
-  printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"packed-artifact-test","version":"0.0.0"}}}'
-  printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
-  printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
-} | CTSCOUT_API_KEY="ds_free_packed_contract_test" \
-  node "$PACK_TMP/ctscout-mcp-server" \
-  >"$PACK_TMP/stdout.jsonl" \
-  2>"$PACK_TMP/stderr.txt"
+# Install the exact tarball as a consumer would. `npm ci` has already placed
+# every locked dependency in npm's cache, so --offline makes this contract test
+# network-free while still proving dependency resolution in a clean project.
+mkdir -p "$INSTALL_ROOT"
+npm install \
+  --prefix "$INSTALL_ROOT" \
+  --ignore-scripts \
+  --offline \
+  --no-audit \
+  --no-fund \
+  --package-lock=false \
+  "$PACK_TARBALL"
 
 node "$REPO_ROOT/scripts/assert-packed-artifact.mjs" \
-  "$PACK_TMP/package" \
-  "$PACK_TMP/stdout.jsonl" \
-  "$PACK_TMP/stderr.txt" \
-  "$PACK_LIST"
+  "$INSTALLED_PACKAGE" \
+  "$INSTALLED_BIN" \
+  "$PACK_LIST" \
+  "$EXPECTED_VERSION"

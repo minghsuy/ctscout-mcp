@@ -11,20 +11,21 @@
  * Auth: requires an API key via the CTSCOUT_API_KEY environment variable.
  * Get a free key (no email, no signup) at https://ctscout.dev.
  *
- * Distribution: stdio compatibility transport for local use (invoked via
- * npx by an MCP client such as Claude Code or Claude Desktop). The
- * authoritative hosted contract is served at https://ctscout.dev/mcp
- * (Streamable HTTP transport). Both transports expose the same three public
- * tools while the longer-term shared-core/forwarding migration continues in
- * #72.
+ * Distribution: stdio compatibility transport for local use (invoked via npx
+ * by an MCP client such as Claude Code or Claude Desktop). The entry supports
+ * both the stateless 2026-07-28 server/discover era and legacy initialize
+ * clients. The authoritative hosted contract is served at
+ * https://ctscout.dev/mcp (Streamable HTTP transport). Both transports expose
+ * the same three public tools while the longer-term shared-core/forwarding
+ * migration continues in #72.
  */
 
 import { realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { McpServer } from "@modelcontextprotocol/server";
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
 
 // ---------- Constants ----------
@@ -1291,7 +1292,7 @@ Coverage caveat:
   - Best for established US/EU tech companies with OV/EV certs (~5,976 entities indexed).
   - Limited coverage on small private companies, cyber MGAs, and entities using only DV (Let's Encrypt) certs.
   - See https://ctscout.dev for current coverage map.`,
-      inputSchema: SearchCompanyInputSchema.shape,
+      inputSchema: SearchCompanyInputSchema,
       annotations: QUOTA_DEBITING_READ_ONLY_ANNOTATIONS,
     },
     async (params: SearchCompanyInput) => {
@@ -1374,7 +1375,7 @@ Auth & limits:
   - This MCP batch tool intentionally accepts names only. For matching modifiers such as strict_match_org_only, purpose, or org_match_mode, use individual ctscout_search_company calls or the REST /scan/batch endpoint.
 
 Legal-vs-brand and coverage caveats are identical to ctscout_search_company — brand names may need legal-entity variants ("X Companies", "X Group", "The X"), and coverage is best for established US/EU entities with OV/EV certs.`,
-      inputSchema: SearchCompanyBatchInputSchema.shape,
+      inputSchema: SearchCompanyBatchInputSchema,
       annotations: QUOTA_DEBITING_READ_ONLY_ANNOTATIONS,
     },
     async (params: SearchCompanyBatchInput) => {
@@ -1433,7 +1434,7 @@ Coverage caveat:
   - When a domain IS in the warehouse but the attributed org is a subsidiary (e.g. an Allianz brand domain), the 'org' field shows the cert-subject organization which may differ from the brand on the homepage.
 
 Auth & limits: same as ctscout_search_company.`,
-      inputSchema: LookupDomainInputSchema.shape,
+      inputSchema: LookupDomainInputSchema,
       annotations: QUOTA_DEBITING_READ_ONLY_ANNOTATIONS,
     },
     async (params: LookupDomainInput) => {
@@ -1470,8 +1471,6 @@ Auth & limits: same as ctscout_search_company.`,
   return server;
 }
 
-const server = createServer();
-
 // ---------- Main ----------
 
 async function main(): Promise<void> {
@@ -1484,8 +1483,15 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
+  // serveStdio selects the MCP era from the opening exchange. Modern clients
+  // use the stateless 2026-07-28 server/discover flow; legacy stdio clients
+  // keep their initialize handshake. The factory is deliberately fresh per
+  // connection (and for the disposable discovery probe) so no request/session
+  // state can leak across SDK instances.
+  serveStdio(() => createServer(), {
+    legacy: "serve",
+    onerror: (error) => console.error(`MCP transport error: ${error.message}`),
+  });
   console.error(`${SERVER_NAME} v${SERVER_VERSION} running via stdio (api=${API_BASE_URL})`);
 }
 
