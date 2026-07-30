@@ -31,8 +31,13 @@ version heading on release.
 
 ### Changed
 
+- Aligned the existing stdio `ctscout_search_company_batch` contract with
+  hosted MCP: quota-debiting tools are read-only but non-idempotent, semantic
+  candidates survive default Markdown, full/compact responses are preserved
+  before truncation, and protocol tests pin ordered partial failures plus the
+  1–10-name schema (#76)
 - Documented hosted MCP as the authoritative contract and qualified the
-  temporary stdio-only batch compatibility exception (#75)
+  then-current stdio-only batch compatibility exception (#75)
 - **Node floor raised to `>=20`** in `engines` (18 is EOL since April 2025;
   CI has only ever tested 20) (#46)
 - `SERVER_VERSION` is read from package.json at runtime instead of a

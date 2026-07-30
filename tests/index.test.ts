@@ -135,6 +135,40 @@ describe("formatScanAsMarkdown — free tier", () => {
     expect(md).toContain("Try a partial company name");
   });
 
+  it("renders semantic candidates instead of replacing them with a generic empty result", () => {
+    const md = formatScanAsMarkdown(
+      "Acme",
+      {
+        domains: [],
+        total: 0,
+        source: "warehouse",
+        match_type: "semantic",
+        org_match_strategy: "semantic",
+        empty_reason: "semantic_offered",
+        candidates: [
+          {
+            org: "Acme Holdings, Inc.",
+            similarity: 0.9123,
+            top_apex_domain: "acme.example",
+          },
+          {
+            org: "Acme Regional LLC",
+            similarity: 0.734,
+            top_apex_domain: null,
+          },
+        ],
+      },
+      { kind: "company" },
+    );
+
+    expect(md).toContain("No authoritative OV/EV warehouse domains");
+    expect(md).toContain("weak signal; corroborate before use");
+    expect(md).toContain("| Organization | Similarity | Top apex domain |");
+    expect(md).toContain("| Acme Holdings, Inc. | 0.91 | acme.example |");
+    expect(md).toContain("| Acme Regional LLC | 0.73 | — |");
+    expect(md).not.toContain("Try one of these variants");
+  });
+
   it("does not claim a size drop for a bare truncated flag without upgrade_hint", () => {
     // truncateWithRender always sets `truncated` AND `upgrade_hint` together,
     // so `truncated:true` alone (e.g. a hypothetical upstream count-cap) is
@@ -2151,6 +2185,59 @@ describe("formatBatchAsMarkdown", () => {
     expect(md).toContain("strict\\_match\\_org\\_only");
   });
 
+  it("preserves semantic candidates in their original batch position", () => {
+    const semantic = {
+      query: { company_name: "Semantic Co" },
+      domains: [],
+      total: 0,
+      source: "warehouse",
+      match_type: "semantic",
+      org_match_strategy: "semantic",
+      empty_reason: "semantic_offered",
+      candidates: [
+        {
+          org: "Semantic Company Holdings",
+          similarity: 0.88,
+          top_apex_domain: "semantic.example",
+        },
+      ],
+    } as BatchResultItem;
+    const batch = batchEnvelope([
+      batchOk("First", [oneWarehouseDomain("first")]),
+      semantic,
+      batchErr("Last", 503, "Retry later"),
+    ]);
+    const md = formatBatchAsMarkdown(["First", "Semantic Co", "Last"], batch);
+
+    expect(md.indexOf("first.example.com")).toBeLessThan(md.indexOf("Semantic Company Holdings"));
+    expect(md.indexOf("Semantic Company Holdings")).toBeLessThan(md.indexOf("HTTP 503"));
+    expect(md).toContain("| Semantic Company Holdings | 0.88 | semantic.example |");
+  });
+
+  it("bounds a semantic-only Markdown batch while retaining its highest-ranked candidates", () => {
+    const semantic = {
+      query: { company_name: "Semantic Flood" },
+      domains: [],
+      total: 0,
+      source: "warehouse",
+      match_type: "semantic",
+      org_match_strategy: "semantic",
+      empty_reason: "semantic_offered",
+      candidates: Array.from({ length: 4000 }, (_, index) => ({
+        org: `Candidate Organization ${index} ${"x".repeat(40)}`,
+        similarity: 0.9 - index / 10_000,
+        top_apex_domain: `candidate-${index}.example`,
+      })),
+    } as BatchResultItem;
+
+    const md = formatBatchAsMarkdown(["Semantic Flood"], batchEnvelope([semantic]));
+
+    expect(md.length).toBeLessThanOrEqual(CHARACTER_LIMIT);
+    expect(md).toContain("Candidate Organization 0");
+    expect(md).not.toContain("Candidate Organization 3999");
+    expect(md).toContain("semantic candidates");
+  });
+
   it("neutralizes newline injection in a hostile error message", () => {
     const batch = batchEnvelope([
       batchErr("Evil Co", 500, "boom\n\n## Injected Heading\n\n| pwned | row |"),
@@ -2219,6 +2306,20 @@ describe("formatBatchAsMarkdown", () => {
     expect(md).toContain("## ctscout results for: Flood");
     expect(md).toContain("Response truncated");
   });
+
+  it("does not truncate an uneven batch when the complete joined Markdown fits", () => {
+    const batch = batchEnvelope([
+      batchOk("Large A", warehouseDomains("large-a", 115)),
+      batchOk("Medium B", warehouseDomains("medium-b", 65)),
+      batchOk("Small C", warehouseDomains("small-c", 1)),
+    ]);
+    const md = formatBatchAsMarkdown(["Large A", "Medium B", "Small C"], batch);
+
+    expect(md.length).toBeLessThanOrEqual(CHARACTER_LIMIT);
+    expect(md).toContain("large-a-114.example.com");
+    expect(md).toContain("medium-b-64.example.com");
+    expect(md).not.toContain("Response truncated");
+  });
 });
 
 describe("truncateBatchJsonIfNeeded", () => {
@@ -2228,6 +2329,17 @@ describe("truncateBatchJsonIfNeeded", () => {
     expect(() => JSON.parse(text)).not.toThrow();
     expect(structured).toEqual(batch);
     expect(text).toContain("\n  "); // indented pretty-print
+  });
+
+  it("uses compact JSON before dropping data that only exceeds the pretty-print budget", () => {
+    const batch = batchEnvelope([batchOk("Borderline", warehouseDomains("borderline", 85))]);
+    expect(JSON.stringify(batch).length).toBeLessThanOrEqual(CHARACTER_LIMIT);
+    expect(JSON.stringify(batch, null, 2).length).toBeGreaterThan(CHARACTER_LIMIT);
+
+    const { text, structured } = truncateBatchJsonIfNeeded(batch);
+    expect(text).toBe(JSON.stringify(batch));
+    expect(structured).toBe(batch);
+    expect((structured.results[0] as { domains: DomainResult[] }).domains).toHaveLength(85);
   });
 
   it("bounds an oversized batch to the limit, stays valid JSON, no starvation (#53)", () => {
@@ -2268,12 +2380,15 @@ describe("truncateBatchJsonIfNeeded", () => {
     const bigCandidates = Array.from({ length: 4000 }, (_, i) => ({
       org: `Candidate Organization Number ${i} ${"x".repeat(20)}`,
       similarity: 0.5,
+      top_apex_domain: `candidate-${i}.example`,
     }));
     const heavy = {
       query: { company_name: "Heavy" },
       domains: [],
       total: 0,
       match_type: "semantic",
+      org_match_strategy: "semantic",
+      empty_reason: "semantic_offered",
       candidates: bigCandidates,
     } as unknown as BatchResultItem;
     const batch = batchEnvelope([heavy, batchOk("Sibling", [oneWarehouseDomain("sibling")])]);
@@ -2284,6 +2399,13 @@ describe("truncateBatchJsonIfNeeded", () => {
     // The sibling is NOT dropped to make room for the oversized item.
     expect(structured.results).toHaveLength(2);
     expect(text).toContain("sibling.example.com");
+    const bounded = structured.results[0] as {
+      candidates?: unknown[];
+      empty_reason?: string;
+    };
+    expect(bounded.candidates?.length).toBeGreaterThan(0);
+    expect(bounded.candidates?.length).toBeLessThan(bigCandidates.length);
+    expect(bounded.empty_reason).toBe("semantic_offered");
   });
 
   it("bounds a huge error message rather than dropping siblings", () => {
@@ -2296,5 +2418,19 @@ describe("truncateBatchJsonIfNeeded", () => {
     expect(() => JSON.parse(text)).not.toThrow();
     expect(structured.results).toHaveLength(2);
     expect(text).toContain("sibling.example.com");
+  });
+
+  it("retains one bounded error result for every maximum-size accepted input", () => {
+    const names = Array.from({ length: 10 }, (_, index) => `Company ${index} ${"n".repeat(188)}`);
+    const batch = batchEnvelope(
+      names.map((name, index) => batchErr(name, 500 + (index % 4), "e".repeat(200_000))),
+    );
+
+    const { text, structured } = truncateBatchJsonIfNeeded(batch);
+
+    expect(text.length).toBeLessThanOrEqual(CHARACTER_LIMIT);
+    expect(JSON.parse(text)).toEqual(structured);
+    expect(structured.results).toHaveLength(10);
+    expect(structured.results.map((item) => item.query.company_name)).toEqual(names);
   });
 });

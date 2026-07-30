@@ -93,11 +93,12 @@ The hosted endpoint is the authoritative MCP contract and is the recommended
 path. The stdio package is a compatibility adapter over the same ctscout.dev
 API for clients that cannot connect to remote MCP servers yet.
 
-During the current migration, stdio retains
-`ctscout_search_company_batch` for compatibility while hosted MCP exposes the
-two single-query tools. Do not assume tool discovery is identical across
-transports; let your client use `tools/list`. The remaining convergence work is
-tracked in [#72](https://github.com/minghsuy/ctscout-mcp/issues/72).
+Hosted and stdio both expose the same three public tool names, including the
+names-only `ctscout_search_company_batch` contract (1–10 organization names,
+ordered partial-failure results). Contract tests pin the stdio schema and
+quota-sensitive annotations against the hosted surface. The remaining
+shared-core/forwarding and automated cross-repository comparison work is tracked
+in [#72](https://github.com/minghsuy/ctscout-mcp/issues/72).
 
 ### 3. Use it
 

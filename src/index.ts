@@ -14,8 +14,9 @@
  * Distribution: stdio compatibility transport for local use (invoked via
  * npx by an MCP client such as Claude Code or Claude Desktop). The
  * authoritative hosted contract is served at https://ctscout.dev/mcp
- * (Streamable HTTP transport). During migration, this package retains the
- * batch tool while hosted MCP exposes the two single-query tools; see #72.
+ * (Streamable HTTP transport). Both transports expose the same three public
+ * tools while the longer-term shared-core/forwarding migration continues in
+ * #72.
  */
 
 import { realpathSync } from "node:fs";
@@ -31,14 +32,10 @@ import { z } from "zod";
 const API_BASE_URL = process.env.CTSCOUT_API_URL ?? "https://ctscout.dev";
 const SCAN_URL = `${API_BASE_URL}/scan`;
 const SCAN_BATCH_URL = `${API_BASE_URL}/scan/batch`;
-// Max company names accepted per batch. The upstream ctscout-worker enforces
-// this server-side (>N → 400 without a partial quota debit); it caps at 10
-// because the Worker runs on the free plan (50 subrequests/request) and a
-// worst-case all-semantic batch is ~11 subrequests/query — see
-// ctscout-worker src/index.ts `MAX_BATCH_SIZE`. Issue ctscout-mcp#19 proposed
-// 50, but that was the original #128 target before the free-plan cap landed;
-// the live contract is 10. Enforcing it client-side is belt-and-suspenders
-// (a clean validation error before a network round-trip), not load-bearing.
+// Keep in lockstep with ctscout-worker's hosted MCP MAX_BATCH_QUERIES and REST
+// MAX_BATCH_SIZE. Both public transports accept 1–10 names; validation here is
+// belt-and-suspenders (a clean error before a network round-trip), while the
+// Worker re-enforces the limit before quota debit.
 const MAX_BATCH_QUERIES = 10;
 const REQUEST_TIMEOUT_MS = 30_000;
 const CHARACTER_LIMIT = 25_000;
@@ -52,6 +49,14 @@ const ERROR_BODY_LIMIT = 500;
 // total clamped to what was actually read — ctscout-mcp#57.
 const ERROR_BODY_CAPTURE_LIMIT = 4096;
 const SERVER_NAME = "ctscout-mcp-server";
+const QUOTA_DEBITING_READ_ONLY_ANNOTATIONS = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  // Retrying the same call consumes quota again and can change the response
+  // to HTTP 429, so these tools are read-only but not idempotent.
+  idempotentHint: false,
+  openWorldHint: true,
+} as const;
 // Single-source the version from package.json — a hardcoded copy here has
 // drifted from package.json before (see scripts/release.sh history). Both
 // src/index.ts (tsx dev path) and dist/index.js (built path) sit one level
@@ -66,8 +71,8 @@ const USER_AGENT = `${SERVER_NAME}/${SERVER_VERSION}`;
 // ---------- Types ----------
 
 enum ResponseFormat {
-  JSON = "json",
   MARKDOWN = "markdown",
+  JSON = "json",
 }
 
 // Pro-tier enrichment fields. All optional — Free tier responses omit
@@ -133,8 +138,18 @@ export interface ScanResponse {
   // enrichment objects — fictional, the origin doesn't produce this).
   // undefined = ScoutResult shape from the real Pro tier origin.
   source?: "warehouse" | "live" | "cache-only" | "live-enriched";
+  candidates?: SemanticCandidate[];
+  match_type?: "exact" | "semantic" | "none";
+  org_match_strategy?: "substring" | "word" | "normalized" | "semantic" | "none" | "not_applicable";
+  empty_reason?: "semantic_offered" | "name_mismatch" | "dns_hidden" | "dv_or_absent";
   // ScoutResult also carries `entity` and `run_metadata` at the top level.
   [k: string]: unknown;
+}
+
+export interface SemanticCandidate {
+  org: string;
+  similarity: number;
+  top_apex_domain: string | null;
 }
 
 // The query object the batch endpoint echoes back per result. Loosely typed:
@@ -563,6 +578,33 @@ export function formatScanAsMarkdown(
   lines.push("");
 
   if (response.domains.length === 0) {
+    if (
+      response.match_type === "semantic" &&
+      Array.isArray(response.candidates) &&
+      response.candidates.length > 0
+    ) {
+      lines.push("No authoritative OV/EV warehouse domains matched.");
+      lines.push("");
+      lines.push("Semantic organization candidates (weak signal; corroborate before use):");
+      lines.push("");
+      lines.push("| Organization | Similarity | Top apex domain |");
+      lines.push("|---|---:|---|");
+      for (const candidate of response.candidates) {
+        const similarity =
+          typeof candidate.similarity === "number" && Number.isFinite(candidate.similarity)
+            ? candidate.similarity.toFixed(2)
+            : "—";
+        lines.push(
+          `| ${cellSafe(candidate.org, 80)} | ${similarity} | ${cellSafe(candidate.top_apex_domain, 60)} |`,
+        );
+      }
+      if (response.truncated && response.upgrade_hint) {
+        lines.push("");
+        lines.push(`> ${response.upgrade_hint}`);
+      }
+      return lines.join("\n");
+    }
+
     // Empty domains from truncation (truncateWithRender's 1-domain break
     // zeroes the list when a single result itself exceeds CHARACTER_LIMIT)
     // is NOT a "no matches" result. Explain the size-based drop and surface
@@ -573,7 +615,7 @@ export function formatScanAsMarkdown(
     // `truncated` flag without a hint is not our size-drop signal and
     // correctly falls through to the "No domains found" message.
     if (response.truncated && response.upgrade_hint) {
-      lines.push("All matching domains were dropped to keep the response under the size limit.");
+      lines.push("All matching results were dropped to keep the response under the size limit.");
       lines.push("");
       lines.push(`> ${response.upgrade_hint}`);
       return lines.join("\n");
@@ -781,17 +823,17 @@ function escapeForTable(s: string): string {
 
 // Both output formats are capped at CHARACTER_LIMIT, so the hint must not
 // point at JSON as an escape hatch for size (it used to — ctscout-mcp#42).
-function truncationHint(kept: number, total: number): string {
+function truncationHint(kept: number, total: number, kind = "domains"): string {
   return (
-    `Response truncated to ${kept} of ${total} domains ` +
+    `Response truncated to ${kept} of ${total} ${kind} ` +
     `to stay under ${CHARACTER_LIMIT} chars. Refine the query to narrow ` +
     `the results (JSON output is truncated the same way).`
   );
 }
 
-// Shared halving loop: drop whole trailing domain entries and re-render
-// until the rendered text fits, parameterized by the render function so
-// the markdown and JSON paths bound output identically.
+// Shared halving loop: drop whole trailing domain entries, then semantic
+// candidates, and re-render until the text fits. Parameterizing the renderer
+// keeps Markdown and JSON bounds identical.
 function truncateWithRender(
   text: string,
   structured: ScanResponse,
@@ -805,6 +847,9 @@ function truncateWithRender(
 } {
   let currentText = text;
   let currentStructured = structured;
+  const originalCandidates = Array.isArray(structured.candidates)
+    ? structured.candidates
+    : undefined;
 
   while (currentText.length > limit && currentStructured.domains.length > 0) {
     // If we're down to 1 domain and still over the limit, we must break to avoid infinite loop
@@ -825,6 +870,28 @@ function truncateWithRender(
       domains: currentStructured.domains.slice(0, halved),
       truncated: true,
       upgrade_hint: truncationHint(halved, structured.domains.length),
+    };
+    currentText = render(currentStructured);
+  }
+
+  while (
+    currentText.length > limit &&
+    Array.isArray(currentStructured.candidates) &&
+    currentStructured.candidates.length > 0
+  ) {
+    const kept =
+      currentStructured.candidates.length === 1
+        ? 0
+        : Math.max(1, Math.floor(currentStructured.candidates.length / 2));
+    currentStructured = {
+      ...currentStructured,
+      candidates: currentStructured.candidates.slice(0, kept),
+      truncated: true,
+      upgrade_hint: truncationHint(
+        kept,
+        originalCandidates?.length ?? currentStructured.candidates.length,
+        "semantic candidates",
+      ),
     };
     currentText = render(currentStructured);
   }
@@ -876,6 +943,12 @@ export function truncateJsonIfNeeded(structured: ScanResponse): {
       truncated: true,
       upgrade_hint: truncationHint(0, structured.domains.length),
       source: structured.source,
+      match_type: structured.match_type,
+      org_match_strategy: structured.org_match_strategy,
+      ...(structured.empty_reason !== undefined && {
+        empty_reason: structured.empty_reason,
+      }),
+      ...(Array.isArray(structured.candidates) && { candidates: [] }),
     };
     return { text: JSON.stringify(minimal), structured: minimal };
   }
@@ -1004,11 +1077,16 @@ export function formatBatchAsMarkdown(companyNames: string[], batch: ScanBatchRe
   const nameFor = (i: number): string =>
     companyNames[i] ?? results[i].query?.company_name ?? "(unnamed)";
 
-  // Pass 1: measure each section's full demand. Pass 2: re-render each within
-  // its fair share so no company can crowd out the rest.
-  const fullLengths = results.map(
-    (item, i) => renderCompanySection(nameFor(i), item, CHARACTER_LIMIT).length,
+  // Preserve every complete section when the joined response already fits.
+  // Only invoke fair-share truncation after proving the full batch is over the
+  // transport limit; otherwise an uneven but under-limit batch can lose rows.
+  const fullSections = results.map((item, i) =>
+    renderCompanySection(nameFor(i), item, CHARACTER_LIMIT),
   );
+  const full = [header, ...fullSections, footer].join("\n\n");
+  if (full.length <= CHARACTER_LIMIT) return full;
+
+  const fullLengths = fullSections.map((section) => section.length);
   const budgets = fairShareBudgets(fullLengths, budget);
   const sections = results.map((item, i) => renderCompanySection(nameFor(i), item, budgets[i]));
 
@@ -1016,10 +1094,8 @@ export function formatBatchAsMarkdown(companyNames: string[], batch: ScanBatchRe
 }
 
 // Bound one batch result item's compact JSON to `limit`. Every item is
-// guaranteed <= its slice on return, so no item can stay oversized and trip
-// the drop-trailing backstop in truncateBatchJsonIfNeeded (which would silently
-// evict good siblings — the batch-level analogue of the starvation fair-share
-// exists to prevent).
+// guaranteed <= its slice on return, so the batch formatter can preserve a
+// result representation for every accepted input.
 function truncateResultJson(item: BatchResultItem, limit: number): BatchResultItem {
   if (isBatchError(item)) {
     if (JSON.stringify(item).length <= limit) return item;
@@ -1043,11 +1119,9 @@ function truncateResultJson(item: BatchResultItem, limit: number): BatchResultIt
     (s) => JSON.stringify(s),
     limit,
   );
-  // Halving only trims `domains`. If non-domain bulk (a large `candidates[]`,
-  // the echoed `query`, or arbitrary top-level ScoutResult fields) still
-  // exceeds the slice with zero domains, emit a minimal bounded envelope of
-  // known-small fields — mirrors the single-scan minimal-envelope guard in
-  // truncateJsonIfNeeded so the item never stays oversized.
+  // If known bulk has been halved away but the echoed query or arbitrary
+  // top-level ScoutResult fields still exceed the slice, emit a minimal
+  // bounded envelope — mirrors the single-scan guard in truncateJsonIfNeeded.
   if (JSON.stringify(structured).length > limit) {
     const originalDomainCount = Array.isArray(item.domains) ? item.domains.length : 0;
     return {
@@ -1056,15 +1130,20 @@ function truncateResultJson(item: BatchResultItem, limit: number): BatchResultIt
       total: item.total,
       truncated: true,
       upgrade_hint: truncationHint(0, originalDomainCount),
+      source: item.source,
+      match_type: item.match_type,
+      org_match_strategy: item.org_match_strategy,
+      ...(item.empty_reason !== undefined && { empty_reason: item.empty_reason }),
+      ...(Array.isArray(item.candidates) && { candidates: [] }),
     };
   }
   return structured as BatchResultItem;
 }
 
 // JSON-format batch output respects CHARACTER_LIMIT too (#53), via the same
-// fair-share split as the markdown path: pretty-print when it fits, else bound
-// each result's domains to an equal slice, then drop whole trailing results as
-// a final backstop. Truncated output stays valid JSON.
+// fair-share split as the markdown path: pretty-print when it fits, then try
+// compact JSON, then bound each result's domains/candidates without evicting
+// accepted input queries. Truncated output stays valid JSON.
 export function truncateBatchJsonIfNeeded(batch: ScanBatchResponse): {
   text: string;
   structured: ScanBatchResponse;
@@ -1072,6 +1151,10 @@ export function truncateBatchJsonIfNeeded(batch: ScanBatchResponse): {
   const pretty = JSON.stringify(batch, null, 2);
   if (pretty.length <= CHARACTER_LIMIT) {
     return { text: pretty, structured: batch };
+  }
+  const compact = JSON.stringify(batch);
+  if (compact.length <= CHARACTER_LIMIT) {
+    return { text: compact, structured: batch };
   }
 
   const results = batch.results;
@@ -1088,12 +1171,37 @@ export function truncateBatchJsonIfNeeded(batch: ScanBatchResponse): {
   };
   let text = JSON.stringify(structured);
 
-  // Backstop: if envelope framing still pushes us over, drop whole trailing
-  // results until it fits (always leaves valid JSON).
-  while (text.length > CHARACTER_LIMIT && structured.results.length > 0) {
+  // With at most ten validated 200-character names, the envelope reserve and
+  // bounded per-item representations retain one result for every accepted
+  // input. Keep a minimal all-results guard in case formatter accounting
+  // changes later; never silently evict trailing queries.
+  if (text.length > CHARACTER_LIMIT) {
     structured = {
-      ...structured,
-      results: structured.results.slice(0, -1),
+      results: results.map((item) =>
+        isBatchError(item)
+          ? {
+              query: item.query,
+              error: {
+                code: item.error.code,
+                message: "Error detail omitted to fit the MCP response limit.",
+              },
+            }
+          : {
+              query: item.query,
+              domains: [],
+              total: item.total,
+              truncated: true,
+              upgrade_hint: truncationHint(0, item.domains.length),
+              source: item.source,
+              match_type: item.match_type,
+              org_match_strategy: item.org_match_strategy,
+              ...(item.empty_reason !== undefined && {
+                empty_reason: item.empty_reason,
+              }),
+              ...(Array.isArray(item.candidates) && { candidates: [] }),
+            },
+      ),
+      remaining_quota: batch.remaining_quota,
     };
     text = JSON.stringify(structured);
   }
@@ -1176,12 +1284,7 @@ Coverage caveat:
   - Limited coverage on small private companies, cyber MGAs, and entities using only DV (Let's Encrypt) certs.
   - See https://ctscout.dev for current coverage map.`,
       inputSchema: SearchCompanyInputSchema.shape,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: true,
-      },
+      annotations: QUOTA_DEBITING_READ_ONLY_ANNOTATIONS,
     },
     async (params: SearchCompanyInput) => {
       try {
@@ -1260,16 +1363,11 @@ Examples:
 Auth & limits:
   - Requires CTSCOUT_API_KEY, same as ctscout_search_company.
   - Oversized batches (>${MAX_BATCH_QUERIES} names) are rejected with a validation error before any network call and without a partial quota debit.
-  - Bulk caveat: a batch where many names fall back to semantic matching can exceed the endpoint's per-request subrequest budget, in which case the trailing names come back as per-query HTTP 503 errors (with retry guidance in the message). If you see those, split into smaller batches. High-volume bulk callers should prefer the REST /scan/batch endpoint directly (it accepts a strict_match_org_only flag that suppresses the semantic fallback).
+  - This MCP batch tool intentionally accepts names only. For matching modifiers such as strict_match_org_only, purpose, or org_match_mode, use individual ctscout_search_company calls or the REST /scan/batch endpoint.
 
 Legal-vs-brand and coverage caveats are identical to ctscout_search_company — brand names may need legal-entity variants ("X Companies", "X Group", "The X"), and coverage is best for established US/EU entities with OV/EV certs.`,
       inputSchema: SearchCompanyBatchInputSchema.shape,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: true,
-      },
+      annotations: QUOTA_DEBITING_READ_ONLY_ANNOTATIONS,
     },
     async (params: SearchCompanyBatchInput) => {
       try {
@@ -1328,12 +1426,7 @@ Coverage caveat:
 
 Auth & limits: same as ctscout_search_company.`,
       inputSchema: LookupDomainInputSchema.shape,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: true,
-      },
+      annotations: QUOTA_DEBITING_READ_ONLY_ANNOTATIONS,
     },
     async (params: LookupDomainInput) => {
       try {
