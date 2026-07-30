@@ -156,6 +156,11 @@ describe("formatScanAsMarkdown — free tier", () => {
             similarity: 0.734,
             top_apex_domain: null,
           },
+          {
+            org: "Malformed Similarity Co",
+            similarity: Number.NaN,
+            top_apex_domain: "malformed.example",
+          },
         ],
       },
       { kind: "company" },
@@ -166,6 +171,7 @@ describe("formatScanAsMarkdown — free tier", () => {
     expect(md).toContain("| Organization | Similarity | Top apex domain |");
     expect(md).toContain("| Acme Holdings, Inc. | 0.91 | acme.example |");
     expect(md).toContain("| Acme Regional LLC | 0.73 | — |");
+    expect(md).toContain("| Malformed Similarity Co | — | malformed.example |");
     expect(md).not.toContain("Try one of these variants");
   });
 
@@ -797,7 +803,19 @@ describe("truncateJsonIfNeeded", () => {
 
   it("emits a minimal valid envelope when top-level fields alone exceed the limit", () => {
     const resp: ScanResponse = {
-      ...freeResponse([{ org: "X", apex_domain: "x.com", cert_count: 1, subdomain_count: 1 }]),
+      domains: [],
+      total: 0,
+      source: "warehouse",
+      match_type: "semantic",
+      org_match_strategy: "semantic",
+      empty_reason: "semantic_offered",
+      candidates: [
+        {
+          org: "Candidate Co",
+          similarity: 0.9,
+          top_apex_domain: "candidate.example",
+        },
+      ],
       run_metadata: { blob: "x".repeat(30_000) },
     };
     const result = truncateJsonIfNeeded(resp);
@@ -807,6 +825,10 @@ describe("truncateJsonIfNeeded", () => {
     expect(parsed.truncated).toBe(true);
     expect(parsed.upgrade_hint).toContain("Response truncated");
     expect(parsed.source).toBe("warehouse");
+    expect(parsed.match_type).toBe("semantic");
+    expect(parsed.org_match_strategy).toBe("semantic");
+    expect(parsed.empty_reason).toBe("semantic_offered");
+    expect(parsed.candidates).toEqual([]);
   });
 });
 
@@ -2250,6 +2272,24 @@ describe("formatBatchAsMarkdown", () => {
     expect(md).not.toMatch(/^## Injected Heading/m);
   });
 
+  it("bounds malformed and oversized per-query error details", () => {
+    const malformed = {
+      query: { company_name: "Malformed" },
+      error: { code: Number.NaN, message: undefined },
+    } as unknown as BatchResultItem;
+    const verbose = {
+      query: { company_name: "Verbose" },
+      error: { code: 500, message: "e".repeat(50_000) },
+    } as BatchResultItem;
+
+    const md = formatBatchAsMarkdown(["Malformed", "Verbose"], batchEnvelope([malformed, verbose]));
+
+    expect(md.length).toBeLessThanOrEqual(CHARACTER_LIMIT);
+    expect(md).toContain("HTTP unknown");
+    expect(md).toContain("## ctscout results for: Verbose");
+    expect(md).toContain("…");
+  });
+
   it("uses singular wording for a one-company batch", () => {
     const md = formatBatchAsMarkdown(
       ["Solo"],
@@ -2406,6 +2446,43 @@ describe("truncateBatchJsonIfNeeded", () => {
     expect(bounded.candidates?.length).toBeGreaterThan(0);
     expect(bounded.candidates?.length).toBeLessThan(bigCandidates.length);
     expect(bounded.empty_reason).toBe("semantic_offered");
+  });
+
+  it("uses a minimal semantic envelope when unknown top-level fields exceed a result slice", () => {
+    const heavy = {
+      query: { company_name: "Opaque" },
+      domains: [],
+      total: 0,
+      source: "warehouse",
+      match_type: "semantic",
+      org_match_strategy: "semantic",
+      empty_reason: "semantic_offered",
+      candidates: [
+        {
+          org: "Opaque Candidate",
+          similarity: 0.9,
+          top_apex_domain: "opaque.example",
+        },
+      ],
+      opaque_metadata: "x".repeat(100_000),
+    } as BatchResultItem;
+    const batch = batchEnvelope([heavy, batchOk("Sibling", [oneWarehouseDomain("sibling")])]);
+
+    const { text, structured } = truncateBatchJsonIfNeeded(batch);
+
+    expect(text.length).toBeLessThanOrEqual(CHARACTER_LIMIT);
+    expect(structured.results).toHaveLength(2);
+    expect(structured.results[0]).toMatchObject({
+      query: { company_name: "Opaque" },
+      domains: [],
+      match_type: "semantic",
+      org_match_strategy: "semantic",
+      empty_reason: "semantic_offered",
+      candidates: [],
+      truncated: true,
+    });
+    expect(text).not.toContain("opaque_metadata");
+    expect(text).toContain("sibling.example.com");
   });
 
   it("bounds a huge error message rather than dropping siblings", () => {
