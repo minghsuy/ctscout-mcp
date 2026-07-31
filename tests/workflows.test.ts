@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const PROVIDER_SHA = "8b945ac465c4d019e4337ba60b9241922ed8f568";
+const PROVIDER_SHA = "f24f4d7ef7a07bccb8d0c5df48b7075a013756bb";
 
 const bridge = readFileSync(resolve(REPO_ROOT, ".github/workflows/claude-code-review.yml"), "utf8");
 const responderPath = resolve(REPO_ROOT, ".github/workflows/claude.yml");
