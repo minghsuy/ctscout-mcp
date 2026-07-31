@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   claude:
-    uses: minghsuy/dgx-infra/.github/workflows/claude-responder.yml@514c15797d04d700dd13e3c06a7a85b45dab3926
+    uses: minghsuy/dgx-infra/.github/workflows/claude-responder.yml@51b8c2c617b08974982c90a73ecad1fa77de137d
     with:
       runs-on: '"ubuntu-latest"'
     secrets:
