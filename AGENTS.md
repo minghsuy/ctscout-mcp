@@ -62,3 +62,22 @@ above before pushing.
   paths, emit no non-protocol stdout, and fail clearly on startup errors.
   Forward credentials only to the configured ctscout API origin and redact
   secrets from errors, logs, fixtures, and snapshots.
+
+## Hosted Review Protocol
+
+- Open a repository issue and an issue-linked draft PR before editing. Finish
+  the relevant checks and push one coherent head while the PR is still draft.
+- Freeze the exact head SHA before automatic review. For each frozen head,
+  perform one draft-to-ready transition; do not retrigger review on an
+  unchanged head.
+- Collect actionable findings into one correction wave, return the PR to draft,
+  apply the corrections together, rerun the relevant checks, and freeze the new
+  head before its single ready transition. Do not iterate comment by comment.
+- Treat provider access, runner infrastructure, and quota failures as zero code
+  iterations: record and fix the operational failure without changing product
+  code unless the evidence identifies a code defect.
+- Keep human `@claude` requests available independently of the automatic review
+  gate. Do not use repeated manual requests to bypass the frozen-head protocol.
+- The public-fork bridge is metadata-only: it must not check out, copy, or
+  execute pull-request code. The responder reviews only the bridge-recorded
+  frozen head.
