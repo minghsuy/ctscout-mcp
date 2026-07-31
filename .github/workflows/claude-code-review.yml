@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   review:
-    uses: minghsuy/claude-review-workflows/.github/workflows/review.yml@f24f4d7ef7a07bccb8d0c5df48b7075a013756bb
+    uses: minghsuy/claude-review-workflows/.github/workflows/review.yml@04e8407c2d3b9fd94c95c68a9e4d1853be8cadff
     with:
       pr: ${{ github.event.pull_request.number }}
       sha: ${{ github.event.pull_request.head.sha }}
