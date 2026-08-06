@@ -1,0 +1,38 @@
+name: Workflow lint
+
+# A malformed GitHub Actions workflow can schedule zero jobs, leaving its
+# expected check absent instead of red. Validate every workflow on every PR so
+# schema errors fail visibly before merge (minghsuy/dgx-infra#141).
+#
+# No workflow-level paths filter: this is intended to be a required check, and
+# a filtered required workflow can remain "Expected" forever when it is skipped.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: actionlint-${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  actionlint:
+    # This repository is PUBLIC: PR jobs must stay on GitHub-hosted runners.
+    # Never route them to the fleet's self-hosted runner, where an untrusted
+    # fork could execute arbitrary code (dgx-infra STANDARDS.md non-negotiable).
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Lint workflow files
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --workdir /github/workspace \
+            -v "$PWD:/github/workspace:ro" \
+            rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667  # v1.7.12
