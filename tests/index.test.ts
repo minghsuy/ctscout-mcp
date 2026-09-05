@@ -3393,6 +3393,13 @@ describe("truncateJobJsonIfNeeded", () => {
       expect(structured.snapshot).toBeNull();
       expect(structured.snapshot_source).toBe("unavailable");
     }
+    const done = doneJob([proDiscoveredDomain("cna.com")], {
+      error: "stale: from an earlier attempt",
+    });
+    for (const { structured } of [formatJobAsMarkdown(done), truncateJobJsonIfNeeded(done)]) {
+      expect(structured.result?.domains).toHaveLength(1);
+      expect(structured).not.toHaveProperty("error");
+    }
     const failed = doneJob([], { status: "failed", error: "timeout: crt.sh" });
     expect(formatJobAsMarkdown(failed).structured.error).toBe("timeout: crt.sh");
     expect(formatJobAsMarkdown(failed).structured).not.toHaveProperty("result");
@@ -3479,12 +3486,20 @@ describe("truncateJobJsonIfNeeded", () => {
     expect(text.length).toBeLessThanOrEqual(25_000);
     const parsed = JSON.parse(text) as JobResponse;
     expect(parsed).toEqual(structured);
-    expect(parsed.result?.truncated).toBe(true);
-    expect(parsed.result?.upgrade_hint).toContain("Response truncated");
-    for (const value of [parsed.result?.source, parsed.result?.empty_reason, parsed.error]) {
+    // Capping a scalar is lossless for anything sane, so it is not reported.
+    expect(parsed.result?.truncated).toBeUndefined();
+    for (const value of [parsed.result?.source, parsed.result?.empty_reason]) {
       expect(value).toMatch(/^.{200}…\(truncated, 30000 chars total\)$/);
     }
+    // A done record carries no error, whatever the API attached.
+    expect(parsed).not.toHaveProperty("error");
     expect(parsed.snapshot).toBe("2026-08-31");
+
+    const failed = truncateJobJsonIfNeeded(
+      doneJob([], { status: "failed", error: "e".repeat(30_000) }),
+    );
+    expect(failed.text.length).toBeLessThanOrEqual(25_000);
+    expect(failed.structured.error).toMatch(/^.{200}…\(truncated, 30000 chars total\)$/);
   });
 
   it("bounds a result-less record that is over budget by dropping unknown fields", () => {

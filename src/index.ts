@@ -1910,20 +1910,19 @@ function jobResultData(job: JobResponse): DeepDiveResult | undefined {
 // The job record this server returns: the API's record, the (possibly
 // truncated) result, and the top-level snapshot fields every tool carries.
 function wrapJob(job: JobResponse, result: DeepDiveResult | undefined): JobResponse {
+  // The status decides what the record carries, whatever the API attached:
+  // a result only when done, an error only when failed. The markdown shows
+  // nothing else, so structuredContent exposes nothing else.
+  const { result: _result, error, ...rest } = job;
+  const record: JobResponse = {
+    ...rest,
+    ...(job.status === "failed" && error != null && { error }),
+  };
   if (result === undefined) {
-    // A record that is not done carries no result and one that has not
-    // failed carries no error, whatever the API sent: the markdown reports
-    // neither, so structuredContent must not expose them.
-    const { result: _result, error, ...rest } = job;
-    return {
-      ...rest,
-      ...(job.status === "failed" && error != null && { error }),
-      snapshot: null,
-      snapshot_source: "unavailable",
-    };
+    return { ...record, snapshot: null, snapshot_source: "unavailable" };
   }
   return {
-    ...job,
+    ...record,
     result,
     snapshot: result.snapshot ?? null,
     snapshot_source: result.snapshot_source ?? "unavailable",
