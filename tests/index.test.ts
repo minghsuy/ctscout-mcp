@@ -3380,14 +3380,22 @@ describe("truncateJobJsonIfNeeded", () => {
     for (const row of kept) expect(row).not.toHaveProperty("base");
   });
 
-  it("omits a result the API attached to a record that is not done", () => {
-    const job = doneJob([proDiscoveredDomain("cna.com")], { status: "running", finished_at: null });
+  it("omits a result or error the API attached to a record that is not done or failed", () => {
+    const job = doneJob([proDiscoveredDomain("cna.com")], {
+      status: "running",
+      finished_at: null,
+      error: "stale: from an earlier attempt",
+    });
     for (const { structured } of [formatJobAsMarkdown(job), truncateJobJsonIfNeeded(job)]) {
       expect(structured.status).toBe("running");
       expect(structured).not.toHaveProperty("result");
+      expect(structured).not.toHaveProperty("error");
       expect(structured.snapshot).toBeNull();
       expect(structured.snapshot_source).toBe("unavailable");
     }
+    const failed = doneJob([], { status: "failed", error: "timeout: crt.sh" });
+    expect(formatJobAsMarkdown(failed).structured.error).toBe("timeout: crt.sh");
+    expect(formatJobAsMarkdown(failed).structured).not.toHaveProperty("result");
   });
 
   it("keeps a row whose own values are oversized by bounding them, not by dropping it", () => {
