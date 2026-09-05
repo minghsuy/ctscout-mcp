@@ -3147,6 +3147,37 @@ describe("formatJobAsMarkdown", () => {
     expect(json.structured.result?.upgrade_hint).toMatch(/^Deep dive stopped at 50 domains/);
   });
 
+  it("builds the strip notice from the bounded worker hint, not the raw one", () => {
+    const job = doneJob([proDiscoveredDomain("cna.com")]);
+    job.result = {
+      ...job.result,
+      truncated: true,
+      upgrade_hint: `worker: ${"h".repeat(30_000)}`,
+      run_metadata: { blob: "m".repeat(30_000) },
+    } as JobResponse["result"];
+    for (const { structured } of [formatJobAsMarkdown(job), truncateJobJsonIfNeeded(job)]) {
+      expect(JSON.stringify(structured).length).toBeLessThanOrEqual(25_000);
+      expect(structured.result?.domains).toHaveLength(1);
+      expect(structured.result?.upgrade_hint).toMatch(
+        /^worker: h+.*Response truncated: run_metadata omitted/,
+      );
+    }
+  });
+
+  it("drops an oversized signals_attempted before halving domains", () => {
+    const job = doneJob([proDiscoveredDomain("cna.com")]);
+    job.result = {
+      ...job.result,
+      signals_attempted: ["dns", "s".repeat(30_000)],
+    } as JobResponse["result"];
+    for (const { structured } of [formatJobAsMarkdown(job), truncateJobJsonIfNeeded(job)]) {
+      expect(JSON.stringify(structured).length).toBeLessThanOrEqual(25_000);
+      expect(structured.result?.domains).toHaveLength(1);
+      expect(structured.result).not.toHaveProperty("signals_attempted");
+      expect(structured.result?.upgrade_hint).toContain("signals_attempted omitted");
+    }
+  });
+
   it("halves the structured record when the strip hint alone pushes it over budget", () => {
     // Many small rows: after the strip steps the compact record sits just
     // under the limit, and the attached hint tips it over. The markdown

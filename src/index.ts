@@ -1988,8 +1988,8 @@ function knownResultFields(data: DeepDiveResult): DeepDiveResult {
 // keeps the domains the text shows for as long as possible: the result's
 // scalar strings are capped (lossless for anything sane, so not reported),
 // then the fields the markdown never renders are dropped — unknown outer
-// fields, unknown result fields, run_metadata, entity, each domain's
-// embedded discovery record, then the per-signal evidence maps. Only when
+// fields, unknown result fields, run_metadata, entity, signals_attempted,
+// each domain's embedded discovery record, then the per-signal evidence maps. Only when
 // the record is still over budget do domains get halved, and only after
 // that does the result collapse to the minimal envelope.
 const STRIP_STEPS: Array<{
@@ -2004,6 +2004,10 @@ const STRIP_STEPS: Array<{
     apply: (job, { run_metadata: _dropped, ...data }) => [job, data],
   },
   { name: "entity", apply: (job, { entity: _dropped, ...data }) => [job, data] },
+  {
+    name: "signals_attempted",
+    apply: (job, { signals_attempted: _dropped, ...data }) => [job, data],
+  },
   {
     name: "domains[].base",
     apply: (job, data) => [
@@ -2051,7 +2055,7 @@ function stripNonRendered(
     return {
       ...d,
       truncated: true,
-      upgrade_hint: data.upgrade_hint ? `${data.upgrade_hint} ${local}` : local,
+      upgrade_hint: d.upgrade_hint ? `${d.upgrade_hint} ${local}` : local,
     };
   };
   const size = (j: JobResponse, d: DeepDiveResult) => JSON.stringify(wrapJob(j, d)).length;
