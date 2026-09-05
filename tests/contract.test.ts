@@ -873,6 +873,43 @@ describe("stdio MCP compatibility contract", () => {
     }
   });
 
+  it("bounds a receipt carrying an oversized forward-compatible field to the character limit in both formats", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_pro_contract_test";
+    const oversized = { ...RECEIPT, future_field: "f".repeat(30_000) };
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response(JSON.stringify(oversized), {
+          status: 202,
+          headers: { "Content-Type": "application/json" },
+        }),
+    ) as unknown as typeof fetch;
+
+    const { client, close } = await connect();
+
+    try {
+      const json = await client.callTool({
+        name: "ctscout_submit_deep_dive",
+        arguments: { company_name: "CNA Financial", response_format: "json" },
+      });
+      expect(json.isError).not.toBe(true);
+      const text = textOf(json);
+      expect(text.length).toBeLessThanOrEqual(25_000);
+      expect(JSON.parse(text)).toEqual(RECEIPT);
+      expect(json.structuredContent).toEqual(RECEIPT);
+
+      const markdown = await client.callTool({
+        name: "ctscout_submit_deep_dive",
+        arguments: { company_name: "CNA Financial" },
+      });
+      expect(markdown.isError).not.toBe(true);
+      expect(textOf(markdown).length).toBeLessThanOrEqual(25_000);
+      expect(textOf(markdown)).toContain(`- Job id: \`${JOB_ID}\``);
+      expect(markdown.structuredContent).toEqual(RECEIPT);
+    } finally {
+      await close();
+    }
+  });
+
   it("rejects a deep dive with neither company_name nor seed_domain, or too many seeds, before any network call", async () => {
     process.env.CTSCOUT_API_KEY = "ds_pro_contract_test";
     globalThis.fetch = vi.fn();

@@ -56,6 +56,7 @@ import {
   truncateIfNeeded,
   truncateJobJsonIfNeeded,
   truncateJsonIfNeeded,
+  truncateReceiptJsonIfNeeded,
 } from "../src/index.ts";
 
 // ---------- Fixtures ----------
@@ -840,6 +841,21 @@ describe("truncateJsonIfNeeded", () => {
     expect(parsed.candidates).toEqual([]);
     expect(parsed.upgrade_hint).toContain("0 of 1 semantic candidates");
     expect(parsed.upgrade_hint).not.toContain("0 of 0 domains");
+  });
+
+  it("bounds the known strings the minimal envelope keeps", () => {
+    const result = truncateJsonIfNeeded({
+      domains: [],
+      source: "s".repeat(30_000),
+      match_type: "none",
+      empty_reason: "r".repeat(30_000),
+    } as ScanResponse);
+    expect(result.text.length).toBeLessThanOrEqual(25_000);
+    const parsed = JSON.parse(result.text) as ScanResponse;
+    expect(parsed.truncated).toBe(true);
+    expect(parsed.match_type).toBe("none");
+    expect(parsed.source).toMatch(/^s{200}…\(truncated, 30000 chars total\)$/);
+    expect(parsed.empty_reason).toMatch(/^r{200}…\(truncated, 30000 chars total\)$/);
   });
 });
 
@@ -2829,6 +2845,39 @@ describe("SubmitDeepDiveInputSchema / GetJobInputSchema — client-side validati
   });
 });
 
+describe("truncateReceiptJsonIfNeeded", () => {
+  const receipt = {
+    job_id: "abc",
+    status: "queued" as const,
+    submitted_at: "2026-09-04T10:00:00Z",
+    poll: "/jobs/abc",
+  };
+
+  it("pretty-prints a receipt that fits, unchanged", () => {
+    const { text, structured } = truncateReceiptJsonIfNeeded(receipt);
+    expect(structured).toBe(receipt);
+    expect(JSON.parse(text)).toEqual(receipt);
+    expect(text).toContain("\n  ");
+  });
+
+  it("collapses to the known fields, each bounded, when an unknown field is over budget", () => {
+    const { text, structured } = truncateReceiptJsonIfNeeded({
+      ...receipt,
+      poll: `/jobs/${"p".repeat(30_000)}`,
+      noise: "n".repeat(30_000),
+    });
+    expect(text.length).toBeLessThanOrEqual(25_000);
+    expect(JSON.parse(text)).toEqual(structured);
+    expect(structured).not.toHaveProperty("noise");
+    expect(structured).toMatchObject({
+      job_id: "abc",
+      status: "queued",
+      submitted_at: "2026-09-04T10:00:00Z",
+    });
+    expect(structured.poll).toMatch(/^\/jobs\/p{194}…\(truncated, 30006 chars total\)$/);
+  });
+});
+
 describe("formatJobSubmittedAsMarkdown", () => {
   it("renders a receipt that says nothing is attributed yet and how to poll", () => {
     const md = formatJobSubmittedAsMarkdown(
@@ -3019,6 +3068,28 @@ describe("truncateJobJsonIfNeeded", () => {
       snapshot: "2026-08-31",
       snapshot_source: "scan",
     });
+  });
+
+  it("bounds every string the final envelopes keep: an oversized source / empty_reason / error still fits", () => {
+    const job = doneJob([proDiscoveredDomain("cna.com")], {
+      error: "e".repeat(30_000),
+    });
+    job.result = {
+      ...job.result,
+      domains: [],
+      source: "s".repeat(30_000),
+      empty_reason: "r".repeat(30_000),
+    } as JobResponse["result"];
+    const { text, structured } = truncateJobJsonIfNeeded(job);
+    expect(text.length).toBeLessThanOrEqual(25_000);
+    const parsed = JSON.parse(text) as JobResponse;
+    expect(parsed).toEqual(structured);
+    expect(parsed.result?.truncated).toBe(true);
+    expect(parsed.result?.upgrade_hint).toContain("Response truncated");
+    for (const value of [parsed.result?.source, parsed.result?.empty_reason, parsed.error]) {
+      expect(value).toMatch(/^.{200}…\(truncated, 30000 chars total\)$/);
+    }
+    expect(parsed.snapshot).toBe("2026-08-31");
   });
 
   it("bounds a result-less record that is over budget by dropping unknown fields", () => {

@@ -50,6 +50,9 @@ const MAX_BATCH_QUERIES = 10;
 const REQUEST_TIMEOUT_MS = 30_000;
 const CHARACTER_LIMIT = 25_000;
 const ERROR_BODY_LIMIT = 500;
+// Hard cap on every API-derived string a minimal envelope keeps (see
+// boundedField): the last-resort JSON fallbacks are bounded by construction.
+const ENVELOPE_STRING_LIMIT = 200;
 // Cap how many bytes of an error-response body we pull off the wire and
 // hold in memory before `truncateBody` (render time) gets to trim it for
 // display. Set well above ERROR_BODY_LIMIT so ordinary error bodies (JSON
@@ -894,6 +897,13 @@ function truncateBody(text: string, max = ERROR_BODY_LIMIT): string {
   return `${text.slice(0, max)}…(truncated, ${text.length} chars total)`;
 }
 
+// Every string a minimal envelope retains is proxied from the API and so
+// unbounded; capping each one is what makes the envelope's size a constant
+// the last-resort fallback can rely on. Same marker as truncateBody.
+function boundedField<T extends string | null | undefined>(value: T): T {
+  return (typeof value === "string" ? truncateBody(value, ENVELOPE_STRING_LIMIT) : value) as T;
+}
+
 // The Worker's 403 for a non-Pro key on /jobs carries `upgrade_hint`; surface
 // it verbatim (bounded and escaped like any error body) so the reader sees the
 // API's own upgrade text rather than a copy typed here that can drift.
@@ -1472,22 +1482,23 @@ export function truncateJsonIfNeeded(structured: ScanResponse): {
 }
 
 // The smallest valid ScanResponse for a payload whose top-level fields alone
-// exceed the budget: known, bounded fields only, snapshot kept when present.
+// exceed the budget: known fields only, every retained string capped at
+// ENVELOPE_STRING_LIMIT, snapshot kept when present.
 function minimalScanEnvelope(structured: ScanResponse): ScanResponse {
   return {
     domains: [],
     total: structured.total,
     truncated: true,
     upgrade_hint: fullyTruncatedHint(structured),
-    source: structured.source,
-    match_type: structured.match_type,
-    org_match_strategy: structured.org_match_strategy,
+    source: boundedField(structured.source),
+    match_type: boundedField(structured.match_type),
+    org_match_strategy: boundedField(structured.org_match_strategy),
     ...(structured.empty_reason !== undefined && {
-      empty_reason: structured.empty_reason,
+      empty_reason: boundedField(structured.empty_reason),
     }),
     ...(Array.isArray(structured.candidates) && { candidates: [] }),
     ...(structured.snapshot_source !== undefined && {
-      snapshot: structured.snapshot ?? null,
+      snapshot: boundedField(structured.snapshot ?? null),
       snapshot_source: structured.snapshot_source,
     }),
   };
@@ -1878,50 +1889,77 @@ export function formatJobAsMarkdown(job: JobResponse): {
   return { text: `${header}\n\n${text}`, structured: wrapJob(job, structured) };
 }
 
+// The one JSON serializer for the job tools' records. Pretty when it fits,
+// else compact, else the caller's shrink step (the halving loop, when there
+// is a result to halve), else the caller's minimal envelope: known fields
+// only, every retained string capped at ENVELOPE_STRING_LIMIT, so the last
+// resort is bounded by construction whatever the API put in the record.
+function serializeBoundedJson<T>(
+  value: T,
+  minimal: () => T,
+  shrink?: () => { text: string; structured: T },
+): { text: string; structured: T } {
+  const pretty = JSON.stringify(value, null, 2);
+  if (pretty.length <= CHARACTER_LIMIT) return { text: pretty, structured: value };
+  const compact = JSON.stringify(value);
+  if (compact.length <= CHARACTER_LIMIT) return { text: compact, structured: value };
+  const shrunk = shrink?.();
+  if (shrunk !== undefined && shrunk.text.length <= CHARACTER_LIMIT) return shrunk;
+  const envelope = minimal();
+  return { text: JSON.stringify(envelope), structured: envelope };
+}
+
 // JSON: the whole job record stays under CHARACTER_LIMIT — pretty when it
 // fits, else compact, else the result's domains/candidates are halved inside
-// the envelope, else the result collapses to the minimal scan envelope.
+// the envelope, else both the outer record and the result collapse to their
+// minimal envelopes (an unknown top-level field, permitted by the loose
+// schema, is not something the halving loop can shrink).
 export function truncateJobJsonIfNeeded(job: JobResponse): {
   text: string;
   structured: JobResponse;
 } {
   const data = jobResultData(job);
   const wrap = (s: ScanResponse | undefined) => wrapJob(job, s);
-  const pretty = JSON.stringify(wrap(data), null, 2);
-  if (pretty.length <= CHARACTER_LIMIT) {
-    return { text: pretty, structured: wrap(data) };
-  }
-  if (data === undefined) {
-    // No result to shrink: a queued/failed record that is somehow over budget
-    // is bounded by dropping the unknown top-level fields.
-    const minimal = wrapJob(minimalJobEnvelope(job), undefined);
-    return { text: JSON.stringify(minimal), structured: minimal };
-  }
-  const result = truncateWithRender(JSON.stringify(wrap(data)), data, (s) =>
-    JSON.stringify(wrap(s)),
+  return serializeBoundedJson(
+    wrap(data),
+    () => wrapJob(minimalJobEnvelope(job), data && minimalScanEnvelope(data)),
+    data &&
+      (() => {
+        const shrunk = truncateWithRender(JSON.stringify(wrap(data)), data, (s) =>
+          JSON.stringify(wrap(s)),
+        );
+        return { text: shrunk.text, structured: wrap(shrunk.structured) };
+      }),
   );
-  if (result.text.length > CHARACTER_LIMIT) {
-    // The halving loop only shrinks the result: an unknown top-level field
-    // (permitted by the loose schema) can keep the record over budget, so the
-    // outer envelope collapses to known, bounded fields too.
-    const minimal = wrapJob(minimalJobEnvelope(job), minimalScanEnvelope(data));
-    return { text: JSON.stringify(minimal), structured: minimal };
-  }
-  return { text: result.text, structured: wrap(result.structured) };
 }
 
-// The job record reduced to the fields this server knows and bounds; the
-// result and the snapshot fields are attached by wrapJob.
+// The job record reduced to the fields this server knows, each string
+// bounded; the result and the snapshot fields are attached by wrapJob.
 function minimalJobEnvelope(job: JobResponse): JobResponse {
   return {
-    job_id: job.job_id,
-    kind: job.kind,
-    status: job.status,
-    submitted_at: job.submitted_at,
-    started_at: job.started_at,
-    finished_at: job.finished_at,
-    ...(job.error != null && { error: truncateBody(job.error) }),
+    job_id: boundedField(job.job_id),
+    kind: boundedField(job.kind),
+    status: boundedField(job.status),
+    submitted_at: boundedField(job.submitted_at),
+    started_at: boundedField(job.started_at),
+    finished_at: boundedField(job.finished_at),
+    ...(job.error != null && { error: boundedField(job.error) }),
   };
+}
+
+// JSON receipt of ctscout_submit_deep_dive, bounded the same way: a large
+// forward-compatible field (permitted by the loose schema) collapses the
+// receipt to its known fields, each string capped.
+export function truncateReceiptJsonIfNeeded(receipt: JobSubmitResponse): {
+  text: string;
+  structured: JobSubmitResponse;
+} {
+  return serializeBoundedJson(receipt, () => ({
+    job_id: boundedField(receipt.job_id),
+    status: boundedField(receipt.status),
+    submitted_at: boundedField(receipt.submitted_at),
+    ...(receipt.poll !== undefined && { poll: boundedField(receipt.poll) }),
+  }));
 }
 
 // ---------- Server + tools ----------
@@ -2237,13 +2275,16 @@ Examples:
       };
       try {
         const receipt = await callSubmitJob(spec);
+        // structuredContent mirrors the bounded record in both formats, as
+        // the scan tools' does.
+        const { text: json, structured } = truncateReceiptJsonIfNeeded(receipt);
         const text =
           params.response_format === ResponseFormat.JSON
-            ? JSON.stringify(receipt, null, 2)
-            : formatJobSubmittedAsMarkdown(spec, receipt);
+            ? json
+            : formatJobSubmittedAsMarkdown(spec, structured);
         return {
           content: [{ type: "text", text }],
-          structuredContent: receipt as unknown as Record<string, unknown>,
+          structuredContent: structured as unknown as Record<string, unknown>,
         };
       } catch (err) {
         return {
