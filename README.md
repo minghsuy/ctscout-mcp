@@ -12,7 +12,7 @@ Five tools:
 - **`ctscout_submit_deep_dive`** — Pro only: queue an asynchronous multi-signal deep dive (see [Deep dives](#deep-dives-pro-async))
 - **`ctscout_get_job`** — poll a deep dive and read its result
 
-The first three work over the public ctscout.dev `/scan` API (the batch tool wraps `/scan/batch`); the deep-dive pair wraps `/jobs`. Free tier requires an API key (no email, no signup). Pro tier returns a `confidence_band` per attribution plus the underlying signal evidence (DNS brand tokens, og:site_name match, RDAP, IP/ASN, VLM verdict).
+The first three work over the public ctscout.dev `/scan` API (the batch tool wraps `/scan/batch`); the deep-dive pair wraps `/jobs`. Free tier requires an API key (no email, no signup). A Pro key gets up to 25 rows, a 12-month window and unlimited queries on `/scan`, and can submit deep-dive jobs, which return a `confidence_band` per attribution with the named signals behind it (DNS brand tokens, RDAP, IP/ASN, homepage metadata, favicon). Visual brand verification (VLM) is not part of v1.
 
 **Not a cyber-risk-scoring tool.** See [LIMITATIONS.md](LIMITATIONS.md) for what ctscout is and isn't, the DV-cert coverage gap, and the corrections path.
 
@@ -146,9 +146,11 @@ The model will pick the right ctscout tool, call it, and summarize.
 | | Free | Pro |
 |---|---|---|
 | Queries per day | 10 | unlimited |
-| Results per query | top 5 | full set |
-| Data freshness | weekly snapshot | live (DNS, RDAP, homepage, IP/ASN, VLM) |
-| Per-attribution evidence | — | `confidence_band` + named signals |
+| Results per query | top 5 | top 25 |
+| History window | last 90 days | up to 12 months |
+| Data freshness | weekly snapshot | weekly snapshot |
+| Deep-dive jobs (async) | — | 20 per day |
+| Per-attribution evidence | — | in a deep-dive result: `confidence_band` + named signals (DNS, RDAP, IP/ASN, homepage, favicon) |
 | Price | $0 | concierge — email for early access |
 
 The MCP server uses the same API key for both — your tier is determined by the key. If you hit the daily quota, the tool returns a 429 error with an upgrade hint.
@@ -157,16 +159,16 @@ Pro is currently concierge-only (manual key mint + invoice) while usage data jus
 
 ### What the Pro response looks like
 
-Free tier returns the legacy `(domain, organization, certs, subdomains)` table. Pro tier replaces it with a richer attribution table you can defend in a meeting:
+`/scan` returns the `(domain, organization, certs, subdomains)` table on both tiers; Pro gets more rows and a longer window. A deep-dive job result replaces it with a richer attribution table you can defend in a meeting:
 
 ```
 | Domain          | Attributed to  | Band         | Signals                                         | Evidence                                                  |
 |---|---|---|---|---|
 | coalition.com   | Coalition Inc  | ✅ verified  | dns_txt_brand_token, og_site_name_match, +1     | verified via google-site-verification, atlassian-domain... |
-| imposter.com    | Coalition Inc  | ⚪ insufficient 🚫VLM-veto | dns_txt_brand_token, vlm_verdict_no | Logo on screenshot is a different brand                   |
+| imposter.com    | Coalition Inc  | ⚪ insufficient | dns_txt_brand_token                              | verified via google-site-verification                     |
 ```
 
-Bands map to confidence intervals (`verified` ≥ multiple strong independent signals, down to `insufficient` = no signals or signals disagree). The `🚫VLM-veto` tag appears when visual brand verification overrode the positive-signal accumulation. Full structured payload is available via `response_format: "json"`.
+Bands map to confidence intervals (`verified` ≥ multiple strong independent signals, down to `insufficient` = no signals or signals disagree). The `🚫VLM-veto` tag is reserved for visual brand verification overriding the positive signals; VLM does not run in v1, so it never appears yet. Full structured payload is available via `response_format: "json"`.
 
 ## Deep dives (Pro, async)
 
@@ -192,13 +194,12 @@ contract v1):
 toward 5 min between polls. The batch worker picks up queued jobs every few
 minutes and a deep dive can take several minutes to run.
 
-**The result** carries the same fields as a Pro `/scan` result — `domains`
-with `attributed_to` and an `enrichment` object per domain, plus `entity`,
-`run_metadata`, `source`, `signals_degraded` — and three fields the batch
-worker adds: `snapshot` (the warehouse date the deep dive read from, present on
+**The result** is the deep-dive shape — `domains` with `attributed_to` and an
+`enrichment` object per domain, plus `entity`, `run_metadata`, `source`,
+`signals_degraded` — and three fields the batch worker adds: `snapshot` (the warehouse date the deep dive read from, present on
 every deep-dive result because the worker sets it), `worker_version` and
-`signals_attempted`. The markdown output renders the same band / signals /
-evidence table as a Pro scan under the job's status lines; `structuredContent`
+`signals_attempted`. The markdown output renders the band / signals / evidence
+table under the job's status lines (a `/scan` never carries one); `structuredContent`
 carries the record with the top-level `snapshot` / `snapshot_source` resolved
 from `result.snapshot` (`null` / `"unavailable"` until the job is done).
 "Attributed" and "candidate" mean what they mean elsewhere in this package: an
@@ -214,7 +215,7 @@ result expiry are follow-ups on the Worker side.
 
 ## What this is, and isn't
 
-ctscout is a digital entity resolution tool — it maps apex domains to organizations attributed in their Certificate Transparency records, optionally corroborated by DNS / RDAP / IP/ASN / favicon / visual brand verification on the Pro tier.
+ctscout is a digital entity resolution tool — it maps apex domains to organizations attributed in their Certificate Transparency records, corroborated by DNS / RDAP / IP/ASN / homepage / favicon signals in a Pro deep dive.
 
 **It is NOT a cyber-risk quantification platform.** It does not score security posture, predict breaches, or produce risk ratings. See [LIMITATIONS.md](LIMITATIONS.md) for the full disclaimer, coverage gaps, and corrections path.
 

@@ -476,8 +476,8 @@ export const GetJobInputSchema = z
       .nativeEnum(ResponseFormat)
       .default(ResponseFormat.MARKDOWN)
       .describe(
-        "Output format: 'markdown' for the job status and, once done, the same " +
-          "attribution table as a Pro scan; 'json' for the raw job record.",
+        "Output format: 'markdown' for the job status and, once done, the deep-dive " +
+          "attribution table (band, signals, evidence); 'json' for the raw job record.",
       ),
   })
   .strict();
@@ -526,8 +526,8 @@ const DomainResultSchema = z.looseObject({
     .optional()
     .describe(
       "Organization the domain is attributed to. Free tier: the OV/EV cert subject O field. " +
-        "Pro tier (ScoutResult): the strongest evidence available — cert subject when present, " +
-        "else the RDAP registrant; see cert_org_names / rdap_org for which.",
+        "On /scan, both tiers: the OV/EV certificate subject. Multi-signal attribution lives " +
+        "in a deep-dive job result (attributed_to + enrichment), not here.",
     ),
   apex_domain: z.string().optional(),
   cert_count: z.number().optional().describe("Distinct certificates observed for this pair."),
@@ -546,8 +546,15 @@ const DomainResultSchema = z.looseObject({
     .describe("When the warehouse last ingested this pair (observation time, not SCT time)."),
   attributed_to: z.string().optional(),
   // ScoutResult (Pro) fields — proxied verbatim from the origin.
-  domain: z.string().optional().describe("Pro tier: the apex domain (ScoutResult shape)."),
-  confidence: z.number().nullable().optional().describe("Pro tier: 0..1 attribution confidence."),
+  domain: z
+    .string()
+    .optional()
+    .describe("Deep-dive row shape: the apex domain (no apex_domain field)."),
+  confidence: z
+    .number()
+    .nullable()
+    .optional()
+    .describe("Deep-dive row: 0..1 discovery confidence of the underlying record."),
   sources: z.array(z.string()).optional(),
   cert_org_names: z.array(z.string()).optional(),
   rdap_org: z.string().nullable().optional(),
@@ -560,7 +567,12 @@ const ScanOutputSchema = z.looseObject({
   total: z.number().optional().describe("Matching pairs in the warehouse before any cap."),
   truncated: z.boolean().optional(),
   upgrade_hint: z.string().optional(),
-  source: z.string().optional().describe("'warehouse' on the free tier; 'live*' on Pro."),
+  source: z
+    .string()
+    .optional()
+    .describe(
+      "'warehouse' on /scan (both tiers); 'live-enriched' / 'cache-only' on a deep-dive result.",
+    ),
   match_type: z
     .string()
     .optional()
@@ -2343,13 +2355,13 @@ Args:
   - response_format ('markdown' | 'json', default 'markdown'): output format.
 
 Returns (on success, structuredContent follows the declared outputSchema; an error result — 401, 429, timeout — is isError with no structuredContent, so never dereference snapshot on a failed call):
-  - "Attributed" means the organization is what the evidence names for that domain, not an ownership claim. On the free tier that evidence is always the OV/EV certificate subject. On the Pro tier (ScoutResult) it is the strongest available signal: the certificate subject when there is one, otherwise the RDAP registrant — check cert_org_names / rdap_org to see which. "Candidate" means a semantic name-similarity guess that is NOT an attribution.
+  - "Attributed" means the organization is what the evidence names for that domain, not an ownership claim. On /scan that evidence is the OV/EV certificate subject on both tiers; multi-signal attribution (DNS, RDAP, IP/ASN, homepage, favicon) exists only in a deep-dive job result (ctscout_submit_deep_dive, Pro). "Candidate" means a semantic name-similarity guess that is NOT an attribution.
   - In markdown: a snapshot line, then a table of (domain, attributed to, cert count, subdomain count). When nothing is attributed but match_type is 'semantic', a table of candidate organizations is rendered instead, labelled as candidates.
   - In JSON, structured as:
     {
       "domains": [                        // attributed pairs; empty when nothing is attributed
         {
-          "org": string,                  // attributed organization: cert subject (free); cert subject else RDAP registrant (Pro)
+          "org": string,                  // attributed organization: the OV/EV certificate subject (both tiers)
           "apex_domain": string,          // e.g. "gs.com"
           "cert_count": number,           // # of distinct certs observed for this pair
           "subdomain_count": number,      // # of distinct subdomains
@@ -2360,7 +2372,7 @@ Returns (on success, structuredContent follows the declared outputSchema; an err
       "total": number,                    // total matching rows in warehouse
       "truncated": boolean,               // true if response is capped
       "upgrade_hint": string,             // present when truncated
-      "source": "warehouse" | "live",     // free tier = warehouse, pro = live
+      "source": "warehouse",              // both tiers read the weekly warehouse snapshot
       "match_type": "exact" | "semantic" | "none",   // 'semantic' = domains empty, candidates offered
       "org_match_strategy": string,       // which matching pass produced the answer
       "empty_reason": string,             // present on empty results: why nothing was attributed
@@ -2379,7 +2391,7 @@ Examples:
 Auth & limits:
   - Requires CTSCOUT_API_KEY env var. Get a free key (no email) at https://ctscout.dev.
   - Free tier: 10 queries/day, top 5 results from a weekly snapshot. The response's "snapshot" field carries that snapshot's sync date only when the API reports it; today it does not, so expect snapshot: null / snapshot_source: "unavailable" and treat freshness as unknown.
-  - Pro tier: unlimited queries, full result set, live enrichment.
+  - Pro tier: unlimited queries, up to 25 rows, a 12-month window; deep-dive jobs (20/day) for multi-signal attribution.
 
 Error handling:
   - HTTP 401: API key missing or invalid.
@@ -2457,7 +2469,7 @@ Args:
   - response_format ('markdown' | 'json', default 'markdown'): output format.
 
 Returns (on success, structuredContent follows the declared outputSchema; an error result — 401, 429, timeout — is isError with no structuredContent, so never dereference snapshot on a failed call):
-  - "Attributed" and "candidate" mean exactly what they mean in ctscout_search_company: what the evidence names (cert subject on the free tier; cert subject else RDAP registrant on Pro) vs a semantic name-similarity guess that is NOT an attribution.
+  - "Attributed" and "candidate" mean exactly what they mean in ctscout_search_company: what the evidence names (the OV/EV certificate subject on /scan, both tiers) vs a semantic name-similarity guess that is NOT an attribution.
   - In markdown: a snapshot line, then one section per company (heading + the same attributed-domains table as ctscout_search_company; a candidate-organizations table when that name's match_type is 'semantic'), followed by remaining quota. Names that failed render an error line instead of a table.
   - In JSON, the batch envelope:
     {
@@ -2606,7 +2618,7 @@ Returns (on success, structuredContent follows the declared outputSchema; a fail
     }
 
 What the finished result contains (read it with ctscout_get_job):
-  - The same fields as a Pro /scan result: "domains" of attributed apex domains, each with "attributed_to", an "enrichment" object (confidence_band, weight_total, matched_via, evidence, signal_health, vlm_status, vlm_override) and the underlying discovery evidence under "base"; plus "entity", "run_metadata", "source" and "signals_degraded".
+  - The deep-dive result shape (a /scan never carries it): "domains" of attributed apex domains, each with "attributed_to", an "enrichment" object (confidence_band, weight_total, matched_via, evidence, signal_health, vlm_status, vlm_override) and the underlying discovery evidence under "base"; plus "entity", "run_metadata", "source" and "signals_degraded".
   - Plus "snapshot": the warehouse date (YYYY-MM-DD) the deep dive read from. It is present on every deep-dive result because the batch worker sets it (unlike /scan today), together with "worker_version" and "signals_attempted".
   - "Attributed" means the organization is what the evidence names for that domain (certificate subject, corroborated by the enrichment signals), not an ownership claim. "Candidate" means a semantic name-similarity guess that is NOT an attribution; a deep dive reports attributions with a confidence band, never bare candidates.
   - Visual brand verification (VLM) is NOT included in v1: vlm_status stays "pending" or "skipped" and never vetoes a band.
@@ -2662,14 +2674,14 @@ Args:
   - response_format ('markdown' | 'json', default 'markdown'): output format.
 
 Returns (on success, structuredContent follows the declared outputSchema; a failed call — 401, 403, 404, timeout — is isError with no structuredContent, so never dereference snapshot on a failed call):
-  - In markdown: the job status lines; once done, the same attribution table as a Pro scan (domain, attributed to, confidence band, signals, evidence) under a snapshot line.
+  - In markdown: the job status lines; once done, the deep-dive attribution table (domain, attributed to, confidence band, signals, evidence) under a snapshot line. No /scan output carries this table.
   - In JSON, structured as:
     {
       "job_id": string,
       "kind": "deep_dive",
       "status": "queued" | "running" | "done" | "failed",
       "submitted_at": string, "started_at": string | null, "finished_at": string | null,
-      "result": {                       // only when status is "done"; identical to a Pro /scan result plus the fields below
+      "result": {                       // only when status is "done"; the deep-dive shape (see below), never returned by /scan
         "entity": {...}, "domains": [ { "domain": string, "attributed_to": string, "enrichment": {...}, "base": {...} } ],
         "run_metadata": {...}, "source": "live-enriched" | "cache-only", "signals_degraded": boolean,
         "snapshot": string,             // warehouse date (YYYY-MM-DD) the deep dive read from — present, the batch worker sets it

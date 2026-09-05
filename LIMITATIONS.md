@@ -4,12 +4,12 @@ ctscout is built to be honest about what it does and what it doesn't. Read this 
 
 ## What ctscout is
 
-A digital entity resolution tool that maps apex domains to the organizations attributed in their Certificate Transparency (CT) records, with optional multi-signal corroboration (DNS, RDAP, IP/ASN, favicon, visual brand verification).
+A digital entity resolution tool that maps apex domains to the organizations attributed in their Certificate Transparency (CT) records, with optional multi-signal corroboration in a Pro deep dive (DNS, RDAP, IP/ASN, homepage metadata, favicon; visual brand verification is planned, not shipped).
 
 ctscout indexes **OV and EV certificates exclusively** — the ones where the issuing CA validated the organization's legal identity and embedded it in the cert subject. DV certs (Let's Encrypt, ZeroSSL, ACME-defaulting cloud hosts) are filtered at ingest and are never stored, never queryable. This is a deliberate scoping decision, not a coverage gap to be filled later.
 
 Primary use cases:
-- **Named-entity attribution** — given a domain with an OV/EV cert, surface the legal entity recorded in the cert subject, with multi-signal corroboration on the Pro tier
+- **Named-entity attribution** — given a domain with an OV/EV cert, surface the legal entity recorded in the cert subject, with multi-signal corroboration in a Pro deep dive
 - **Sibling and subsidiary discovery** — given a known org or domain, find related apex domains attributed to the same legal entity (within OV/EV coverage)
 - **Cohort and temporal analysis** — analyze SAN cohorts and cert-issuance patterns over time
 
@@ -53,7 +53,7 @@ Warehouse size (organizations, org-domain pairs, apex domains, last sync date) g
 
 The `org` field is the cert subject text recorded by the CA. We do not independently verify that the named entity currently owns or operates the domain. The cert subject reflects who held the cert at issuance time. Ownership and control can change without a new cert being issued.
 
-When the Pro tier provides a `confidence_band`, it reflects the aggregated multi-signal corroboration (DNS, RDAP, visual brand verification, etc.) at the time of the query. It is not a guarantee, and it is not a substitute for first-party confirmation when the attribution is consequential.
+When a Pro deep dive provides a `confidence_band`, it reflects the aggregated multi-signal corroboration (DNS, RDAP, IP/ASN, homepage metadata, favicon) at the time the job ran; visual brand verification is not among them in v1. It is not a guarantee, and it is not a substitute for first-party confirmation when the attribution is consequential.
 
 ### Deep dives are asynchronous and partial in v1
 
@@ -61,7 +61,7 @@ A Pro deep dive (`ctscout_submit_deep_dive` / `ctscout_get_job`) is not an answe
 
 ### Brand-namesake collisions
 
-Common-word entity names produce noisy results. A search for "Coalition" returns the IMCTC counter-terrorism coalition, several non-profits, the cyber MGA (often as 0 hits since they're DV-only), and various unrelated orgs. Multi-signal corroboration on the Pro tier helps disambiguate but does not eliminate the issue.
+Common-word entity names produce noisy results. A search for "Coalition" returns the IMCTC counter-terrorism coalition, several non-profits, the cyber MGA (often as 0 hits since they're DV-only), and various unrelated orgs. Multi-signal corroboration in a Pro deep dive helps disambiguate but does not eliminate the issue.
 
 ## Corrections and contact
 
@@ -76,7 +76,7 @@ For coverage requests (specific entities you want indexed beyond current warehou
 
 The free tier is self-serve at https://ctscout.dev — Turnstile-protected, no email or account required, 10 queries per day.
 
-The Pro tier (live multi-signal enrichment, full result set, higher quota) is currently **concierge-only**. Email pro@ctscout.dev if you want early access; key minting and invoicing are manual until usage data justifies automated commerce.
+The Pro tier (top 25 results, a 12-month window and unlimited `/scan` queries, plus 20 deep-dive jobs a day) is currently **concierge-only**. Email pro@ctscout.dev if you want early access; key minting and invoicing are manual until usage data justifies automated commerce.
 
 ## License and data
 
