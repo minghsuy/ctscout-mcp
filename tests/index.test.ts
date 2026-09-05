@@ -3048,6 +3048,73 @@ describe("formatJobAsMarkdown", () => {
     });
   });
 
+  it("renders a schema-valid enrichment that carries only confidence_band", () => {
+    const job = doneJob([
+      {
+        domain: "cna.com",
+        attributed_to: "CNA Financial Corporation",
+        enrichment: { confidence_band: "likely" } as DomainResult["enrichment"],
+      },
+    ]);
+    const { text, structured } = formatJobAsMarkdown(job);
+    expect(text).toContain(
+      "| `cna.com` | CNA Financial Corporation | 🟢 likely | _none_ | _no evidence_ |",
+    );
+    expect(structured.result?.domains[0].enrichment).toEqual({ confidence_band: "likely" });
+    expect(JSON.parse(truncateJobJsonIfNeeded(job).text)).toMatchObject({ status: "done" });
+  });
+
+  it("drops an oversized unknown result-level field before any known one", () => {
+    const job = doneJob([proDiscoveredDomain("cna.com")]);
+    job.result = { ...job.result, future_field: "f".repeat(30_000) } as JobResponse["result"];
+    const { text, structured } = formatJobAsMarkdown(job);
+    expect(text).toContain("| `cna.com` |");
+    expect(text).toContain("> Response truncated: unknown result fields omitted");
+    expect(JSON.stringify(structured).length).toBeLessThanOrEqual(25_000);
+    expect(structured.result).not.toHaveProperty("future_field");
+    expect(structured.result).toMatchObject({
+      domains: [{ domain: "cna.com" }],
+      run_metadata: { duration_ms: 270_000 },
+      entity: { company_name: "CNA Financial" },
+    });
+  });
+
+  it("re-measures with the hint attached: a record a strip step leaves just under the limit keeps its domains", () => {
+    const build = (pad: number): JobResponse => {
+      const job = doneJob([proDiscoveredDomain("cna.com")]);
+      job.result = {
+        ...job.result,
+        signals_attempted: ["dns", "p".repeat(pad)],
+      } as JobResponse["result"];
+      return job;
+    };
+    const lengthAt = (pad: number) =>
+      JSON.stringify(truncateJobJsonIfNeeded(build(pad)).structured).length;
+    // Without run_metadata the record sits 5 chars under the limit: the strip
+    // hint alone (about a hundred chars) would push it back over.
+    const pad = 25_000 - 5 - lengthAt(0);
+    expect(lengthAt(pad)).toBe(24_995);
+    const job = build(pad);
+    job.result = {
+      ...job.result,
+      run_metadata: { blob: "m".repeat(30_000) },
+    } as JobResponse["result"];
+
+    const markdown = formatJobAsMarkdown(job);
+    expect(markdown.text.length).toBeLessThanOrEqual(25_000);
+    expect(JSON.stringify(markdown.structured).length).toBeLessThanOrEqual(25_000);
+    expect(markdown.structured.result?.domains).toEqual([
+      expect.objectContaining({ domain: "cna.com" }),
+    ]);
+    expect(markdown.structured.result?.upgrade_hint).toContain("all 1 domains kept");
+
+    const json = truncateJobJsonIfNeeded(job);
+    expect(json.text.length).toBeLessThanOrEqual(25_000);
+    expect(JSON.parse(json.text)).toEqual(json.structured);
+    expect(json.structured.result?.domains).toHaveLength(1);
+    expect(json.structured.result?.upgrade_hint).toContain("all 1 domains kept");
+  });
+
   it("drops a domain's embedded base before the domain itself", () => {
     const row = proDiscoveredDomain("cna.com");
     const job = doneJob([{ ...row, base: { ...(row.base as object), blob: "b".repeat(30_000) } }]);

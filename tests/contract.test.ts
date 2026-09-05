@@ -982,6 +982,54 @@ describe("stdio MCP compatibility contract", () => {
     }
   });
 
+  it("renders a done job whose enrichment carries only confidence_band in both formats without error", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_pro_contract_test";
+    const sparse = {
+      ...DONE_JOB,
+      result: {
+        ...DONE_JOB.result,
+        domains: [
+          {
+            domain: "cna.com",
+            attributed_to: "CNA Financial Corporation",
+            enrichment: { confidence_band: "possible" },
+          },
+        ],
+      },
+    };
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response(JSON.stringify(sparse), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+    ) as unknown as typeof fetch;
+
+    const { client, close } = await connect();
+
+    try {
+      const markdown = await client.callTool({
+        name: "ctscout_get_job",
+        arguments: { job_id: JOB_ID },
+      });
+      expect(markdown.isError).not.toBe(true);
+      expect(textOf(markdown)).toContain(
+        "| `cna.com` | CNA Financial Corporation | 🟡 possible | _none_ | _no evidence_ |",
+      );
+      const json = await client.callTool({
+        name: "ctscout_get_job",
+        arguments: { job_id: JOB_ID, response_format: "json" },
+      });
+      expect(json.isError).not.toBe(true);
+      expect(json.structuredContent).toMatchObject({
+        status: "done",
+        result: { domains: [{ domain: "cna.com", enrichment: { confidence_band: "possible" } }] },
+      });
+    } finally {
+      await close();
+    }
+  });
+
   it("keeps a done job's shown domain in structuredContent when a non-rendered field is oversized, and bounds an oversized upgrade_hint", async () => {
     process.env.CTSCOUT_API_KEY = "ds_pro_contract_test";
     const records: unknown[] = [

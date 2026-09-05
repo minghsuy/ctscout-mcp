@@ -1227,11 +1227,14 @@ function formatTable(domains: DomainResult[], kind: TableKind): string {
         // Mixed-tier response (degraded apex from `_degraded()` in Pro /scan).
         rows.push(`| \`${cellSafe(domain, 60)}\` | ${cellSafe(org, 50)} | _missing_ | — | — |`);
       } else {
+        // The advertised schema keeps every enrichment field optional, so a
+        // schema-valid row can lack any of them: render absent as empty.
         const bandEmoji = bandIndicator(enriched.confidence_band);
         const overrideTag = enriched.vlm_override ? " 🚫VLM-veto" : "";
-        const signalSummary = enriched.matched_via.length
-          ? enriched.matched_via.slice(0, 3).join(", ") +
-            (enriched.matched_via.length > 3 ? `, +${enriched.matched_via.length - 3}` : "")
+        const matchedVia = Array.isArray(enriched.matched_via) ? enriched.matched_via : [];
+        const signalSummary = matchedVia.length
+          ? matchedVia.slice(0, 3).join(", ") +
+            (matchedVia.length > 3 ? `, +${matchedVia.length - 3}` : "")
           : "_none_";
         const topEvidence = topEvidenceLine(enriched.evidence);
         rows.push(
@@ -1325,15 +1328,16 @@ const EVIDENCE_PRIORITY = [
   "vlm_verdict_no",
 ];
 
-function topEvidenceLine(evidence: Record<string, string>): string {
+function topEvidenceLine(evidence: Record<string, string> | null | undefined): string {
+  if (evidence == null || typeof evidence !== "object") return "_no evidence_";
   for (const key of EVIDENCE_PRIORITY) {
-    if (key in evidence) {
+    if (key in evidence && typeof evidence[key] === "string") {
       return escapeForTable(capLength(evidence[key], 80));
     }
   }
-  // Fallback: first key in dict order
+  // Fallback: first string value in dict order
   for (const key in evidence) {
-    return escapeForTable(capLength(evidence[key], 80));
+    if (typeof evidence[key] === "string") return escapeForTable(capLength(evidence[key], 80));
   }
   return "_no evidence_";
 }
@@ -1945,20 +1949,50 @@ function boundResultStrings(data: DeepDiveResult): DeepDiveResult {
   };
 }
 
+// The result-level keys this server knows (DeepDiveResultSchema's declared
+// properties); anything else is a forward-compatible extra the markdown never
+// renders, dropped before any known field is.
+const KNOWN_RESULT_KEYS = new Set([
+  "domains",
+  "total",
+  "truncated",
+  "upgrade_hint",
+  "source",
+  "candidates",
+  "match_type",
+  "org_match_strategy",
+  "empty_reason",
+  "snapshot",
+  "snapshot_source",
+  "entity",
+  "run_metadata",
+  "job_id",
+  "worker_version",
+  "signals_degraded",
+  "signals_attempted",
+]);
+
+function knownResultFields(data: DeepDiveResult): DeepDiveResult {
+  return Object.fromEntries(
+    Object.entries(data).filter(([key]) => KNOWN_RESULT_KEYS.has(key)),
+  ) as DeepDiveResult;
+}
+
 // Shrink steps for a done job over budget, in order, so structuredContent
 // keeps the domains the text shows for as long as possible: the result's
 // scalar strings are capped (lossless for anything sane, so not reported),
 // then the fields the markdown never renders are dropped — unknown outer
-// fields, run_metadata, entity, each domain's embedded discovery record,
-// then the per-signal evidence maps. Only when the record is still over
-// budget do domains get halved, and only after that does the result
-// collapse to the minimal envelope.
+// fields, unknown result fields, run_metadata, entity, each domain's
+// embedded discovery record, then the per-signal evidence maps. Only when
+// the record is still over budget do domains get halved, and only after
+// that does the result collapse to the minimal envelope.
 const STRIP_STEPS: Array<{
   name?: string;
   apply: (job: JobResponse, data: DeepDiveResult) => [JobResponse, DeepDiveResult];
 }> = [
   { apply: (job, data) => [job, boundResultStrings(data)] },
   { name: "unknown job fields", apply: (job, data) => [minimalJobEnvelope(job), data] },
+  { name: "unknown result fields", apply: (job, data) => [job, knownResultFields(data)] },
   {
     name: "run_metadata",
     apply: (job, { run_metadata: _dropped, ...data }) => [job, data],
@@ -1991,29 +2025,33 @@ function stripNonRendered(
   job: JobResponse,
   data: DeepDiveResult,
 ): { job: JobResponse; data: DeepDiveResult } {
+  // The hint is part of what is measured: a record just under the limit
+  // before the hint is attached would otherwise go over with it.
+  const withHint = (d: DeepDiveResult, dropped: string[]): DeepDiveResult =>
+    dropped.length === 0
+      ? d
+      : {
+          ...d,
+          truncated: true,
+          upgrade_hint:
+            `Response truncated: ${dropped.join(", ")} omitted to stay under ${CHARACTER_LIMIT} chars; ` +
+            `all ${d.domains.length} domains kept.`,
+        };
   const size = (j: JobResponse, d: DeepDiveResult) => JSON.stringify(wrapJob(j, d)).length;
   let current = { job, data };
-  let currentSize = size(job, data);
   const dropped: string[] = [];
+  let currentSize = size(job, data);
   for (const step of STRIP_STEPS) {
     if (currentSize <= CHARACTER_LIMIT) break;
     const [nextJob, nextData] = step.apply(current.job, current.data);
-    const nextSize = size(nextJob, nextData);
-    if (step.name !== undefined && nextSize < currentSize) dropped.push(step.name);
+    const bareSize = size(nextJob, nextData);
+    if (step.name !== undefined && bareSize < size(current.job, current.data)) {
+      dropped.push(step.name);
+    }
     current = { job: nextJob, data: nextData };
-    currentSize = nextSize;
+    currentSize = size(nextJob, withHint(nextData, dropped));
   }
-  if (dropped.length === 0) return current;
-  return {
-    job: current.job,
-    data: {
-      ...current.data,
-      truncated: true,
-      upgrade_hint:
-        `Response truncated: ${dropped.join(", ")} omitted to stay under ${CHARACTER_LIMIT} chars; ` +
-        `all ${current.data.domains.length} domains kept.`,
-    },
-  };
+  return { job: current.job, data: withHint(current.data, dropped) };
 }
 
 // The structuredContent of a markdown job response: the record as-is when
