@@ -3542,6 +3542,19 @@ describe("formatScanAsMarkdown — ProDiscoveredDomain rows (deep-dive result sh
     expect(md).toContain("| `degraded.cna.com` | CNA Financial Corporation |");
   });
 
+  it("renders an all-degraded deep dive without source through the band table", () => {
+    const md = formatScanAsMarkdown("CNA Financial", {
+      domains: [
+        { domain: "a.cna.com", attributed_to: "CNA Financial Corporation", is_seed: false },
+        { domain: "b.cna.com", attributed_to: "CNA Financial Corporation", is_seed: true },
+      ],
+      signals_degraded: true,
+    });
+    expect(md).toContain("| Domain | Attributed to | Band | Signals | Evidence |");
+    expect(md).toContain("| `a.cna.com` | CNA Financial Corporation |");
+    expect(md).not.toContain("| Domain | Attributed to | Confidence | Sources | Evidence |");
+  });
+
   it("still renders an enrichment-less `domain` row as a ScoutResult", () => {
     const md = formatScanAsMarkdown("CNA Financial", {
       domains: [{ domain: "cna.com", confidence: 0.95, sources: ["ct_org_match"] }],

@@ -1177,16 +1177,19 @@ export function formatScanAsMarkdown(
   // from every row, not from the first row alone.
   const first = response.domains[0];
   const proSource = response.source === "live-enriched" || response.source === "cache-only";
-  const anyEnriched = response.domains.some((d) => d.enrichment != null);
+  // `attributed_to` is the batch worker's claim on a row; a ScoutResult row
+  // never carries it, so a deep dive whose rows are all degraded (no
+  // enrichment) and whose source is absent is still told apart.
+  const anyPro = response.domains.some((d) => d.enrichment != null || d.attributed_to != null);
   const isScoutResult =
     !proSource &&
-    !anyEnriched &&
+    !anyPro &&
     typeof first.domain === "string" &&
     typeof first.apex_domain !== "string";
 
   // Phase-5 Pro detection (ProScanResult shape, also the original assumed
   // Pro shape). Only considered when the response isn't ScoutResult-shaped.
-  const isPhase5Pro = !isScoutResult && (proSource || anyEnriched);
+  const isPhase5Pro = !isScoutResult && (proSource || anyPro);
 
   const isPro = isScoutResult || isPhase5Pro;
   const totalDisplay = response.total ?? response.domains.length;
