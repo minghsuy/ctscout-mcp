@@ -113,12 +113,15 @@ with no `structuredContent` at all, so do not dereference `snapshot` on it.
 The `ctscout_submit_deep_dive` receipt is the other exception: it is a job
 handle, not a warehouse read, so it carries neither field; both arrive on
 `ctscout_get_job` with the result.
-The hosted endpoint does not yet, and no `/scan` response carries `snapshot`
-today, so on the scan tools `snapshot_source` is `"unavailable"` and `snapshot`
-is `null` until the API emits it (a deep-dive result does carry it, above). There is deliberately no client-side fallback
-(a separately fetched date is not tied to the scan's generation). A client must
-treat a missing or null `snapshot` as unknown, never as "current". Closing this
-on the hosted side is tracked in
+Since `X-API-Version` 2026-09-05 every `/scan` and `/scan/batch` answer carries
+`snapshot`, the warehouse sync date it was read from (the sync runs daily), so
+the scan tools report `snapshot_source: "scan"` with that date; a deep-dive
+result carries its own (above). `snapshot_source` is `"unavailable"` and
+`snapshot` is `null` only when the API sent none, which it does before a fresh
+deploy's first sync or when its lookup failed. There is deliberately no
+client-side fallback (a separately fetched date is not tied to the scan's
+generation). A client must treat a missing or null `snapshot` as unknown, never
+as "current". The hosted-side change was
 [ctscout-worker#343](https://github.com/minghsuy/ctscout-worker/issues/343).
 
 The stdio package accepts both MCP protocol eras: current clients can discover
@@ -148,7 +151,7 @@ The model will pick the right ctscout tool, call it, and summarize.
 | Queries per day | 10 | unlimited |
 | Results per query | top 5 | top 25 |
 | History window | last 90 days | up to 12 months |
-| Data freshness | weekly snapshot | weekly snapshot |
+| Data freshness | daily snapshot (`snapshot` names the sync date) | daily snapshot (`snapshot` names the sync date) |
 | Deep-dive jobs (async) | — | 20 per day |
 | Per-attribution evidence | — | in a deep-dive result: `confidence_band` + named signals (DNS, RDAP, IP/ASN, homepage, favicon) |
 | Price | $0 | concierge — email for early access |

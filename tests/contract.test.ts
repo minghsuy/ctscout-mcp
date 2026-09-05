@@ -189,7 +189,7 @@ describe("stdio MCP compatibility contract", () => {
       };
       for (const tool of tools) {
         expect(tool.annotations, tool.name).toEqual(expectedAnnotations[tool.name]);
-        // Warehouse size changes weekly; a typed count drifts from the live site
+        // Warehouse size changes daily; a typed count drifts from the live site
         // and agents reason from it when judging a miss (#101).
         expect(tool.description).not.toMatch(
           /~?\d[\d,.]*[KkMm]?\s*(entities|orgs?|organizations|pairs)\b/,
@@ -208,6 +208,9 @@ describe("stdio MCP compatibility contract", () => {
         expect(description, tool?.name).toContain("VLM");
         expect(description, tool?.name).toMatch(/NOT included in v1/);
         expect(description, tool?.name).toContain("batch worker sets it");
+        // The API reports snapshot on /scan since 2026-09-05; no tool may
+        // still tell an agent to expect null by default.
+        expect(description, tool?.name).not.toMatch(/today the API does not/);
         // The deep-dive shape is its own contract; a /scan never carries it.
         expect(description, tool?.name).not.toMatch(/Pro \/?scan/);
         expect(description, tool?.name).toMatch(/deep-dive (result )?shape/);
@@ -215,6 +218,44 @@ describe("stdio MCP compatibility contract", () => {
         expect(description, tool?.name).toContain('"Candidate"');
       }
       expect(submit?.description).toContain("20 submissions per key per day");
+    } finally {
+      await close();
+    }
+  });
+
+  it("every tool's advertised text says /scan carries a daily snapshot (API version 2026-09-05)", async () => {
+    const { client, close } = await connect();
+    try {
+      const { tools } = await client.listTools();
+      const byName = (name: string) => tools.find((tool) => tool.name === name);
+      const search = byName("ctscout_search_company");
+      const batch = byName("ctscout_search_company_batch");
+      const submit = byName("ctscout_submit_deep_dive");
+      // Positive pins on each tool the change touched, so a rollback of any
+      // one description fails here rather than reading as a clean tree.
+      expect(search?.description).toMatch(/daily snapshot/);
+      expect(search?.description).toMatch(/API version 2026-09-05\+/);
+      expect(search?.description).toMatch(/reports it since X-API-Version 2026-09-05/);
+      expect(batch?.description).toMatch(/API version 2026-09-05\+/);
+      expect(submit?.description).toMatch(/a \/scan answer carries its own snapshot from the API/);
+      // The shared output schema's snapshot description states the cadence.
+      for (const name of [
+        "ctscout_search_company",
+        "ctscout_search_company_batch",
+        "ctscout_lookup_domain",
+      ]) {
+        const properties = (byName(name)?.outputSchema?.properties ?? {}) as Record<
+          string,
+          { description?: string } | undefined
+        >;
+        const snapshot = properties.snapshot;
+        expect(snapshot?.description, name).toMatch(/syncs daily/);
+      }
+      for (const tool of tools) {
+        expect(tool.description, tool.name).not.toMatch(
+          /today the API does not|unlike \/scan today|weekly/,
+        );
+      }
     } finally {
       await close();
     }
