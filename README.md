@@ -241,7 +241,7 @@ npm run build
 # Run the test suite (Vitest, no network)
 npm test
 
-# Maintainer-only, non-publishing 0.3.0 release preflight
+# Maintainer-only, non-publishing 0.4.0 release preflight
 npm run release:check
 
 # Run the server (will fail without CTSCOUT_API_KEY)
