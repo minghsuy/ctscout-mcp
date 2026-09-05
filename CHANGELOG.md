@@ -12,6 +12,12 @@ version heading so the exact package metadata and notes are reviewed together;
 
 ## [Unreleased]
 
+### Changed
+
+- `ctscout_search_company` description, README and LIMITATIONS no longer carry a
+  hand-typed warehouse size (the three disagreed with each other and with the
+  live site); all point at https://ctscout.dev/stats instead (#101)
+
 ## [0.3.0] - 2026-07-30
 
 ### Added

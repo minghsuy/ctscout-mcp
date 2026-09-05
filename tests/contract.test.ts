@@ -86,7 +86,13 @@ describe("stdio MCP compatibility contract", () => {
           idempotentHint: false,
           openWorldHint: true,
         });
+        // Warehouse size changes weekly; a typed count drifts from the live site
+        // and agents reason from it when judging a miss (#101).
+        expect(tool.description).not.toMatch(
+          /~?\d[\d,.]*[KkMm]?\s*(entities|orgs?|organizations|pairs)\b/,
+        );
       }
+      expect(search?.description).toContain("https://ctscout.dev/stats");
     } finally {
       await client.close();
       await server.close();

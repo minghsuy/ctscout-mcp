@@ -1289,9 +1289,9 @@ Legal-vs-brand caveat (important):
   - If a brand-name search returns nothing, retry with variants like "X Companies", "X Group", "X Inc", "X Corporation", or "The X". The empty-result markdown output includes these suggestions automatically when the input looks brand-shaped.
 
 Coverage caveat:
-  - Best for established US/EU tech companies with OV/EV certs (~5,976 entities indexed).
+  - Best for established US/EU tech companies with OV/EV certs.
   - Limited coverage on small private companies, cyber MGAs, and entities using only DV (Let's Encrypt) certs.
-  - See https://ctscout.dev for current coverage map.`,
+  - Warehouse size (organizations, org-domain pairs, last sync) is not stated here because it changes weekly; read the live figures at https://ctscout.dev/stats before treating a miss as meaningful.`,
       inputSchema: SearchCompanyInputSchema,
       annotations: QUOTA_DEBITING_READ_ONLY_ANNOTATIONS,
     },
