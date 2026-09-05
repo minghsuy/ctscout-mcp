@@ -662,7 +662,9 @@ const DeepDiveDomainSchema = DomainResultSchema.extend({
         "cert_org_names, rdap_org, first_seen, last_seen, resolves) the enrichment was scored on.",
     ),
   enrichment: DeepDiveEnrichmentSchema.optional().describe(
-    "Enrichment evidence behind attributed_to; absent means the row is not a deep-dive row.",
+    "Enrichment evidence behind attributed_to. Absent on a degraded row: the collectors " +
+      "did not run or failed for this domain, so the attribution stands without evidence " +
+      "(see signals_degraded on the result). Still a deep-dive row.",
   ),
 });
 
@@ -1884,6 +1886,12 @@ function jobHeader(job: JobResponse): string {
       );
       break;
     case "done":
+      if (job.result?.signals_degraded === true) {
+        lines.push(
+          "- ⚠️ Signals degraded: one or more enrichment collectors failed on this run. " +
+            "Absent evidence on a row is not a negative signal.",
+        );
+      }
       if (job.result?.worker_version) {
         lines.push(`- Worker version: ${cellSafe(job.result.worker_version, 40)}`);
       }

@@ -3408,6 +3408,15 @@ describe("truncateJobJsonIfNeeded", () => {
     expect(text).toContain("verified via google-site-verification");
   });
 
+  it("warns in the markdown when the run's signals were degraded", () => {
+    const degraded = doneJob([proDiscoveredDomain("cna.com")]);
+    degraded.result = { ...degraded.result, signals_degraded: true } as JobResponse["result"];
+    expect(formatJobAsMarkdown(degraded).text).toContain("Signals degraded");
+    expect(formatJobAsMarkdown(doneJob([proDiscoveredDomain("cna.com")])).text).not.toContain(
+      "Signals degraded",
+    );
+  });
+
   it("drops every domain's embedded base before any domain itself", () => {
     // Many rows whose bases are within the per-value caps but add up: the
     // base step goes before halving.
