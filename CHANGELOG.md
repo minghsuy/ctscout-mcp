@@ -18,7 +18,15 @@ version heading so the exact package metadata and notes are reviewed together;
   2026-05-16; "weekly" was stale) and that `/scan` answers carry `snapshot`
   since the API's 2026-09-05 version, so `snapshot_source` is `"scan"` on the
   scan tools rather than always `"unavailable"` (ctscout-worker#343)
-
+- The package never invents a confidence band. The renderer for the retired
+  origin's `ScoutResult` rows, which bucketed a 0..1 `confidence` float into
+  `verified` / `likely` / `possible` / `low` on the client, is removed along
+  with its shape detection; `/scan` rows render through the warehouse table
+  and a `confidence_band` appears only where the API reports one, in a
+  deep-dive job result. The advertised `/scan` row schema drops the four
+  fields only that shape carried (`confidence`, `sources`, `cert_org_names`,
+  `rdap_org`); the row stays an open object, so a payload carrying them
+  still validates (#99)
 - README and LIMITATIONS describe what a Pro key gets today: more `/scan`
   rows and a longer window on the same daily snapshot, and evidence-backed
   `confidence_band`s only through deep-dive jobs; no live enrichment on

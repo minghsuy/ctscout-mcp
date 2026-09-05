@@ -128,48 +128,42 @@ export interface ProEnrichment {
 }
 
 export interface DomainResult {
-  // ---- Warehouse / "Phase 5 fictional Pro" shape (free tier from D1; or
-  //      pre-Phase-6 Pro-with-enrichment which the origin never actually
-  //      produced). Marked optional because the real Pro tier returns
-  //      ScoutResult-shaped objects instead — see below.
+  // ---- Warehouse row: what /scan returns on both tiers (Pro gets more rows
+  //      and a longer window, the same shape).
   org?: string;
   apex_domain?: string;
   cert_count?: number;
   subdomain_count?: number;
   first_seen?: string | null;
   last_seen?: string | null;
-  // Customer-facing claim; "attributed_to" not "owns"
+
+  // ---- Deep-dive row (ProDiscoveredDomain, read back with ctscout_get_job):
+  //      `domain` instead of `apex_domain`, the batch worker's claim in
+  //      `attributed_to` ("attributed", never "owns") and the band under
+  //      `enrichment`, as the API reports it. The underlying discovery record
+  //      sits under `base`; nothing here derives a band from a number.
+  domain?: string;
   attributed_to?: string;
   enrichment?: ProEnrichment;
-
-  // ---- ScoutResult shape (real Pro tier, proxied verbatim from the Spark
-  //      origin's domain-scout library). The origin returns these fields,
-  //      NOT the warehouse/enrichment shape above. The mismatch was the
-  //      undefined-cells bug fixed in 2026-05-15 (ctscout-mcp#14).
-  domain?: string;
-  confidence?: number | null;
-  sources?: string[];
-  evidence?: Array<Record<string, unknown>>;
+  is_seed?: boolean;
+  // Legacy org fallbacks for the deep-dive table: a real row never carries
+  // them at the top level (they sit under `base`), so they only fire on a
+  // flattened row.
   cert_org_names?: string[];
   rdap_org?: string | null;
-  resolves?: boolean;
-  is_seed?: boolean;
-  seed_sources?: string[];
 
-  // Catch-all for any future origin fields so the type doesn't go stale.
+  // Catch-all for any future API fields so the type doesn't go stale.
   [k: string]: unknown;
 }
 
 export interface ScanResponse {
   domains: DomainResult[];
-  // Warehouse responses set these; ScoutResult responses don't.
+  // Warehouse responses set these; deep-dive results don't.
   total?: number;
   truncated?: boolean;
   upgrade_hint?: string;
-  // "warehouse" / "live" = legacy free-tier sources.
-  // "cache-only" / "live-enriched" = Phase 5 Pro tier (orchestrator with
-  // enrichment objects — fictional, the origin doesn't produce this).
-  // undefined = ScoutResult shape from the real Pro tier origin.
+  // "warehouse" / "live" = /scan.
+  // "cache-only" / "live-enriched" = a deep-dive result (ProScanResult).
   source?: "warehouse" | "live" | "cache-only" | "live-enriched";
   candidates?: SemanticCandidate[];
   match_type?: "exact" | "semantic" | "none";
@@ -180,7 +174,7 @@ export interface ScanResponse {
   // because the raw /scan payload does not carry them.
   snapshot?: string | null;
   snapshot_source?: SnapshotSource;
-  // ScoutResult also carries `entity` and `run_metadata` at the top level.
+  // A deep-dive result also carries `entity` and `run_metadata` at the top level.
   [k: string]: unknown;
 }
 
@@ -488,7 +482,7 @@ type GetJobInput = z.infer<typeof GetJobInputSchema>;
 //
 // Advertised as `outputSchema` and enforced by the SDK against every
 // structuredContent this server returns. The payload is proxied from the API
-// (warehouse rows on free, ScoutResult objects on Pro), so every proxied field
+// (warehouse rows on /scan, deep-dive rows on a job), so every proxied field
 // is typed loosely and documented via describe(): an upstream enum growing a
 // value must widen what an agent sees, not turn the tool call into an error.
 // Only the fields this server writes itself (`snapshot`, `snapshot_source`)
@@ -545,19 +539,10 @@ const DomainResultSchema = z.looseObject({
     .optional()
     .describe("When the warehouse last ingested this pair (observation time, not SCT time)."),
   attributed_to: z.string().optional(),
-  // ScoutResult (Pro) fields — proxied verbatim from the origin.
   domain: z
     .string()
     .optional()
     .describe("Deep-dive row shape: the apex domain (no apex_domain field)."),
-  confidence: z
-    .number()
-    .nullable()
-    .optional()
-    .describe("Deep-dive row: 0..1 discovery confidence of the underlying record."),
-  sources: z.array(z.string()).optional(),
-  cert_org_names: z.array(z.string()).optional(),
-  rdap_org: z.string().nullable().optional(),
 });
 
 const ScanOutputSchema = z.looseObject({
@@ -1025,24 +1010,16 @@ export function explainError(err: unknown, surface: ErrorSurface = "scan"): stri
   return `Unexpected error: ${String(err)}`;
 }
 
-// Exported for tests. Renders three response shapes from the ctscout /scan
-// API:
+// Exported for tests. Renders two response shapes:
 //
-//   1. Warehouse (free tier) — `source: "warehouse"`, each domain has
+//   1. Warehouse (/scan, both tiers) — `source: "warehouse"`, each domain has
 //      `{org, apex_domain, cert_count, subdomain_count, first_seen,
-//      last_seen}`. Legacy v0.1.0 table format.
-//   2. ScoutResult (real Pro tier) — proxied verbatim from the Spark
-//      origin's domain-scout library. Top level has no `source` field;
-//      each domain has `{domain, confidence, sources[], evidence[],
-//      cert_org_names[], rdap_org, ...}`. Rendered as a confidence-band
-//      / signals / evidence table.
-//   3. Phase-5 fictional Pro (`source: "live-enriched" | "cache-only"` or
-//      domains carrying an `enrichment` object) — the original assumed
-//      Pro shape. Kept for backward compat with pre-Phase-6 fixtures.
-//
-// The undefined-cells bug fixed here (2026-05-15, ctscout-mcp#14) was
-// that the real Pro tier returns shape #2, but the formatter only knew
-// shapes #1 and #3 — so every cell rendered as `undefined`.
+//      last_seen}`.
+//   2. Deep-dive result (ctscout_get_job) — `source: "live-enriched" |
+//      "cache-only"`, or rows carrying `enrichment` / `attributed_to`.
+//      Rendered as the band / signals / evidence table, with the band
+//      exactly as the API reported it: this package never derives a band
+//      from a score (ctscout-mcp#99).
 /** Suffixes indicating the query is already a legal entity name shape.
  *  Used to skip the brand→legal "did you mean?" hint when the user has
  *  already supplied a legal-shaped name — zero results in that case is a
@@ -1097,7 +1074,7 @@ function buildLegalEntitySuggestions(rawInput: string): string[] {
  *  suggestions don't apply — empty-result there is the DV-only certs
  *  caveat, not a name-form issue. */
 export type FormatHint = { kind: "company" } | { kind: "domain" };
-type TableKind = "free" | "pro" | "scout";
+type TableKind = "free" | "pro";
 
 export function formatScanAsMarkdown(
   query: string,
@@ -1176,51 +1153,29 @@ export function formatScanAsMarkdown(
     return lines.join("\n");
   }
 
-  // Shape detection. ScoutResult domain objects have `domain` (not
-  // `apex_domain`); the two shapes don't overlap on this attribute.
-  // Single-field check is sufficient. ASSUMPTION: arrays are homogeneous —
-  // the API never mixes ScoutResult and warehouse rows in one response.
-  // If it ever did, rows after the first would render through the wrong
-  // column mapping (formatTable's per-row `??` fallbacks degrade to "—"
-  // rather than throwing).
-  //
-  // A ProDiscoveredDomain (the deep-dive result, ProScanResult) also carries
-  // `domain` without `apex_domain`, but has `enrichment` — that is the band /
-  // signals table. A degraded deep-dive row can lack `enrichment` while the
-  // rows after it carry one, so the Pro shape is read from the source and
-  // from every row, not from the first row alone.
-  const first = response.domains[0];
+  // Shape detection. A deep-dive result (ProScanResult) is read from its
+  // source and from every row, not from the first row alone: a degraded
+  // deep-dive row can lack `enrichment` while the rows after it carry one,
+  // and `attributed_to` is the batch worker's claim on a row, so a deep dive
+  // whose rows are all degraded and whose source is absent is still told
+  // apart. An explicit free-tier source is authoritative: a warehouse row may
+  // carry attributed_to (the schema permits it) without being a deep dive.
+  // Anything else is the warehouse table; there is no third shape, and no
+  // band is ever derived here from a numeric field (ctscout-mcp#99).
   const proSource = response.source === "live-enriched" || response.source === "cache-only";
-  // `attributed_to` is the batch worker's claim on a row; a ScoutResult row
-  // never carries it, so a deep dive whose rows are all degraded (no
-  // enrichment) and whose source is absent is still told apart.
   const anyPro = response.domains.some((d) => d.enrichment != null || d.attributed_to != null);
-  const isScoutResult =
-    !proSource &&
-    !anyPro &&
-    typeof first.domain === "string" &&
-    typeof first.apex_domain !== "string";
-
-  // Phase-5 Pro detection (ProScanResult shape, also the original assumed
-  // Pro shape). Only considered when the response isn't ScoutResult-shaped.
-  // An explicit free-tier source is authoritative: a warehouse row may carry
-  // attributed_to (the schema permits it) without being a Pro response.
   const freeSource = response.source === "warehouse" || response.source === "live";
-  const isPhase5Pro = !isScoutResult && !freeSource && (proSource || anyPro);
+  const isDeepDive = !freeSource && (proSource || anyPro);
 
-  const isPro = isScoutResult || isPhase5Pro;
   const totalDisplay = response.total ?? response.domains.length;
   // Every API-provided string the renderer prints is capped (upgrade_hint and
   // source here, cells in formatTable): the halving loop can only remove rows,
   // so a scalar over budget would otherwise leave nothing for it to cut.
-  const sourceDisplay = cellSafe(
-    response.source ?? (isScoutResult ? "scout-result" : "unknown"),
-    40,
-  );
+  const sourceDisplay = cellSafe(response.source ?? "unknown", 40);
 
   lines.push(
     `Returned **${response.domains.length}** attributed domain(s) of ${totalDisplay} total. ` +
-      `Source: \`${sourceDisplay}\`${isPro ? " _(Pro tier — multi-signal attribution)_" : ""}.`,
+      `Source: \`${sourceDisplay}\`${isDeepDive ? " _(Pro tier — multi-signal attribution)_" : ""}.`,
   );
   if (response.truncated && response.upgrade_hint) {
     lines.push("");
@@ -1228,16 +1183,10 @@ export function formatScanAsMarkdown(
   }
   lines.push("");
 
-  const kind: TableKind = isScoutResult ? "scout" : isPhase5Pro ? "pro" : "free";
-  lines.push(formatTable(response.domains, kind));
+  lines.push(formatTable(response.domains, isDeepDive ? "pro" : "free"));
 
   return lines.join("\n");
 }
-
-// How many sources to show inline before collapsing the rest into a "+N
-// more" overflow indicator. Mirrors the Phase-5 Pro renderer's behavior
-// for cross-path consistency (matched_via is also capped + collapsed).
-const SOURCES_INLINE_LIMIT = 4;
 
 function formatTable(domains: DomainResult[], kind: TableKind): string {
   const rows: string[] = [];
@@ -1247,11 +1196,8 @@ function formatTable(domains: DomainResult[], kind: TableKind): string {
   if (kind === "free") {
     rows.push("| Domain | Attributed to | Certs | Subdomains |");
     rows.push("|---|---|---:|---:|");
-  } else if (kind === "pro") {
+  } else {
     rows.push("| Domain | Attributed to | Band | Signals | Evidence |");
-    rows.push("|---|---|---|---|---|");
-  } else if (kind === "scout") {
-    rows.push("| Domain | Attributed to | Confidence | Sources | Evidence |");
     rows.push("|---|---|---|---|---|");
   }
 
@@ -1262,12 +1208,13 @@ function formatTable(domains: DomainResult[], kind: TableKind): string {
       rows.push(
         `| \`${cellSafe(domain, 60)}\` | ${cellSafe(org, 50)} | ${d.cert_count ?? "—"} | ${d.subdomain_count ?? "—"} |`,
       );
-    } else if (kind === "pro") {
+    } else {
       const domain = d.apex_domain ?? d.domain;
       const org = d.attributed_to ?? d.org ?? d.cert_org_names?.[0] ?? d.rdap_org;
       const enriched = d.enrichment;
       if (enriched == null) {
-        // Mixed-tier response (degraded apex from `_degraded()` in Pro /scan).
+        // Degraded row: the collectors did not run for this apex, so the
+        // attribution stands without a band. Absent is rendered as absent.
         rows.push(`| \`${cellSafe(domain, 60)}\` | ${cellSafe(org, 50)} | _missing_ | — | — |`);
       } else {
         // The advertised schema keeps every enrichment field optional, so a
@@ -1284,47 +1231,10 @@ function formatTable(domains: DomainResult[], kind: TableKind): string {
           `| \`${cellSafe(domain, 60)}\` | ${cellSafe(org, 50)} | ${bandEmoji} ${cellSafe(enriched.confidence_band, 20)}${overrideTag} | ${cellSafe(signalSummary)} | ${topEvidence} |`,
         );
       }
-    } else if (kind === "scout") {
-      const domain = d.domain;
-      const certOrgs = d.cert_org_names ?? [];
-      // Org fallback chain: cert_org_names[0] -> rdap_org -> org. cellSafe
-      // turns undefined into "—" so we don't need a trailing `?? undefined`.
-      const org = certOrgs[0] ?? d.rdap_org ?? d.org;
-      const conf = d.confidence;
-      const confCell = conf != null ? `${confidenceBand(conf)} (${conf.toFixed(2)})` : "—";
-      const sources = d.sources ?? [];
-      // Show first N sources and append a "+M" indicator for any overflow,
-      // so callers can tell when they're looking at an incomplete list.
-      const overflowSources = sources.length - SOURCES_INLINE_LIMIT;
-      const sourcesCell =
-        sources.slice(0, SOURCES_INLINE_LIMIT).join(", ") +
-        (overflowSources > 0 ? `, +${overflowSources}` : "");
-      // Type-guard rather than cast: the `evidence` element type is
-      // Record<string, unknown>, so `description` is `unknown`. If the
-      // origin ever sends a non-string description (number, object, null),
-      // we fall back to em-dash instead of stringifying via cellSafe.
-      const rawDescription = d.evidence?.[0]?.description;
-      const firstDescription = typeof rawDescription === "string" ? rawDescription : undefined;
-      rows.push(
-        `| \`${cellSafe(domain, 60)}\` | ${cellSafe(org, 50)} | ${confCell} | ${cellSafe(sourcesCell, 40)} | ${cellSafe(firstDescription, 80)} |`,
-      );
     }
   }
 
   return rows.join("\n");
-}
-
-// ---------- ScoutResult renderer (real Pro tier from Spark origin) ----------
-
-// Map a 0..1 confidence float to a human-readable band. Matches the
-// thresholds used in ctscout-worker#56's formatter for cross-transport
-// consistency.
-function confidenceBand(c: number | null | undefined): string {
-  if (c == null || Number.isNaN(c)) return "—";
-  if (c >= 0.9) return "verified";
-  if (c >= 0.7) return "likely";
-  if (c >= 0.5) return "possible";
-  return "low";
 }
 
 // Sanitize a cell value for markdown-table inclusion. Replace pipes with a
@@ -1340,7 +1250,7 @@ function cellSafe(s: string | null | undefined, maxLen = 80): string {
   return capLength(stripped, maxLen);
 }
 
-// ---------- Phase-5 fictional Pro renderer helpers (kept for compat) ----------
+// ---------- Deep-dive band table helpers ----------
 
 function bandIndicator(band: ConfidenceBand | undefined): string {
   switch (band) {
@@ -1746,7 +1656,7 @@ function truncateResultJson(item: BatchResultItem, limit: number): BatchResultIt
     limit,
   );
   // If known bulk has been halved away but the echoed query or arbitrary
-  // top-level ScoutResult fields still exceed the slice, emit a minimal
+  // proxied top-level fields still exceed the slice, emit a minimal
   // bounded envelope — mirrors the single-scan guard in truncateJsonIfNeeded.
   if (JSON.stringify(structured).length > limit) {
     return {
