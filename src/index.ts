@@ -2076,8 +2076,26 @@ function boundValue(value: unknown): unknown {
   return value;
 }
 
+// The evidence map keeps the keys the renderer reads first (EVIDENCE_PRIORITY,
+// in that order) ahead of the rest, so cutting it to ROW_LIST_LIMIT entries
+// never removes the value topEvidenceLine would have shown.
+function boundEvidence(evidence: Record<string, string>): Record<string, string> {
+  const priority = EVIDENCE_PRIORITY.filter((key) => key in evidence);
+  const rest = Object.keys(evidence).filter((key) => !priority.includes(key));
+  return Object.fromEntries(
+    [...priority, ...rest]
+      .slice(0, ROW_LIST_LIMIT)
+      .map((key) => [key, boundedField(evidence[key])]),
+  );
+}
+
 function boundRowValues(row: DeepDiveDomain): DeepDiveDomain {
-  return boundValue(row) as DeepDiveDomain;
+  const bounded = boundValue(row) as DeepDiveDomain;
+  const evidence = row.enrichment?.evidence;
+  if (bounded.enrichment != null && evidence != null && typeof evidence === "object") {
+    bounded.enrichment = { ...bounded.enrichment, evidence: boundEvidence(evidence) };
+  }
+  return bounded;
 }
 
 function knownResultFields(data: DeepDiveResult): DeepDiveResult {

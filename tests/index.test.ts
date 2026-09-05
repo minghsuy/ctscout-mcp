@@ -3385,6 +3385,29 @@ describe("truncateJobJsonIfNeeded", () => {
     expect(structured.result?.upgrade_hint).not.toContain("oversized values");
   });
 
+  it("keeps the priority evidence key when an oversized evidence map is cut", () => {
+    const row = proDiscoveredDomain("cna.com");
+    const filler = Object.fromEntries(
+      Array.from({ length: 40 }, (_, i) => [`zz_${i}`, "v".repeat(500)]),
+    );
+    const job = doneJob([
+      {
+        ...row,
+        attributed_to: "x".repeat(30_000),
+        enrichment: {
+          ...row.enrichment,
+          evidence: { ...filler, dns_txt_brand_token: "verified via google-site-verification" },
+        },
+      },
+    ]);
+    const { text, structured } = formatJobAsMarkdown(job);
+    expect(structured.result?.domains).toHaveLength(1);
+    const evidence = structured.result?.domains[0].enrichment?.evidence ?? {};
+    expect(Object.keys(evidence)).toHaveLength(20);
+    expect(evidence.dns_txt_brand_token).toBe("verified via google-site-verification");
+    expect(text).toContain("verified via google-site-verification");
+  });
+
   it("drops every domain's embedded base before any domain itself", () => {
     // Many rows whose bases are within the per-value caps but add up: the
     // base step goes before halving.
