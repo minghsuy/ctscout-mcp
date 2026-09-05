@@ -1191,7 +1191,10 @@ export function formatScanAsMarkdown(
 
   // Phase-5 Pro detection (ProScanResult shape, also the original assumed
   // Pro shape). Only considered when the response isn't ScoutResult-shaped.
-  const isPhase5Pro = !isScoutResult && (proSource || anyPro);
+  // An explicit free-tier source is authoritative: a warehouse row may carry
+  // attributed_to (the schema permits it) without being a Pro response.
+  const freeSource = response.source === "warehouse" || response.source === "live";
+  const isPhase5Pro = !isScoutResult && !freeSource && (proSource || anyPro);
 
   const isPro = isScoutResult || isPhase5Pro;
   const totalDisplay = response.total ?? response.domains.length;

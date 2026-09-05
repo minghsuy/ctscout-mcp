@@ -3615,6 +3615,23 @@ describe("formatScanAsMarkdown — ProDiscoveredDomain rows (deep-dive result sh
     expect(md).toContain("| `degraded.cna.com` | CNA Financial Corporation |");
   });
 
+  it("keeps a warehouse response with attributed_to on a row in the free-tier table", () => {
+    const md = formatScanAsMarkdown(
+      "Coalition",
+      freeResponse([
+        {
+          org: "Coalition Inc",
+          apex_domain: "coalitioninc.com",
+          cert_count: 12,
+          attributed_to: "Coalition Inc",
+        },
+      ]),
+    );
+    expect(md).toContain("coalitioninc.com");
+    expect(md).not.toContain("| Domain | Attributed to | Band | Signals | Evidence |");
+    expect(md).not.toContain("_missing_");
+  });
+
   it("renders an all-degraded deep dive without source through the band table", () => {
     const md = formatScanAsMarkdown("CNA Financial", {
       domains: [
