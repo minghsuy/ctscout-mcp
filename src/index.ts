@@ -114,14 +114,17 @@ enum ResponseFormat {
 export type ConfidenceBand = "verified" | "likely" | "possible" | "insufficient";
 export type VlmStatus = "cached" | "pending" | "skipped";
 
+// Every member is optional on the wire: a degraded signal run leaves the
+// band and the maps out (DeepDiveEnrichmentSchema), and the renderer falls
+// back per field. Reading a member without a guard is a type error.
 export interface ProEnrichment {
-  confidence_band: ConfidenceBand;
-  weight_total: number;
-  matched_via: string[];
-  evidence: Record<string, string>;
-  signal_health: Record<string, string>;
-  vlm_status: VlmStatus;
-  vlm_override: boolean;
+  confidence_band?: ConfidenceBand;
+  weight_total?: number;
+  matched_via?: string[];
+  evidence?: Record<string, string>;
+  signal_health?: Record<string, string>;
+  vlm_status?: VlmStatus;
+  vlm_override?: boolean;
 }
 
 export interface DomainResult {
@@ -262,10 +265,30 @@ export interface JobSubmitResponse {
 // signals_attempted. Modelled as a ScanResponse so the scan renderers and
 // truncation envelopes apply unchanged; `snapshot` here is the worker-set
 // warehouse date, not this server's resolved copy.
+export type DeepDiveEnrichment = ProEnrichment;
+
+// One deep-dive row: a DomainResult plus the attribution the batch worker
+// adds and the embedded free-tier discovery record.
+export interface DeepDiveDomain extends DomainResult {
+  attributed_to?: string;
+  is_seed?: boolean;
+  base?: Record<string, unknown>;
+}
+
+// The deep-dive result the batch worker writes: a Pro /scan result
+// (ProScanResult: entity, domains with enrichment, run_metadata, source,
+// signals_degraded) plus job_id, snapshot, worker_version and
+// signals_attempted. A ScanResponse, so the scan renderers and truncation
+// envelopes apply unchanged; `snapshot` here is the worker-set warehouse
+// date, not this server's resolved copy.
 export type DeepDiveResult = ScanResponse & {
+  domains: DeepDiveDomain[];
+  entity?: { company_name?: string; seed_domain?: string[] };
+  run_metadata?: Record<string, unknown>;
+  signals_degraded?: boolean;
   job_id?: string;
   worker_version?: string;
-  signals_attempted?: unknown;
+  signals_attempted?: string[];
 };
 
 // Body of GET /jobs/{id}. `result` is present only when status is "done";
@@ -1299,7 +1322,7 @@ function cellSafe(s: string | null | undefined, maxLen = 80): string {
 
 // ---------- Phase-5 fictional Pro renderer helpers (kept for compat) ----------
 
-function bandIndicator(band: ConfidenceBand): string {
+function bandIndicator(band: ConfidenceBand | undefined): string {
   switch (band) {
     case "verified":
       return "✅";
