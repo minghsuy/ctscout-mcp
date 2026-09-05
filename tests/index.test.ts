@@ -3121,7 +3121,9 @@ describe("formatJobAsMarkdown", () => {
     const { text, structured } = formatJobAsMarkdown(job);
     expect(text).toContain("| `cna.com` |");
     // Steps are cumulative: the earlier, cheaper fields go first.
-    expect(text).toContain("> Response truncated: run_metadata, entity, domains[].base omitted");
+    expect(text).toContain(
+      "> Response truncated: run_metadata, entity, signals_attempted, domains[].base omitted",
+    );
     expect(JSON.stringify(structured).length).toBeLessThanOrEqual(25_000);
     expect(structured.result?.domains).toHaveLength(1);
     expect(structured.result?.domains[0]).not.toHaveProperty("base");
