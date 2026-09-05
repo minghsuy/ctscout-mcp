@@ -308,6 +308,14 @@ describe("stdio MCP compatibility contract", () => {
       expect(search?.outputSchema?.additionalProperties).toEqual({});
       const searchProps = search?.outputSchema?.properties as Record<string, unknown>;
       expect(searchProps.match_type).not.toHaveProperty("enum");
+      // A /scan row advertises the warehouse shape only: the retired origin's
+      // per-row confidence float and its companions are not part of the
+      // contract, so no consumer is led to derive a band from them (#99).
+      const rowProps = (searchProps.domains as { items: { properties: Record<string, unknown> } })
+        .items.properties;
+      for (const gone of ["confidence", "sources", "cert_org_names", "rdap_org"]) {
+        expect(rowProps, gone).not.toHaveProperty(gone);
+      }
       const lookup = tools.find((tool) => tool.name === "ctscout_lookup_domain");
       expect(lookup?.outputSchema).toEqual(search?.outputSchema);
 
