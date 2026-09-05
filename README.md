@@ -164,7 +164,7 @@ The warehouse is strongest on: established US/EU enterprise, government, financi
 
 The warehouse is weak on: modern cloud-native shops (most domains entirely behind Cloudflare/Vercel/Netlify), pre-launch / stealth-mode startups, anything that defaults to DV certs.
 
-When `ctscout_lookup_domain` returns 0 results, the apex isn't in the warehouse — not necessarily that nobody owns it. See [LIMITATIONS.md](LIMITATIONS.md) for the full coverage discussion and ~5,976-org / 329K-pair scale stats.
+When `ctscout_lookup_domain` returns 0 results, the apex isn't in the warehouse — not necessarily that nobody owns it. See [LIMITATIONS.md](LIMITATIONS.md) for the full coverage discussion; current warehouse size is published live at https://ctscout.dev/stats.
 
 ---
 
