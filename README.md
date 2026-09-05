@@ -113,9 +113,9 @@ with no `structuredContent` at all, so do not dereference `snapshot` on it.
 The `ctscout_submit_deep_dive` receipt is the other exception: it is a job
 handle, not a warehouse read, so it carries neither field; both arrive on
 `ctscout_get_job` with the result.
-The hosted endpoint does not yet, and no API response carries `snapshot`
-today, so on this package `snapshot_source` is `"unavailable"` and `snapshot`
-is `null` until the API emits it. There is deliberately no client-side fallback
+The hosted endpoint does not yet, and no `/scan` response carries `snapshot`
+today, so on the scan tools `snapshot_source` is `"unavailable"` and `snapshot`
+is `null` until the API emits it (a deep-dive result does carry it, above). There is deliberately no client-side fallback
 (a separately fetched date is not tied to the scan's generation). A client must
 treat a missing or null `snapshot` as unknown, never as "current". Closing this
 on the hosted side is tracked in

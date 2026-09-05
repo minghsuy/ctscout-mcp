@@ -3417,6 +3417,24 @@ describe("truncateJobJsonIfNeeded", () => {
     );
   });
 
+  it("drops a large candidates list before any attributed domain", () => {
+    const job = doneJob([proDiscoveredDomain("cna.com")]);
+    job.result = {
+      ...job.result,
+      candidates: Array.from({ length: 1500 }, (_, i) => ({
+        org: `c${i}`,
+        similarity: 0.5,
+        domains: [],
+      })),
+    } as unknown as JobResponse["result"];
+    for (const { structured } of [formatJobAsMarkdown(job), truncateJobJsonIfNeeded(job)]) {
+      expect(JSON.stringify(structured).length).toBeLessThanOrEqual(25_000);
+      expect(structured.result?.domains).toHaveLength(1);
+      expect(structured.result).not.toHaveProperty("candidates");
+      expect(structured.result?.upgrade_hint).toContain("candidates omitted");
+    }
+  });
+
   it("drops every domain's embedded base before any domain itself", () => {
     // Many rows whose bases are within the per-value caps but add up: the
     // base step goes before halving.

@@ -2128,6 +2128,11 @@ const STRIP_STEPS: Array<{
   { name: "unknown job fields", apply: (job, data) => [minimalJobEnvelope(job), data] },
   { name: "unknown result fields", apply: (job, data) => [job, knownResultFields(data)] },
   {
+    // Never rendered while domains are present, so they go before any row.
+    name: "candidates",
+    apply: (job, { candidates: _dropped, ...data }) => [job, data],
+  },
+  {
     name: "unknown domain fields",
     apply: (job, data) => [job, { ...data, domains: data.domains.map(knownRowFields) }],
   },
