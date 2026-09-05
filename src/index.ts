@@ -1876,7 +1876,7 @@ export function formatJobAsMarkdown(job: JobResponse): {
   const header = jobHeader(job);
   const data = jobResultData(job);
   if (data === undefined) {
-    return { text: header, structured: wrapJob(job, undefined) };
+    return { text: header, structured: boundedJobRecord(job, undefined) };
   }
   const label = jobResultLabel(job);
   const render = (s: ScanResponse) => demoteHeading(formatScanAsMarkdown(label, s));
@@ -1886,7 +1886,23 @@ export function formatJobAsMarkdown(job: JobResponse): {
     render,
     Math.max(0, CHARACTER_LIMIT - header.length - 2),
   );
-  return { text: `${header}\n\n${text}`, structured: wrapJob(job, structured) };
+  return { text: `${header}\n\n${text}`, structured: boundedJobRecord(job, structured) };
+}
+
+// The structuredContent of a markdown job response: the record as-is when
+// it fits the budget, else the outer envelope collapses around the (already
+// bounded) result, else both collapse. Same serializer as the JSON path, so
+// a raw API record never reaches the client unbounded in either format.
+function boundedJobRecord(job: JobResponse, result: DeepDiveResult | undefined): JobResponse {
+  const collapsed = (s: DeepDiveResult | undefined) => wrapJob(minimalJobEnvelope(job), s);
+  return serializeBoundedJson(
+    wrapJob(job, result),
+    () => collapsed(result && minimalScanEnvelope(result)),
+    () => {
+      const outerOnly = collapsed(result);
+      return { text: JSON.stringify(outerOnly), structured: outerOnly };
+    },
+  ).structured;
 }
 
 // The one JSON serializer for the job tools' records. Pretty when it fits,

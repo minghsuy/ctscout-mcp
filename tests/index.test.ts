@@ -2996,6 +2996,45 @@ describe("formatJobAsMarkdown", () => {
     expect(structured.result?.domains.length).toBeLessThan(3000);
     expect(structured.snapshot).toBe("2026-08-31");
   });
+
+  it("collapses the outer envelope of a done job's structuredContent around the rendered result", () => {
+    const job = doneJob([proDiscoveredDomain("cna.com")], { noise: "n".repeat(30_000) });
+    const { text, structured } = formatJobAsMarkdown(job);
+    expect(text).toContain("| `cna.com` |");
+    expect(JSON.stringify(structured).length).toBeLessThanOrEqual(25_000);
+    expect(structured).not.toHaveProperty("noise");
+    // The outer extras were the problem, so the rendered result survives.
+    expect(structured).toMatchObject({
+      job_id: "0123456789abcdef01234567",
+      status: "done",
+      result: { domains: [{ domain: "cna.com" }], snapshot: "2026-08-31" },
+      snapshot: "2026-08-31",
+      snapshot_source: "scan",
+    });
+  });
+
+  it("collapses a not-done record's structuredContent to the bounded envelope", () => {
+    const { text, structured } = formatJobAsMarkdown({
+      job_id: "abc",
+      kind: "deep_dive",
+      status: "running",
+      submitted_at: "2026-09-04T10:00:00Z",
+      started_at: "2026-09-04T10:05:00Z",
+      noise: "n".repeat(30_000),
+    });
+    expect(text.length).toBeLessThanOrEqual(25_000);
+    expect(JSON.stringify(structured).length).toBeLessThanOrEqual(25_000);
+    expect(structured).toEqual({
+      job_id: "abc",
+      kind: "deep_dive",
+      status: "running",
+      submitted_at: "2026-09-04T10:00:00Z",
+      started_at: "2026-09-04T10:05:00Z",
+      finished_at: undefined,
+      snapshot: null,
+      snapshot_source: "unavailable",
+    });
+  });
 });
 
 describe("truncateJobJsonIfNeeded", () => {

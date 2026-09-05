@@ -982,6 +982,49 @@ describe("stdio MCP compatibility contract", () => {
     }
   });
 
+  it("bounds a not-done record carrying an oversized forward-compatible field in markdown format", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_pro_contract_test";
+    const oversized = {
+      job_id: JOB_ID,
+      kind: "deep_dive",
+      status: "running",
+      submitted_at: "2026-09-04T10:00:00Z",
+      started_at: "2026-09-04T10:05:00Z",
+      future_field: "f".repeat(30_000),
+    };
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response(JSON.stringify(oversized), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+    ) as unknown as typeof fetch;
+
+    const { client, close } = await connect();
+
+    try {
+      const running = await client.callTool({
+        name: "ctscout_get_job",
+        arguments: { job_id: JOB_ID },
+      });
+      expect(running.isError).not.toBe(true);
+      expect(textOf(running).length).toBeLessThanOrEqual(25_000);
+      expect(textOf(running)).toContain("- Status: `running`");
+      expect(JSON.stringify(running.structuredContent).length).toBeLessThanOrEqual(25_000);
+      expect(running.structuredContent).toEqual({
+        job_id: JOB_ID,
+        kind: "deep_dive",
+        status: "running",
+        submitted_at: "2026-09-04T10:00:00Z",
+        started_at: "2026-09-04T10:05:00Z",
+        snapshot: null,
+        snapshot_source: "unavailable",
+      });
+    } finally {
+      await close();
+    }
+  });
+
   it("polls a job with one GET /jobs/{id}: queued, then done with the worker-set snapshot, then failed", async () => {
     process.env.CTSCOUT_API_KEY = "ds_pro_contract_test";
     const records: unknown[] = [
