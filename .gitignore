@@ -8,3 +8,6 @@ coverage/
 *.tsbuildinfo
 .vscode/
 .idea/
+
+# Claude Code local settings (per-machine, never part of the package)
+.claude/
