@@ -1964,6 +1964,8 @@ function boundResultStrings(data: DeepDiveResult): DeepDiveResult {
       org_match_strategy: boundedField(data.org_match_strategy),
     }),
     ...(data.snapshot != null && { snapshot: boundedField(data.snapshot) }),
+    ...(data.worker_version !== undefined && { worker_version: boundedField(data.worker_version) }),
+    ...(data.job_id !== undefined && { job_id: boundedField(data.job_id) }),
   };
 }
 

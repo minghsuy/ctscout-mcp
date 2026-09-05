@@ -3170,6 +3170,20 @@ describe("formatJobAsMarkdown", () => {
     }
   });
 
+  it("bounds oversized worker_version and result job_id before halving domains", () => {
+    const job = doneJob([proDiscoveredDomain("cna.com")]);
+    job.result = {
+      ...job.result,
+      worker_version: "v".repeat(30_000),
+      job_id: "j".repeat(30_000),
+    } as JobResponse["result"];
+    for (const { structured } of [formatJobAsMarkdown(job), truncateJobJsonIfNeeded(job)]) {
+      expect(JSON.stringify(structured).length).toBeLessThanOrEqual(25_000);
+      expect(structured.result?.domains).toHaveLength(1);
+      expect(structured.result?.worker_version).toContain("…(truncated, 30000 chars total)");
+    }
+  });
+
   it("drops an oversized signals_attempted before halving domains", () => {
     const job = doneJob([proDiscoveredDomain("cna.com")]);
     job.result = {
