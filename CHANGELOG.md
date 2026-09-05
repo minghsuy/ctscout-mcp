@@ -12,6 +12,13 @@ version heading so the exact package metadata and notes are reviewed together;
 
 ## [Unreleased]
 
+### Changed
+
+- README and LIMITATIONS describe what a Pro key gets today: more `/scan`
+  rows and a longer window on the same weekly snapshot, and evidence-backed
+  `confidence_band`s only through deep-dive jobs; no live enrichment on
+  `/scan`, no VLM (ctscout-worker#338)
+
 ## [0.4.0] - 2026-09-05
 
 ### Added
