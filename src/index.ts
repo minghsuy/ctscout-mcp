@@ -1424,7 +1424,7 @@ Args:
   - purpose ('underwriting' | 'corporate_family', optional): choose tight operational-attribution defaults or broader corporate-family defaults. Explicit matching controls override the preset.
   - response_format ('markdown' | 'json', default 'markdown'): output format.
 
-Returns (structuredContent always follows the declared outputSchema):
+Returns (on success, structuredContent follows the declared outputSchema; an error result — 401, 429, timeout — is isError with no structuredContent, so never dereference snapshot on a failed call):
   - "Attributed" means the organization is what the evidence names for that domain, not an ownership claim. On the free tier that evidence is always the OV/EV certificate subject. On the Pro tier (ScoutResult) it is the strongest available signal: the certificate subject when there is one, otherwise the RDAP registrant — check cert_org_names / rdap_org to see which. "Candidate" means a semantic name-similarity guess that is NOT an attribution.
   - In markdown: a snapshot line, then a table of (domain, attributed to, cert count, subdomain count). When nothing is attributed but match_type is 'semantic', a table of candidate organizations is rendered instead, labelled as candidates.
   - In JSON, structured as:
@@ -1538,7 +1538,7 @@ Args:
   - company_names (string[], required): 1–${MAX_BATCH_QUERIES} organization names. Partial matches work — 'Goldman' matches 'Goldman Sachs'. Each 2–200 chars.
   - response_format ('markdown' | 'json', default 'markdown'): output format.
 
-Returns (structuredContent always follows the declared outputSchema):
+Returns (on success, structuredContent follows the declared outputSchema; an error result — 401, 429, timeout — is isError with no structuredContent, so never dereference snapshot on a failed call):
   - "Attributed" and "candidate" mean exactly what they mean in ctscout_search_company: what the evidence names (cert subject on the free tier; cert subject else RDAP registrant on Pro) vs a semantic name-similarity guess that is NOT an attribution.
   - In markdown: a snapshot line, then one section per company (heading + the same attributed-domains table as ctscout_search_company; a candidate-organizations table when that name's match_type is 'semantic'), followed by remaining quota. Names that failed render an error line instead of a table.
   - In JSON, the batch envelope:
@@ -1613,7 +1613,7 @@ Args:
   - domains (string[], required): apex domains to look up. Each between 3 and 253 chars. Max 10 per call. Examples: ["gs.com"], ["coalition.com", "at-bay.com"].
   - response_format ('markdown' | 'json', default 'markdown'): output format.
 
-Returns (structuredContent always follows the declared outputSchema — the same one as ctscout_search_company):
+Returns (on success, structuredContent follows the declared outputSchema — the same one as ctscout_search_company; a failed call is isError with no structuredContent):
   - In markdown: a snapshot line, then a table of (domain, attributed to, cert count, subdomain count). Only domains found in the warehouse appear; a missing domain means no attribution in this snapshot, not a negative finding.
   - In JSON: the same structure as ctscout_search_company, including "snapshot" / "snapshot_source". The 'domains' array contains one entry per attributed (domain, org) pair found. Reverse lookups never return semantic candidates.
 
