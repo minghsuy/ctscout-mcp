@@ -1396,12 +1396,20 @@ function truncateWithRender(
   // Defaults to the whole-response budget. The batch renderer passes a smaller
   // per-company slice so one company's huge result can't starve the others.
   limit: number = CHARACTER_LIMIT,
+  // The hint the response carried before any halving (the API's own, or the
+  // job path's strip notice): it says why the result was already incomplete,
+  // so the halving notice is prefixed to it rather than replacing it. A
+  // caller that halves the same record twice passes the original so the
+  // second pass does not stack a second halving notice on the first.
+  priorHint: string | undefined = structured.upgrade_hint,
 ): {
   text: string;
   structured: ScanResponse;
 } {
   let currentText = text;
   let currentStructured = structured;
+  const prior = boundedField(priorHint);
+  const withPrior = (hint: string) => (prior ? `${hint} ${prior}` : hint);
   const originalCandidates = Array.isArray(structured.candidates)
     ? structured.candidates
     : undefined;
@@ -1413,7 +1421,7 @@ function truncateWithRender(
         ...currentStructured,
         domains: [],
         truncated: true,
-        upgrade_hint: truncationHint(0, structured.domains.length),
+        upgrade_hint: withPrior(truncationHint(0, structured.domains.length)),
       };
       currentText = render(currentStructured);
       break;
@@ -1424,7 +1432,7 @@ function truncateWithRender(
       ...currentStructured,
       domains: currentStructured.domains.slice(0, halved),
       truncated: true,
-      upgrade_hint: truncationHint(halved, structured.domains.length),
+      upgrade_hint: withPrior(truncationHint(halved, structured.domains.length)),
     };
     currentText = render(currentStructured);
   }
@@ -1442,10 +1450,12 @@ function truncateWithRender(
       ...currentStructured,
       candidates: currentStructured.candidates.slice(0, kept),
       truncated: true,
-      upgrade_hint: truncationHint(
-        kept,
-        originalCandidates?.length ?? currentStructured.candidates.length,
-        "semantic candidates",
+      upgrade_hint: withPrior(
+        truncationHint(
+          kept,
+          originalCandidates?.length ?? currentStructured.candidates.length,
+          "semantic candidates",
+        ),
       ),
     };
     currentText = render(currentStructured);
@@ -1904,7 +1914,8 @@ export function formatJobAsMarkdown(job: JobResponse): {
   // below measures rendered text, not the record. Halve against the record
   // first, then against the rendering, so both carry the same domains.
   const wrap = (s: ScanResponse) => JSON.stringify(wrapJob(stripped.job, s));
-  const fit = truncateWithRender(wrap(stripped.data), stripped.data, wrap);
+  const prior = stripped.data.upgrade_hint;
+  const fit = truncateWithRender(wrap(stripped.data), stripped.data, wrap, CHARACTER_LIMIT, prior);
   const label = jobResultLabel(job);
   const render = (s: ScanResponse) => demoteHeading(formatScanAsMarkdown(label, s));
   const { text, structured } = truncateWithRender(
@@ -1912,6 +1923,7 @@ export function formatJobAsMarkdown(job: JobResponse): {
     fit.structured,
     render,
     Math.max(0, CHARACTER_LIMIT - header.length - 2),
+    prior,
   );
   return {
     text: clampText(`${header}\n\n${text}`),

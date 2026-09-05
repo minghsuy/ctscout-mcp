@@ -110,6 +110,9 @@ One documented, transport-specific difference: this package advertises an
 (warehouse sync date) and `snapshot_source` (`"scan"` | `"unavailable"`) in
 `structuredContent`. A failed call (401, 429, timeout) is an `isError` result
 with no `structuredContent` at all, so do not dereference `snapshot` on it.
+The `ctscout_submit_deep_dive` receipt is the other exception: it is a job
+handle, not a warehouse read, so it carries neither field; both arrive on
+`ctscout_get_job` with the result.
 The hosted endpoint does not yet, and no API response carries `snapshot`
 today, so on this package `snapshot_source` is `"unavailable"` and `snapshot`
 is `null` until the API emits it. There is deliberately no client-side fallback

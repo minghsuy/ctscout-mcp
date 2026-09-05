@@ -2857,6 +2857,10 @@ describe("truncateReceiptJsonIfNeeded", () => {
 
   it("pretty-prints a receipt that fits, unchanged", () => {
     const { text, structured } = truncateReceiptJsonIfNeeded(receipt);
+    // A receipt is a job handle, not a warehouse read (README's documented
+    // exception to the snapshot fields).
+    expect(structured).not.toHaveProperty("snapshot");
+    expect(structured).not.toHaveProperty("snapshot_source");
     expect(structured).toBe(receipt);
     expect(JSON.parse(text)).toEqual(receipt);
     expect(text).toContain("\n  ");
@@ -3177,6 +3181,27 @@ describe("formatJobAsMarkdown", () => {
       expect(structured.result?.domains).toHaveLength(1);
       expect(structured.result).not.toHaveProperty("signals_attempted");
       expect(structured.result?.upgrade_hint).toContain("signals_attempted omitted");
+    }
+  });
+
+  it("appends the halving notice to the hint already on the record", () => {
+    const rows = Array.from({ length: 400 }, (_, i) => proDiscoveredDomain(`d${i}.cna.com`));
+    const job = doneJob(rows);
+    job.result = {
+      ...job.result,
+      truncated: true,
+      upgrade_hint: "Deep dive stopped at 400 domains (worker cap).",
+    } as JobResponse["result"];
+    for (const { structured } of [formatJobAsMarkdown(job), truncateJobJsonIfNeeded(job)]) {
+      expect(JSON.stringify(structured).length).toBeLessThanOrEqual(25_000);
+      const kept = structured.result?.domains.length ?? 0;
+      expect(kept).toBeGreaterThan(0);
+      expect(kept).toBeLessThan(400);
+      const hint = structured.result?.upgrade_hint ?? "";
+      expect(hint).toMatch(/^Response truncated to \d+ of 400 domains/);
+      expect(hint).toContain("Deep dive stopped at 400 domains (worker cap).");
+      // Halved twice (record, then rendering) but one halving notice.
+      expect(hint.match(/Response truncated to/g)).toHaveLength(1);
     }
   });
 
