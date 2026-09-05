@@ -14,6 +14,13 @@ version heading so the exact package metadata and notes are reviewed together;
 
 ### Added
 
+- `ctscout_submit_deep_dive` (`POST /jobs`) and `ctscout_get_job`
+  (`GET /jobs/{id}`): asynchronous Pro deep dives per ctscout-worker#344
+  contract v1. Submit returns a receipt; poll with backoff (30 s → 5 min) for
+  a result identical to a Pro `/scan` plus the worker-set `snapshot`,
+  `worker_version` and `signals_attempted`. VLM is not part of v1. Job
+  errors map 403 → Pro required (with the API's upgrade text), 404 → not
+  your job / unknown id, 429 → daily jobs quota (#107)
 - `outputSchema` on all three tools, enforced by the SDK against every
   `structuredContent`; proxied fields stay open so upstream additions widen
   rather than break the tool (#100)

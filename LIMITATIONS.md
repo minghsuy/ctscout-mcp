@@ -55,6 +55,10 @@ The `org` field is the cert subject text recorded by the CA. We do not independe
 
 When the Pro tier provides a `confidence_band`, it reflects the aggregated multi-signal corroboration (DNS, RDAP, visual brand verification, etc.) at the time of the query. It is not a guarantee, and it is not a substitute for first-party confirmation when the attribution is consequential.
 
+### Deep dives are asynchronous and partial in v1
+
+A Pro deep dive (`ctscout_submit_deep_dive` / `ctscout_get_job`) is not an answer, it is a job: the submission returns a receipt, a batch worker runs the multi-signal attribution some minutes later, and the result is read back by polling (about 30 s before the first poll, backing off toward 5 min). Its `snapshot` is the warehouse date the worker read from, which can lag the live site by up to a sync cycle. Visual brand verification (VLM) does not run in v1, so `vlm_status` is `pending` or `skipped` on every domain and no band has been VLM-vetoed; when `signals_degraded` is true, at least one signal errored and the absence of its evidence is not evidence of absence. Jobs are limited to 20 submissions per key per day, are visible only to the key that submitted them, and cannot yet be cancelled, retried or expired from this package.
+
 ### Brand-namesake collisions
 
 Common-word entity names produce noisy results. A search for "Coalition" returns the IMCTC counter-terrorism coalition, several non-profits, the cyber MGA (often as 0 hits since they're DV-only), and various unrelated orgs. Multi-signal corroboration on the Pro tier helps disambiguate but does not eliminate the issue.

@@ -2,11 +2,13 @@
 /**
  * MCP Server for ctscout.dev — domain discovery via Certificate Transparency.
  *
- * Wraps the public ctscout.dev /scan API. Three tools:
+ * Wraps the public ctscout.dev /scan and /jobs APIs. Five tools:
  *
  * - ctscout_search_company:       find domains attributed to an organization by name
  * - ctscout_search_company_batch: same, for up to 10 organization names in one call
  * - ctscout_lookup_domain:        reverse lookup — find the organization for one or more domains
+ * - ctscout_submit_deep_dive:     Pro only — queue an async multi-signal deep dive (POST /jobs)
+ * - ctscout_get_job:              poll a deep dive and read its result (GET /jobs/{id})
  *
  * Auth: requires an API key via the CTSCOUT_API_KEY environment variable.
  * Get a free key (no email, no signup) at https://ctscout.dev.
@@ -16,7 +18,7 @@
  * both the stateless 2026-07-28 server/discover era and legacy initialize
  * clients. The authoritative hosted contract is served at
  * https://ctscout.dev/mcp (Streamable HTTP transport). Both transports expose
- * the same three public tools while the longer-term shared-core/forwarding
+ * the same public tools while the longer-term shared-core/forwarding
  * migration continues in #72.
  */
 
@@ -33,6 +35,13 @@ import { z } from "zod";
 const API_BASE_URL = process.env.CTSCOUT_API_URL ?? "https://ctscout.dev";
 const SCAN_URL = `${API_BASE_URL}/scan`;
 const SCAN_BATCH_URL = `${API_BASE_URL}/scan/batch`;
+const JOBS_URL = `${API_BASE_URL}/jobs`;
+// Deep-dive spec limits and quota, per ctscout-worker#344 contract v1. The
+// Worker validates the spec exactly like /scan and re-enforces both; the copy
+// here gives a clean error before a network round-trip and lets the tool
+// description state the quota.
+const MAX_SEED_DOMAINS = 10;
+const JOBS_PER_DAY = 20;
 // Keep in lockstep with ctscout-worker's hosted MCP MAX_BATCH_QUERIES and REST
 // MAX_BATCH_SIZE. Both public transports accept 1–10 names; validation here is
 // belt-and-suspenders (a clean error before a network round-trip), while the
@@ -41,6 +50,9 @@ const MAX_BATCH_QUERIES = 10;
 const REQUEST_TIMEOUT_MS = 30_000;
 const CHARACTER_LIMIT = 25_000;
 const ERROR_BODY_LIMIT = 500;
+// Hard cap on every API-derived string a minimal envelope keeps (see
+// boundedField): the last-resort JSON fallbacks are bounded by construction.
+const ENVELOPE_STRING_LIMIT = 200;
 // Cap how many bytes of an error-response body we pull off the wire and
 // hold in memory before `truncateBody` (render time) gets to trim it for
 // display. Set well above ERROR_BODY_LIMIT so ordinary error bodies (JSON
@@ -56,6 +68,23 @@ const QUOTA_DEBITING_READ_ONLY_ANNOTATIONS = {
   // Retrying the same call consumes quota again and can change the response
   // to HTTP 429, so these tools are read-only but not idempotent.
   idempotentHint: false,
+  openWorldHint: true,
+} as const;
+// Submitting a deep dive creates a job row, debits the daily jobs quota and
+// starts batch work on the origin: not read-only, and a retry queues a second
+// job rather than returning the first.
+const SUBMIT_JOB_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: true,
+} as const;
+// Polling a job reads state and debits nothing (GET /jobs/{id} is outside the
+// scan and jobs quotas), so repeating the call is safe.
+const POLL_JOB_ANNOTATIONS = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
   openWorldHint: true,
 } as const;
 // Single-source the version from package.json — a hardcoded copy here has
@@ -85,14 +114,17 @@ enum ResponseFormat {
 export type ConfidenceBand = "verified" | "likely" | "possible" | "insufficient";
 export type VlmStatus = "cached" | "pending" | "skipped";
 
+// Every member is optional on the wire: a degraded signal run leaves the
+// band and the maps out (DeepDiveEnrichmentSchema), and the renderer falls
+// back per field. Reading a member without a guard is a type error.
 export interface ProEnrichment {
-  confidence_band: ConfidenceBand;
-  weight_total: number;
-  matched_via: string[];
-  evidence: Record<string, string>;
-  signal_health: Record<string, string>;
-  vlm_status: VlmStatus;
-  vlm_override: boolean;
+  confidence_band?: ConfidenceBand;
+  weight_total?: number;
+  matched_via?: string[];
+  evidence?: Record<string, string>;
+  signal_health?: Record<string, string>;
+  vlm_status?: VlmStatus;
+  vlm_override?: boolean;
 }
 
 export interface DomainResult {
@@ -206,6 +238,76 @@ function isBatchError(
   return "error" in item && item.error != null;
 }
 
+// ---------- Async deep-dive jobs (ctscout-worker#344 contract v1) ----------
+
+export type JobStatus = "queued" | "running" | "done" | "failed";
+
+// What the deep-dive spec carries: the same two inputs /scan validates.
+export interface DeepDiveSpec {
+  company_name?: string;
+  seed_domain?: string[];
+}
+
+// 202 body of POST /jobs.
+export interface JobSubmitResponse {
+  job_id: string;
+  status: JobStatus;
+  submitted_at: string;
+  // Relative path to poll, e.g. "/jobs/<id>"; informational, the tool polls
+  // through ctscout_get_job.
+  poll?: string;
+  [k: string]: unknown;
+}
+
+// The deep-dive result the batch worker writes: a Pro /scan result
+// (ProScanResult: entity, domains with enrichment, run_metadata, source,
+// signals_degraded) plus job_id, snapshot, worker_version and
+// signals_attempted. Modelled as a ScanResponse so the scan renderers and
+// truncation envelopes apply unchanged; `snapshot` here is the worker-set
+// warehouse date, not this server's resolved copy.
+export type DeepDiveEnrichment = ProEnrichment;
+
+// One deep-dive row: a DomainResult plus the attribution the batch worker
+// adds and the embedded free-tier discovery record.
+export interface DeepDiveDomain extends DomainResult {
+  attributed_to?: string;
+  is_seed?: boolean;
+  base?: Record<string, unknown>;
+}
+
+// The deep-dive result the batch worker writes: a Pro /scan result
+// (ProScanResult: entity, domains with enrichment, run_metadata, source,
+// signals_degraded) plus job_id, snapshot, worker_version and
+// signals_attempted. A ScanResponse, so the scan renderers and truncation
+// envelopes apply unchanged; `snapshot` here is the worker-set warehouse
+// date, not this server's resolved copy.
+export type DeepDiveResult = ScanResponse & {
+  domains: DeepDiveDomain[];
+  entity?: { company_name?: string; seed_domain?: string[] };
+  run_metadata?: Record<string, unknown>;
+  signals_degraded?: boolean;
+  job_id?: string;
+  worker_version?: string;
+  signals_attempted?: string[];
+};
+
+// Body of GET /jobs/{id}. `result` is present only when status is "done";
+// `error` only when "failed".
+export interface JobResponse {
+  job_id: string;
+  kind?: string;
+  status: JobStatus;
+  submitted_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  result?: DeepDiveResult;
+  error?: string | null;
+  // Set by this server (never by the API): resolved from result.snapshot.
+  snapshot?: string | null;
+  snapshot_source?: SnapshotSource;
+  [k: string]: unknown;
+}
+
 // ---------- Zod schemas ----------
 
 const SearchCompanyInputSchema = z
@@ -314,6 +416,73 @@ export const SearchCompanyBatchInputSchema = z
   .strict();
 
 type SearchCompanyBatchInput = z.infer<typeof SearchCompanyBatchInputSchema>;
+
+// Exported so tests can drive the client-side spec validation (at least one of
+// company_name / seed_domain, seed cap) without the registered handler.
+export const SubmitDeepDiveInputSchema = z
+  .object({
+    company_name: z
+      .string()
+      .min(2, "company_name must be at least 2 characters")
+      .max(200, "company_name must not exceed 200 characters")
+      .optional()
+      .describe(
+        "Organization name to deep-dive, matched exactly as in ctscout_search_company. " +
+          "Give company_name, seed_domain, or both.",
+      ),
+    seed_domain: z
+      .array(z.string().min(3).max(253))
+      .min(1, "seed_domain must not be empty when given")
+      .max(MAX_SEED_DOMAINS, `At most ${MAX_SEED_DOMAINS} seed domains per deep dive`)
+      .optional()
+      .describe(
+        "Known apex domains of the organization to pivot from (e.g. ['gs.com']). " +
+          `Max ${MAX_SEED_DOMAINS}. Give company_name, seed_domain, or both.`,
+      ),
+    response_format: z
+      .nativeEnum(ResponseFormat)
+      .default(ResponseFormat.MARKDOWN)
+      .describe(
+        "Output format: 'markdown' for a submission receipt with polling guidance, " +
+          "'json' for the raw 202 body ({job_id, status, submitted_at, poll}).",
+      ),
+  })
+  .strict()
+  .refine((spec) => spec.company_name !== undefined || spec.seed_domain !== undefined, {
+    message: "Provide company_name, seed_domain, or both",
+  })
+  // A refine is invisible to tools/list: without this, the advertised schema
+  // shows both fields optional and a client planning from it can submit {}.
+  // The anyOf is what discovery sees; the refine is what runs.
+  .meta({ anyOf: [{ required: ["company_name"] }, { required: ["seed_domain"] }] });
+
+type SubmitDeepDiveInput = z.infer<typeof SubmitDeepDiveInputSchema>;
+
+// job_id is interpolated into the request path: the character class keeps a
+// hostile id ("../keys", "?x=") from rewriting the URL before
+// encodeURIComponent ever sees it.
+export const GetJobInputSchema = z
+  .object({
+    job_id: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(
+        /^[A-Za-z0-9_-]+$/,
+        "job_id must be the opaque id returned by ctscout_submit_deep_dive",
+      )
+      .describe("The job_id returned by ctscout_submit_deep_dive."),
+    response_format: z
+      .nativeEnum(ResponseFormat)
+      .default(ResponseFormat.MARKDOWN)
+      .describe(
+        "Output format: 'markdown' for the job status and, once done, the same " +
+          "attribution table as a Pro scan; 'json' for the raw job record.",
+      ),
+  })
+  .strict();
+
+type GetJobInput = z.infer<typeof GetJobInputSchema>;
 
 // ---------- Output schemas ----------
 //
@@ -426,6 +595,149 @@ const BatchOutputSchema = z.object({
   ...SnapshotFields,
 });
 
+const JobSubmitOutputSchema = z.looseObject({
+  job_id: z.string().describe("Opaque id; pass it to ctscout_get_job."),
+  status: z.string().describe("'queued' on submission."),
+  submitted_at: z.string().describe("Submission time as reported by the API."),
+  poll: z.string().optional().describe("Relative API path to poll (informational)."),
+});
+
+// Per-domain enrichment evidence of a deep dive (ProDomainEvidence in
+// domain-scout-api's pro_models). Proxied verbatim: loose and optional, with
+// the vocabularies documented rather than closed, as for every proxied enum.
+const DeepDiveEnrichmentSchema = z.looseObject({
+  confidence_band: z
+    .string()
+    .optional()
+    .describe(
+      "Attribution band from the enrichment scorer: 'verified' | 'likely' | 'possible' | " +
+        "'insufficient'. Rendered as reported, never recomputed here.",
+    ),
+  weight_total: z
+    .number()
+    .optional()
+    .describe("Summed signal weights behind the band; can be positive under a VLM override."),
+  matched_via: z
+    .array(z.string())
+    .optional()
+    .describe("Signals that corroborated the attribution."),
+  evidence: z
+    .record(z.string(), z.string())
+    .optional()
+    .describe("Signal name -> human-readable evidence string for that signal."),
+  signal_health: z
+    .record(z.string(), z.string())
+    .optional()
+    .describe(
+      "Signal name -> disposition: 'hit' | 'miss' (checked, nothing found) | 'error' (collector " +
+        "failed, NOT checked) | 'redacted' | 'verified' | 'no' | 'uncertain' | 'unscored' " +
+        "(collected, no detector reads it yet; never moves the band).",
+    ),
+  vlm_status: z
+    .string()
+    .optional()
+    .describe(
+      "'cached' | 'pending' | 'skipped'. v1 deep dives never run the VLM: 'pending' or 'skipped'.",
+    ),
+  vlm_override: z
+    .boolean()
+    .optional()
+    .describe(
+      "true when a VLM 'no' verdict forced the band to 'insufficient' regardless of weight_total.",
+    ),
+});
+
+// A deep-dive domain row (ProDiscoveredDomain): the Pro /scan row plus the
+// embedded discovery evidence and the enrichment above.
+const DeepDiveDomainSchema = DomainResultSchema.extend({
+  is_seed: z
+    .boolean()
+    .optional()
+    .describe("true when the domain was a seed_domain of the request."),
+  base: z
+    .looseObject({})
+    .optional()
+    .describe(
+      "The underlying discovery record (DiscoveredDomain: confidence, sources, evidence, " +
+        "cert_org_names, rdap_org, first_seen, last_seen, resolves) the enrichment was scored on.",
+    ),
+  enrichment: DeepDiveEnrichmentSchema.optional().describe(
+    "Enrichment evidence behind attributed_to. Absent on a degraded row: the collectors " +
+      "did not run or failed for this domain, so the attribution stands without evidence " +
+      "(see signals_degraded on the result). Still a deep-dive row.",
+  ),
+});
+
+// The deep-dive result: a Pro /scan result plus the fields the batch worker
+// adds. Proxied, so loose; only `domains` is required, as on ScanOutputSchema.
+const DeepDiveResultSchema = ScanOutputSchema.omit({
+  snapshot: true,
+  snapshot_source: true,
+}).extend({
+  domains: z
+    .array(DeepDiveDomainSchema)
+    .describe("Attributed apex domains with their evidence. Empty when nothing is attributed."),
+  entity: z
+    .looseObject({
+      company_name: z.string().optional(),
+      seed_domain: z.array(z.string()).optional(),
+    })
+    .optional()
+    .describe("The spec the deep dive ran on, as the batch worker validated it."),
+  run_metadata: z
+    .looseObject({})
+    .optional()
+    .describe(
+      "Audit record of the discovery run (tool_version, timestamp, elapsed_seconds, " +
+        "domains_found, timed_out, errors, config).",
+    ),
+  signals_attempted: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Apex-keyed enrichment signals this deployment ran (or read from cache) for every " +
+        "domain, set even with zero domains. A signal absent here was not configured; one " +
+        "present with signal_health 'error' was attempted and failed.",
+    ),
+  snapshot_source: SnapshotFields.snapshot_source
+    .optional()
+    .describe(
+      "Set by this server from result.snapshot: 'scan' when the batch worker reported the " +
+        "date, 'unavailable' when it did not. Mirrors the top-level snapshot_source.",
+    ),
+  job_id: z.string().optional(),
+  snapshot: z
+    .string()
+    .nullable()
+    .optional()
+    .describe(
+      "Warehouse date (YYYY-MM-DD) the deep dive read from; set by the batch worker on every result.",
+    ),
+  worker_version: z.string().optional().describe("Batch worker git sha that produced the result."),
+  signals_degraded: z
+    .boolean()
+    .optional()
+    .describe(
+      "true when at least one enrichment signal errored: absence of evidence for those signals is not evidence of absence.",
+    ),
+});
+
+const JobOutputSchema = z.looseObject({
+  job_id: z.string(),
+  kind: z.string().optional().describe("'deep_dive'."),
+  status: z.string().describe("'queued' | 'running' | 'done' | 'failed'."),
+  submitted_at: z.string(),
+  started_at: z.string().nullable().optional(),
+  finished_at: z.string().nullable().optional(),
+  result: DeepDiveResultSchema.optional().describe("Present only when status is 'done'."),
+  error: z
+    .string()
+    .nullable()
+    .optional()
+    .describe("Short 'type: message' reason, present only when status is 'failed'."),
+  ...SnapshotFields,
+});
+
 // ---------- Shared utilities ----------
 
 export function getApiKey(): string {
@@ -498,25 +810,26 @@ async function readBoundedText(response: Response, maxBytes: number): Promise<st
   return new TextDecoder().decode(capped);
 }
 
-// Shared POST core for /scan and /scan/batch: identical auth, headers,
-// timeout, and bounded-error-body handling (readBoundedText, #57). The two
-// endpoints differ only in URL and request/response shape, so both tools
-// inherit the same error-capture bound rather than duplicating it.
-async function postScan<T>(url: string, body: unknown): Promise<T> {
+// Shared request core for /scan, /scan/batch and /jobs: identical auth,
+// headers, timeout, and bounded-error-body handling (readBoundedText, #57).
+// The endpoints differ only in URL, method and request/response shape, so
+// every tool inherits the same error-capture bound rather than duplicating it.
+// `body` undefined means a body-less request (GET).
+async function callApi<T>(url: string, method: "GET" | "POST", body?: unknown): Promise<T> {
   const apiKey = getApiKey();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
   try {
     const response = await fetch(url, {
-      method: "POST",
+      method,
       headers: {
-        "Content-Type": "application/json",
+        ...(body !== undefined && { "Content-Type": "application/json" }),
         Accept: "application/json",
         "X-API-Key": apiKey,
         "User-Agent": USER_AGENT,
       },
-      body: JSON.stringify(body),
+      ...(body !== undefined && { body: JSON.stringify(body) }),
       signal: controller.signal,
       redirect: "error",
     });
@@ -541,7 +854,7 @@ async function postScan<T>(url: string, body: unknown): Promise<T> {
 }
 
 export async function callScan(body: ScanRequestBody): Promise<ScanResponse> {
-  return postScan<ScanResponse>(SCAN_URL, body);
+  return callApi<ScanResponse>(SCAN_URL, "POST", body);
 }
 
 // POST /scan/batch: one envelope, per-query results in input order. The
@@ -549,7 +862,21 @@ export async function callScan(body: ScanRequestBody): Promise<ScanResponse> {
 // the worker re-enforces server-side (>10 → 400) and debits quota by the
 // batch length.
 export async function callScanBatch(queries: ScanRequestBody[]): Promise<ScanBatchResponse> {
-  return postScan<ScanBatchResponse>(SCAN_BATCH_URL, { queries });
+  return callApi<ScanBatchResponse>(SCAN_BATCH_URL, "POST", { queries });
+}
+
+// POST /jobs: queue a deep dive. 202 with the job receipt; 403 for a non-Pro
+// key, 429 over JOBS_PER_DAY. Nothing on the request path touches the batch
+// worker: the Worker records the job and returns.
+export async function callSubmitJob(spec: DeepDiveSpec): Promise<JobSubmitResponse> {
+  return callApi<JobSubmitResponse>(JOBS_URL, "POST", spec);
+}
+
+// GET /jobs/{id}: the job record; `result` only once done. 404 for an id the
+// calling key did not submit (ids are scoped to the key, so "not yours" and
+// "unknown" are the same answer).
+export async function callGetJob(jobId: string): Promise<JobResponse> {
+  return callApi<JobResponse>(`${JOBS_URL}/${encodeURIComponent(jobId)}`, "GET");
 }
 
 // Attach the snapshot date to a /scan or /scan/batch payload. Only a
@@ -595,7 +922,59 @@ function truncateBody(text: string, max = ERROR_BODY_LIMIT): string {
   return `${text.slice(0, max)}…(truncated, ${text.length} chars total)`;
 }
 
-export function explainError(err: unknown): string {
+// Every string a minimal envelope retains is proxied from the API and so
+// unbounded; capping each one is what makes the envelope's size a constant
+// the last-resort fallback can rely on. Same marker as truncateBody.
+function boundedField<T extends string | null | undefined>(value: T): T {
+  return (typeof value === "string" ? truncateBody(value, ENVELOPE_STRING_LIMIT) : value) as T;
+}
+
+// The Worker's 403 for a non-Pro key on /jobs carries `upgrade_hint`; surface
+// it verbatim (bounded and escaped like any error body) so the reader sees the
+// API's own upgrade text rather than a copy typed here that can drift.
+function upgradeHintFrom(body: string): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (parsed && typeof parsed === "object" && "upgrade_hint" in parsed) {
+      const hint = (parsed as { upgrade_hint: unknown }).upgrade_hint;
+      if (typeof hint === "string" && hint.trim().length > 0) return hint;
+    }
+  } catch {
+    // not JSON — no hint to surface
+  }
+  return undefined;
+}
+
+// Which endpoint family produced an ApiError. 403/404/429 mean different
+// things on /jobs than on /scan (Pro gate, job ownership, jobs quota), so the
+// job tools pass "jobs"; everything else shares the scan mapping.
+export type ErrorSurface = "scan" | "jobs";
+
+export function explainError(err: unknown, surface: ErrorSurface = "scan"): string {
+  if (err instanceof ApiError && surface === "jobs") {
+    switch (err.status) {
+      case 403: {
+        const hint = upgradeHintFrom(err.responseBody);
+        const upgrade = hint
+          ? escapeMarkdown(truncateBody(hint.replace(/[\r\n]+/g, " ")))
+          : "Pro is concierge-only: email pro@ctscout.dev for early access.";
+        return `Deep dives require a Pro key; the key in CTSCOUT_API_KEY is not Pro. ${upgrade}`;
+      }
+      case 404:
+        return (
+          "No job with that id for this API key. Job ids are scoped to the key that " +
+          "submitted them, so this is either not your job or an unknown id; use the " +
+          "job_id returned by ctscout_submit_deep_dive."
+        );
+      case 429:
+        return (
+          `Daily deep-dive quota exceeded (${JOBS_PER_DAY} submissions per key per day). ` +
+          "Jobs already submitted keep running and can still be polled with ctscout_get_job."
+        );
+      default:
+        break;
+    }
+  }
   if (err instanceof ApiError) {
     const safeBody = escapeMarkdown(truncateBody(err.responseBody));
     switch (err.status) {
@@ -752,7 +1131,7 @@ export function formatScanAsMarkdown(
       }
       if (response.truncated && response.upgrade_hint) {
         lines.push("");
-        lines.push(`> ${response.upgrade_hint}`);
+        lines.push(`> ${cellSafe(response.upgrade_hint, ENVELOPE_STRING_LIMIT)}`);
       }
       return lines.join("\n");
     }
@@ -769,7 +1148,7 @@ export function formatScanAsMarkdown(
     if (response.truncated && response.upgrade_hint) {
       lines.push("All matching results were dropped to keep the response under the size limit.");
       lines.push("");
-      lines.push(`> ${response.upgrade_hint}`);
+      lines.push(`> ${cellSafe(response.upgrade_hint, ENVELOPE_STRING_LIMIT)}`);
       return lines.join("\n");
     }
     lines.push(
@@ -792,20 +1171,40 @@ export function formatScanAsMarkdown(
   // If it ever did, rows after the first would render through the wrong
   // column mapping (formatTable's per-row `??` fallbacks degrade to "—"
   // rather than throwing).
+  //
+  // A ProDiscoveredDomain (the deep-dive result, ProScanResult) also carries
+  // `domain` without `apex_domain`, but has `enrichment` — that is the band /
+  // signals table. A degraded deep-dive row can lack `enrichment` while the
+  // rows after it carry one, so the Pro shape is read from the source and
+  // from every row, not from the first row alone.
   const first = response.domains[0];
-  const isScoutResult = typeof first.domain === "string" && typeof first.apex_domain !== "string";
+  const proSource = response.source === "live-enriched" || response.source === "cache-only";
+  // `attributed_to` is the batch worker's claim on a row; a ScoutResult row
+  // never carries it, so a deep dive whose rows are all degraded (no
+  // enrichment) and whose source is absent is still told apart.
+  const anyPro = response.domains.some((d) => d.enrichment != null || d.attributed_to != null);
+  const isScoutResult =
+    !proSource &&
+    !anyPro &&
+    typeof first.domain === "string" &&
+    typeof first.apex_domain !== "string";
 
-  // Phase-5 fictional Pro detection (kept for backward compat). Only
-  // considered when the response isn't already ScoutResult-shaped.
-  const isPhase5Pro =
-    !isScoutResult &&
-    (response.source === "live-enriched" ||
-      response.source === "cache-only" ||
-      response.domains.some((d) => d.enrichment != null));
+  // Phase-5 Pro detection (ProScanResult shape, also the original assumed
+  // Pro shape). Only considered when the response isn't ScoutResult-shaped.
+  // An explicit free-tier source is authoritative: a warehouse row may carry
+  // attributed_to (the schema permits it) without being a Pro response.
+  const freeSource = response.source === "warehouse" || response.source === "live";
+  const isPhase5Pro = !isScoutResult && !freeSource && (proSource || anyPro);
 
   const isPro = isScoutResult || isPhase5Pro;
   const totalDisplay = response.total ?? response.domains.length;
-  const sourceDisplay = response.source ?? (isScoutResult ? "scout-result" : "unknown");
+  // Every API-provided string the renderer prints is capped (upgrade_hint and
+  // source here, cells in formatTable): the halving loop can only remove rows,
+  // so a scalar over budget would otherwise leave nothing for it to cut.
+  const sourceDisplay = cellSafe(
+    response.source ?? (isScoutResult ? "scout-result" : "unknown"),
+    40,
+  );
 
   lines.push(
     `Returned **${response.domains.length}** attributed domain(s) of ${totalDisplay} total. ` +
@@ -813,7 +1212,7 @@ export function formatScanAsMarkdown(
   );
   if (response.truncated && response.upgrade_hint) {
     lines.push("");
-    lines.push(`> ${response.upgrade_hint}`);
+    lines.push(`> ${cellSafe(response.upgrade_hint, ENVELOPE_STRING_LIMIT)}`);
   }
   lines.push("");
 
@@ -859,15 +1258,18 @@ function formatTable(domains: DomainResult[], kind: TableKind): string {
         // Mixed-tier response (degraded apex from `_degraded()` in Pro /scan).
         rows.push(`| \`${cellSafe(domain, 60)}\` | ${cellSafe(org, 50)} | _missing_ | — | — |`);
       } else {
+        // The advertised schema keeps every enrichment field optional, so a
+        // schema-valid row can lack any of them: render absent as empty.
         const bandEmoji = bandIndicator(enriched.confidence_band);
         const overrideTag = enriched.vlm_override ? " 🚫VLM-veto" : "";
-        const signalSummary = enriched.matched_via.length
-          ? enriched.matched_via.slice(0, 3).join(", ") +
-            (enriched.matched_via.length > 3 ? `, +${enriched.matched_via.length - 3}` : "")
+        const matchedVia = Array.isArray(enriched.matched_via) ? enriched.matched_via : [];
+        const signalSummary = matchedVia.length
+          ? matchedVia.slice(0, 3).join(", ") +
+            (matchedVia.length > 3 ? `, +${matchedVia.length - 3}` : "")
           : "_none_";
         const topEvidence = topEvidenceLine(enriched.evidence);
         rows.push(
-          `| \`${cellSafe(domain, 60)}\` | ${cellSafe(org, 50)} | ${bandEmoji} ${enriched.confidence_band}${overrideTag} | ${cellSafe(signalSummary)} | ${topEvidence} |`,
+          `| \`${cellSafe(domain, 60)}\` | ${cellSafe(org, 50)} | ${bandEmoji} ${cellSafe(enriched.confidence_band, 20)}${overrideTag} | ${cellSafe(signalSummary)} | ${topEvidence} |`,
         );
       }
     } else if (kind === "scout") {
@@ -923,12 +1325,12 @@ function cellSafe(s: string | null | undefined, maxLen = 80): string {
     .replace(/[\r\n]+/g, " ")
     .trim();
   if (stripped.length === 0) return "—";
-  return stripped.length > maxLen ? `${stripped.slice(0, maxLen - 1)}…` : stripped;
+  return capLength(stripped, maxLen);
 }
 
 // ---------- Phase-5 fictional Pro renderer helpers (kept for compat) ----------
 
-function bandIndicator(band: ConfidenceBand): string {
+function bandIndicator(band: ConfidenceBand | undefined): string {
   switch (band) {
     case "verified":
       return "✅";
@@ -938,6 +1340,8 @@ function bandIndicator(band: ConfidenceBand): string {
       return "🟡";
     case "insufficient":
       return "⚪";
+    default:
+      return "❔";
   }
 }
 
@@ -955,17 +1359,24 @@ const EVIDENCE_PRIORITY = [
   "vlm_verdict_no",
 ];
 
-function topEvidenceLine(evidence: Record<string, string>): string {
+function topEvidenceLine(evidence: Record<string, string> | null | undefined): string {
+  if (evidence == null || typeof evidence !== "object") return "_no evidence_";
   for (const key of EVIDENCE_PRIORITY) {
-    if (key in evidence) {
-      return escapeForTable(evidence[key]);
+    if (key in evidence && typeof evidence[key] === "string") {
+      return escapeForTable(capLength(evidence[key], 80));
     }
   }
-  // Fallback: first key in dict order
+  // Fallback: first string value in dict order
   for (const key in evidence) {
-    return escapeForTable(evidence[key]);
+    if (typeof evidence[key] === "string") return escapeForTable(capLength(evidence[key], 80));
   }
   return "_no evidence_";
+}
+
+// Ellipsis-cap a string past `maxLen`, the cellSafe rule without its cell
+// sanitizing, for strings that go through escapeForTable instead.
+function capLength(s: string, maxLen: number): string {
+  return s.length > maxLen ? `${s.slice(0, maxLen - 1)}…` : s;
 }
 
 // Defensive: pipe AND any line terminator (CR, LF, CRLF) would break the
@@ -1016,12 +1427,24 @@ function truncateWithRender(
   // Defaults to the whole-response budget. The batch renderer passes a smaller
   // per-company slice so one company's huge result can't starve the others.
   limit: number = CHARACTER_LIMIT,
+  // The hint the response carried before any halving (the API's own, or the
+  // job path's strip notice): it says why the result was already incomplete,
+  // so the halving notice is prefixed to it rather than replacing it. A
+  // caller that halves the same record twice passes the original so the
+  // second pass does not stack a second halving notice on the first.
+  priorHint: string | undefined = structured.upgrade_hint,
+  // The domain count the hint reports against; the same caller passes the
+  // pre-halving count so the second pass does not report the first's output
+  // as the total.
+  originalTotal: number = structured.domains.length,
 ): {
   text: string;
   structured: ScanResponse;
 } {
   let currentText = text;
   let currentStructured = structured;
+  const prior = boundedField(priorHint);
+  const withPrior = (hint: string) => (prior ? `${hint} ${prior}` : hint);
   const originalCandidates = Array.isArray(structured.candidates)
     ? structured.candidates
     : undefined;
@@ -1033,7 +1456,7 @@ function truncateWithRender(
         ...currentStructured,
         domains: [],
         truncated: true,
-        upgrade_hint: truncationHint(0, structured.domains.length),
+        upgrade_hint: withPrior(truncationHint(0, originalTotal)),
       };
       currentText = render(currentStructured);
       break;
@@ -1044,7 +1467,7 @@ function truncateWithRender(
       ...currentStructured,
       domains: currentStructured.domains.slice(0, halved),
       truncated: true,
-      upgrade_hint: truncationHint(halved, structured.domains.length),
+      upgrade_hint: withPrior(truncationHint(halved, originalTotal)),
     };
     currentText = render(currentStructured);
   }
@@ -1062,10 +1485,12 @@ function truncateWithRender(
       ...currentStructured,
       candidates: currentStructured.candidates.slice(0, kept),
       truncated: true,
-      upgrade_hint: truncationHint(
-        kept,
-        originalCandidates?.length ?? currentStructured.candidates.length,
-        "semantic candidates",
+      upgrade_hint: withPrior(
+        truncationHint(
+          kept,
+          originalCandidates?.length ?? currentStructured.candidates.length,
+          "semantic candidates",
+        ),
       ),
     };
     currentText = render(currentStructured);
@@ -1112,27 +1537,34 @@ export function truncateJsonIfNeeded(structured: ScanResponse): {
   // Markdown can't hit this — it only renders known fields — so match its
   // bound by emitting a minimal valid envelope of known, bounded fields.
   if (result.text.length > CHARACTER_LIMIT) {
-    const minimal: ScanResponse = {
-      domains: [],
-      total: structured.total,
-      truncated: true,
-      upgrade_hint: fullyTruncatedHint(structured),
-      source: structured.source,
-      match_type: structured.match_type,
-      org_match_strategy: structured.org_match_strategy,
-      ...(structured.empty_reason !== undefined && {
-        empty_reason: structured.empty_reason,
-      }),
-      ...(Array.isArray(structured.candidates) && { candidates: [] }),
-      ...(structured.snapshot_source !== undefined && {
-        snapshot: structured.snapshot ?? null,
-        snapshot_source: structured.snapshot_source,
-      }),
-    };
+    const minimal = minimalScanEnvelope(structured);
     return { text: JSON.stringify(minimal), structured: minimal };
   }
 
   return result;
+}
+
+// The smallest valid ScanResponse for a payload whose top-level fields alone
+// exceed the budget: known fields only, every retained string capped at
+// ENVELOPE_STRING_LIMIT, snapshot kept when present.
+function minimalScanEnvelope(structured: ScanResponse): ScanResponse {
+  return {
+    domains: [],
+    total: structured.total,
+    truncated: true,
+    upgrade_hint: fullyTruncatedHint(structured),
+    source: boundedField(structured.source),
+    match_type: boundedField(structured.match_type),
+    org_match_strategy: boundedField(structured.org_match_strategy),
+    ...(structured.empty_reason !== undefined && {
+      empty_reason: boundedField(structured.empty_reason),
+    }),
+    ...(Array.isArray(structured.candidates) && { candidates: [] }),
+    ...(structured.snapshot_source !== undefined && {
+      snapshot: boundedField(structured.snapshot ?? null),
+      snapshot_source: structured.snapshot_source,
+    }),
+  };
 }
 
 // ---------- Batch rendering + fair-share budgeting ----------
@@ -1393,6 +1825,492 @@ export function truncateBatchJsonIfNeeded(batch: ScanBatchResponse): {
   }
 
   return { text, structured };
+}
+
+// ---------- Deep-dive job rendering ----------
+
+const POLL_GUIDANCE =
+  "Poll with ctscout_get_job: wait about 30 s before the first poll, then back off " +
+  "toward 5 min between polls. The batch worker picks up queued jobs every few minutes.";
+
+export function formatJobSubmittedAsMarkdown(
+  spec: DeepDiveSpec,
+  receipt: JobSubmitResponse,
+): string {
+  const target = [
+    ...(spec.company_name !== undefined ? [cellSafe(spec.company_name, 200)] : []),
+    ...(spec.seed_domain !== undefined ? [cellSafe(spec.seed_domain.join(", "), 200)] : []),
+  ].join(" / ");
+  return [
+    "# ctscout deep dive submitted",
+    "",
+    `- Target: ${target}`,
+    `- Job id: \`${cellSafe(receipt.job_id, 64)}\``,
+    `- Status: \`${cellSafe(receipt.status, 20)}\``,
+    `- Submitted at: ${cellSafe(receipt.submitted_at, 40)}`,
+    "",
+    `Asynchronous — nothing is attributed yet. ${POLL_GUIDANCE}`,
+  ].join("\n");
+}
+
+// A deep dive's label in the results heading: the entity name the worker
+// echoes, else the seed domains, else the job id.
+function jobResultLabel(job: JobResponse): string {
+  const entity = job.result?.entity;
+  if (entity && typeof entity === "object") {
+    const { company_name, seed_domain } = entity as DeepDiveSpec;
+    if (typeof company_name === "string" && company_name.length > 0) return company_name;
+    if (Array.isArray(seed_domain) && seed_domain.length > 0) return seed_domain.join(", ");
+  }
+  return job.job_id;
+}
+
+// Everything about the job except the result: status lines, and for a job
+// that is not done, what to do next. Bounded API-derived strings only.
+function jobHeader(job: JobResponse): string {
+  const lines = [
+    `# ctscout deep dive \`${cellSafe(job.job_id, 64)}\``,
+    "",
+    `- Status: \`${cellSafe(job.status, 20)}\``,
+    `- Submitted at: ${cellSafe(job.submitted_at, 40)}`,
+  ];
+  if (job.started_at) lines.push(`- Started at: ${cellSafe(job.started_at, 40)}`);
+  if (job.finished_at) lines.push(`- Finished at: ${cellSafe(job.finished_at, 40)}`);
+  switch (job.status) {
+    case "queued":
+    case "running":
+      lines.push("", `Not finished yet; no attribution to report. ${POLL_GUIDANCE}`);
+      break;
+    case "failed":
+      lines.push(
+        `- Error: ${escapeMarkdown(truncateBody(String(job.error ?? "").replace(/[\r\n]+/g, " "))) || "—"}`,
+        "",
+        "The deep dive failed; there is no result. Submit a new one with ctscout_submit_deep_dive if the cause was transient.",
+      );
+      break;
+    case "done":
+      if (job.result?.signals_degraded === true) {
+        lines.push(
+          "- ⚠️ Signals degraded: one or more enrichment collectors failed on this run. " +
+            "Absent evidence on a row is not a negative signal.",
+        );
+      }
+      if (job.result?.worker_version) {
+        lines.push(`- Worker version: ${cellSafe(job.result.worker_version, 40)}`);
+      }
+      lines.push(
+        "",
+        "_Visual brand verification (VLM) is not part of deep dives in v1: vlm_status stays pending or skipped and never vetoes a band._",
+      );
+      break;
+    default:
+      break;
+  }
+  return lines.join("\n");
+}
+
+// The result as a ScanResponse with this server's snapshot fields resolved
+// from the worker-set date, so the scan renderers and envelopes apply as-is.
+function jobResultData(job: JobResponse): DeepDiveResult | undefined {
+  if (job.status !== "done" || job.result == null) return undefined;
+  const result = job.result;
+  return {
+    ...result,
+    domains: Array.isArray(result.domains) ? result.domains : [],
+    ...resolveSnapshot(result),
+  };
+}
+
+// The job record this server returns: the API's record, the (possibly
+// truncated) result, and the top-level snapshot fields every tool carries.
+function wrapJob(job: JobResponse, result: DeepDiveResult | undefined): JobResponse {
+  // The status decides what the record carries, whatever the API attached:
+  // a result only when done, an error only when failed. The markdown shows
+  // nothing else, so structuredContent exposes nothing else.
+  const { result: _result, error, ...rest } = job;
+  const record: JobResponse = {
+    ...rest,
+    ...(job.status === "failed" && error != null && { error }),
+  };
+  if (result === undefined) {
+    return { ...record, snapshot: null, snapshot_source: "unavailable" };
+  }
+  return {
+    ...record,
+    result,
+    snapshot: result.snapshot ?? null,
+    snapshot_source: result.snapshot_source ?? "unavailable",
+  };
+}
+
+// Markdown: the job header, then (when done) the Pro attribution table under
+// it, bounded by the same halving loop as a single scan within what the
+// header leaves of the character budget.
+export function formatJobAsMarkdown(job: JobResponse): {
+  text: string;
+  structured: JobResponse;
+} {
+  const header = jobHeader(job);
+  const rawData = jobResultData(job);
+  if (rawData === undefined) {
+    return { text: clampText(header), structured: boundedJobRecord(job, undefined) };
+  }
+  // Shrink the record before rendering, so the markdown is rendered from
+  // the same structure the client receives (and shows the strip hint).
+  const stripped = stripNonRendered(job, rawData);
+  // The structured record must fit the JSON budget on its own: stripping can
+  // leave it just over once the hint is attached, and the markdown limit
+  // below measures rendered text, not the record. Halve against the record
+  // first, then against the rendering, so both carry the same domains.
+  const wrap = (s: ScanResponse) => JSON.stringify(wrapJob(stripped.job, s));
+  const prior = stripped.data.upgrade_hint;
+  const total = stripped.data.domains.length;
+  const fit = truncateWithRender(
+    wrap(stripped.data),
+    stripped.data,
+    wrap,
+    CHARACTER_LIMIT,
+    prior,
+    total,
+  );
+  const label = jobResultLabel(job);
+  const render = (s: ScanResponse) => demoteHeading(formatScanAsMarkdown(label, s));
+  const { text, structured } = truncateWithRender(
+    render(fit.structured),
+    fit.structured,
+    render,
+    Math.max(0, CHARACTER_LIMIT - header.length - 2),
+    prior,
+    total,
+  );
+  return {
+    text: clampText(`${header}\n\n${text}`),
+    structured: boundedJobRecord(stripped.job, structured),
+  };
+}
+
+// Final, unconditional clamp on the job tools' markdown: every rendered
+// string is capped upstream, so this is the guarantee rather than the
+// mechanism. Cuts at a line boundary and says so, like the halving hint.
+export function clampText(text: string, limit: number = CHARACTER_LIMIT): string {
+  if (text.length <= limit) return text;
+  const hint = `> ${clampHint(limit)}`;
+  const room = Math.max(0, limit - hint.length - 2);
+  const head = text.slice(0, room);
+  const cut = head.lastIndexOf("\n");
+  return `${cut > 0 ? head.slice(0, cut) : head}\n\n${hint}`;
+}
+
+function clampHint(limit: number): string {
+  return (
+    `Response clamped to stay under ${limit} chars; the rendered text was cut here. ` +
+    "Refine the query to narrow the results (JSON output is truncated the same way)."
+  );
+}
+
+// The result's own scalar strings, capped in place (the same cap the minimal
+// envelope applies), so an oversized upgrade_hint or source is bounded
+// without dropping anything else.
+function boundResultStrings(data: DeepDiveResult): DeepDiveResult {
+  return {
+    ...data,
+    ...(data.upgrade_hint !== undefined && { upgrade_hint: boundedField(data.upgrade_hint) }),
+    ...(data.source !== undefined && { source: boundedField(data.source) }),
+    ...(data.empty_reason !== undefined && { empty_reason: boundedField(data.empty_reason) }),
+    ...(data.match_type !== undefined && { match_type: boundedField(data.match_type) }),
+    ...(data.org_match_strategy !== undefined && {
+      org_match_strategy: boundedField(data.org_match_strategy),
+    }),
+    ...(data.snapshot != null && { snapshot: boundedField(data.snapshot) }),
+    ...(data.worker_version !== undefined && { worker_version: boundedField(data.worker_version) }),
+    ...(data.job_id !== undefined && { job_id: boundedField(data.job_id) }),
+  };
+}
+
+// The result-level keys this server knows (DeepDiveResultSchema's declared
+// properties); anything else is a forward-compatible extra the markdown never
+// renders, dropped before any known field is.
+const KNOWN_RESULT_KEYS = new Set([
+  "domains",
+  "total",
+  "truncated",
+  "upgrade_hint",
+  "source",
+  "candidates",
+  "match_type",
+  "org_match_strategy",
+  "empty_reason",
+  "snapshot",
+  "snapshot_source",
+  "entity",
+  "run_metadata",
+  "job_id",
+  "worker_version",
+  "signals_degraded",
+  "signals_attempted",
+]);
+
+// The row-level and enrichment-level keys the advertised schema declares;
+// a forward-compatible extra on a row is dropped before any row is.
+const KNOWN_DOMAIN_KEYS = new Set(Object.keys(DeepDiveDomainSchema.shape));
+const KNOWN_ENRICHMENT_KEYS = new Set(Object.keys(DeepDiveEnrichmentSchema.shape));
+
+function knownRowFields(row: DeepDiveDomain): DeepDiveDomain {
+  const kept = Object.fromEntries(
+    Object.entries(row).filter(([key]) => KNOWN_DOMAIN_KEYS.has(key)),
+  ) as DeepDiveDomain;
+  if (kept.enrichment != null) {
+    kept.enrichment = Object.fromEntries(
+      Object.entries(kept.enrichment).filter(([key]) => KNOWN_ENRICHMENT_KEYS.has(key)),
+    ) as ProEnrichment;
+  }
+  return kept;
+}
+
+// Every string in a row capped and every list or map cut to its first
+// entries, so no single field can cost the row its place: the renderer
+// shows at most a few entries of any list and caps every cell, so a value
+// past these limits was never going to be read. Applied only once the
+// record is over budget, like the other steps.
+const ROW_LIST_LIMIT = 20;
+
+function boundValue(value: unknown): unknown {
+  if (typeof value === "string") return boundedField(value);
+  if (Array.isArray(value)) return value.slice(0, ROW_LIST_LIMIT).map(boundValue);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .slice(0, ROW_LIST_LIMIT)
+        .map(([key, inner]) => [key, boundValue(inner)]),
+    );
+  }
+  return value;
+}
+
+// The evidence map keeps the keys the renderer reads first (EVIDENCE_PRIORITY,
+// in that order) ahead of the rest, so cutting it to ROW_LIST_LIMIT entries
+// never removes the value topEvidenceLine would have shown.
+function boundEvidence(evidence: Record<string, string>): Record<string, string> {
+  const priority = EVIDENCE_PRIORITY.filter((key) => key in evidence);
+  const rest = Object.keys(evidence).filter((key) => !priority.includes(key));
+  return Object.fromEntries(
+    [...priority, ...rest]
+      .slice(0, ROW_LIST_LIMIT)
+      .map((key) => [key, boundedField(evidence[key])]),
+  );
+}
+
+function boundRowValues(row: DeepDiveDomain): DeepDiveDomain {
+  const bounded = boundValue(row) as DeepDiveDomain;
+  const evidence = row.enrichment?.evidence;
+  if (bounded.enrichment != null && evidence != null && typeof evidence === "object") {
+    bounded.enrichment = { ...bounded.enrichment, evidence: boundEvidence(evidence) };
+  }
+  return bounded;
+}
+
+function knownResultFields(data: DeepDiveResult): DeepDiveResult {
+  return Object.fromEntries(
+    Object.entries(data).filter(([key]) => KNOWN_RESULT_KEYS.has(key)),
+  ) as DeepDiveResult;
+}
+
+// Shrink steps for a done job over budget, in order, so structuredContent
+// keeps the domains the text shows for as long as possible: the result's
+// scalar strings are capped (lossless for anything sane, so not reported),
+// then the fields the markdown never renders are dropped — unknown outer
+// fields, unknown result fields, run_metadata, entity, signals_attempted,
+// each domain's embedded discovery record, then the per-signal evidence maps. Only when
+// the record is still over budget do domains get halved, and only after
+// that does the result collapse to the minimal envelope.
+const STRIP_STEPS: Array<{
+  name?: string;
+  apply: (job: JobResponse, data: DeepDiveResult) => [JobResponse, DeepDiveResult];
+}> = [
+  { apply: (job, data) => [job, boundResultStrings(data)] },
+  { name: "unknown job fields", apply: (job, data) => [minimalJobEnvelope(job), data] },
+  { name: "unknown result fields", apply: (job, data) => [job, knownResultFields(data)] },
+  {
+    // Never rendered while domains are present, so they go before any row.
+    name: "candidates",
+    apply: (job, { candidates: _dropped, ...data }) => [job, data],
+  },
+  {
+    name: "unknown domain fields",
+    apply: (job, data) => [job, { ...data, domains: data.domains.map(knownRowFields) }],
+  },
+  {
+    name: "run_metadata",
+    apply: (job, { run_metadata: _dropped, ...data }) => [job, data],
+  },
+  { name: "entity", apply: (job, { entity: _dropped, ...data }) => [job, data] },
+  {
+    name: "signals_attempted",
+    apply: (job, { signals_attempted: _dropped, ...data }) => [job, data],
+  },
+  {
+    name: "domains[].base",
+    apply: (job, data) => [
+      job,
+      { ...data, domains: data.domains.map(({ base: _dropped, ...row }) => row) },
+    ],
+  },
+  // Lossy for a row only past the caps, but lossy: it runs after every
+  // non-rendered field is gone, when the rows themselves are what is left.
+  {
+    name: "domains[] oversized values",
+    apply: (job, data) => [job, { ...data, domains: data.domains.map(boundRowValues) }],
+  },
+  {
+    name: "domains[].enrichment.evidence / signal_health",
+    apply: (job, data) => [
+      job,
+      {
+        ...data,
+        domains: data.domains.map((row) =>
+          row.enrichment == null
+            ? row
+            : {
+                ...row,
+                enrichment: {
+                  ...row.enrichment,
+                  ...(row.enrichment.evidence == null ? {} : { evidence: {} }),
+                  ...(row.enrichment.signal_health == null ? {} : { signal_health: {} }),
+                },
+              },
+        ),
+      },
+    ],
+  },
+];
+
+function stripNonRendered(
+  job: JobResponse,
+  data: DeepDiveResult,
+): { job: JobResponse; data: DeepDiveResult } {
+  // The hint is part of what is measured: a record just under the limit
+  // before the hint is attached would otherwise go over with it.
+  // The worker's own hint (already bounded by the first step) is kept in
+  // front of the local notice: it says why the result was incomplete
+  // before it reached this server.
+  const withHint = (d: DeepDiveResult, dropped: string[]): DeepDiveResult => {
+    if (dropped.length === 0) return d;
+    // No claim about the domain count here: a later halving pass prefixes
+    // its own "K of N domains" notice to this one.
+    const local = `Response truncated: ${dropped.join(", ")} omitted to stay under ${CHARACTER_LIMIT} chars.`;
+    return {
+      ...d,
+      truncated: true,
+      upgrade_hint: d.upgrade_hint ? `${d.upgrade_hint} ${local}` : local,
+    };
+  };
+  const size = (j: JobResponse, d: DeepDiveResult) => JSON.stringify(wrapJob(j, d)).length;
+  let current = { job, data };
+  const dropped: string[] = [];
+  let currentSize = size(job, data);
+  for (const step of STRIP_STEPS) {
+    if (currentSize <= CHARACTER_LIMIT) break;
+    const [nextJob, nextData] = step.apply(current.job, current.data);
+    const bareSize = size(nextJob, nextData);
+    if (step.name !== undefined && bareSize < size(current.job, current.data)) {
+      dropped.push(step.name);
+    }
+    current = { job: nextJob, data: nextData };
+    currentSize = size(nextJob, withHint(nextData, dropped));
+  }
+  return { job: current.job, data: withHint(current.data, dropped) };
+}
+
+// The structuredContent of a markdown job response: the record as-is when
+// it fits the budget, else the outer envelope collapses around the (already
+// bounded) result, else both collapse. Same serializer as the JSON path, so
+// a raw API record never reaches the client unbounded in either format.
+function boundedJobRecord(job: JobResponse, result: DeepDiveResult | undefined): JobResponse {
+  const collapsed = (s: DeepDiveResult | undefined) => wrapJob(minimalJobEnvelope(job), s);
+  return serializeBoundedJson(
+    wrapJob(job, result),
+    () => collapsed(result && minimalScanEnvelope(result)),
+    () => {
+      const outerOnly = collapsed(result);
+      return { text: JSON.stringify(outerOnly), structured: outerOnly };
+    },
+  ).structured;
+}
+
+// The one JSON serializer for the job tools' records. Pretty when it fits,
+// else compact, else the caller's shrink step (the halving loop, when there
+// is a result to halve), else the caller's minimal envelope: known fields
+// only, every retained string capped at ENVELOPE_STRING_LIMIT, so the last
+// resort is bounded by construction whatever the API put in the record.
+function serializeBoundedJson<T>(
+  value: T,
+  minimal: () => T,
+  shrink?: () => { text: string; structured: T },
+): { text: string; structured: T } {
+  const pretty = JSON.stringify(value, null, 2);
+  if (pretty.length <= CHARACTER_LIMIT) return { text: pretty, structured: value };
+  const compact = JSON.stringify(value);
+  if (compact.length <= CHARACTER_LIMIT) return { text: compact, structured: value };
+  const shrunk = shrink?.();
+  if (shrunk !== undefined && shrunk.text.length <= CHARACTER_LIMIT) return shrunk;
+  const envelope = minimal();
+  return { text: JSON.stringify(envelope), structured: envelope };
+}
+
+// JSON: the whole job record stays under CHARACTER_LIMIT — pretty when it
+// fits, else compact, else the result's domains/candidates are halved inside
+// the envelope, else both the outer record and the result collapse to their
+// minimal envelopes (an unknown top-level field, permitted by the loose
+// schema, is not something the halving loop can shrink).
+export function truncateJobJsonIfNeeded(job: JobResponse): {
+  text: string;
+  structured: JobResponse;
+} {
+  const data = jobResultData(job);
+  return serializeBoundedJson(
+    wrapJob(job, data),
+    () => wrapJob(minimalJobEnvelope(job), data && minimalScanEnvelope(data)),
+    data &&
+      (() => {
+        // Non-rendered fields go first, so the domains survive as long as
+        // the record can hold them; only then are they halved.
+        const stripped = stripNonRendered(job, data);
+        const wrap = (s: ScanResponse | undefined) => wrapJob(stripped.job, s);
+        const shrunk = truncateWithRender(JSON.stringify(wrap(stripped.data)), stripped.data, (s) =>
+          JSON.stringify(wrap(s)),
+        );
+        return { text: shrunk.text, structured: wrap(shrunk.structured) };
+      }),
+  );
+}
+
+// The job record reduced to the fields this server knows, each string
+// bounded; the result and the snapshot fields are attached by wrapJob.
+function minimalJobEnvelope(job: JobResponse): JobResponse {
+  return {
+    job_id: boundedField(job.job_id),
+    kind: boundedField(job.kind),
+    status: boundedField(job.status),
+    submitted_at: boundedField(job.submitted_at),
+    started_at: boundedField(job.started_at),
+    finished_at: boundedField(job.finished_at),
+    ...(job.error != null && { error: boundedField(job.error) }),
+  };
+}
+
+// JSON receipt of ctscout_submit_deep_dive, bounded the same way: a large
+// forward-compatible field (permitted by the loose schema) collapses the
+// receipt to its known fields, each string capped.
+export function truncateReceiptJsonIfNeeded(receipt: JobSubmitResponse): {
+  text: string;
+  structured: JobSubmitResponse;
+} {
+  return serializeBoundedJson(receipt, () => ({
+    job_id: boundedField(receipt.job_id),
+    status: boundedField(receipt.status),
+    submitted_at: boundedField(receipt.submitted_at),
+    ...(receipt.poll !== undefined && { poll: boundedField(receipt.poll) }),
+  }));
 }
 
 // ---------- Server + tools ----------
@@ -1657,6 +2575,134 @@ Auth & limits: same as ctscout_search_company.`,
       } catch (err) {
         return {
           content: [{ type: "text", text: explainError(err) }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    "ctscout_submit_deep_dive",
+    {
+      title: "Submit an async Pro deep dive (multi-signal attribution job)",
+      description: `Queue an asynchronous Pro deep dive on ctscout.dev: the full multi-signal attribution run (CT warehouse + DNS, RDAP, homepage, IP/ASN corroboration) executed by a batch worker, via POST /jobs. Returns a job receipt immediately, NOT results.
+
+Asynchronous, Pro only:
+  - The call returns as soon as the job is queued ({job_id, status: "queued", submitted_at}). Nothing is attributed yet.
+  - Poll with ctscout_get_job using the returned job_id. Wait about 30 s before the first poll, then back off toward 5 min between polls; the batch worker picks up queued jobs every few minutes and a deep dive can take several minutes to run.
+  - Requires a Pro API key. A free key gets HTTP 403 with the API's upgrade text (Pro is concierge-only: pro@ctscout.dev). Quota: ${JOBS_PER_DAY} submissions per key per day (HTTP 429 over). Submitting is not idempotent — a retry queues a second job.
+
+Args:
+  - company_name (string, optional): organization name, matched exactly as in ctscout_search_company (partial, case-insensitive; 2–200 chars).
+  - seed_domain (string[], optional): known apex domains to pivot from, max ${MAX_SEED_DOMAINS}. At least one of company_name / seed_domain is required; both may be given. Validated exactly like /scan.
+  - response_format ('markdown' | 'json', default 'markdown'): a receipt with polling guidance, or the raw 202 body.
+
+Returns (on success, structuredContent follows the declared outputSchema; a failed call — 401, 403, 429, timeout — is isError with no structuredContent):
+    {
+      "job_id": string,        // opaque; pass to ctscout_get_job
+      "status": "queued",
+      "submitted_at": string,
+      "poll": "/jobs/<id>"     // informational
+    }
+
+What the finished result contains (read it with ctscout_get_job):
+  - The same fields as a Pro /scan result: "domains" of attributed apex domains, each with "attributed_to", an "enrichment" object (confidence_band, weight_total, matched_via, evidence, signal_health, vlm_status, vlm_override) and the underlying discovery evidence under "base"; plus "entity", "run_metadata", "source" and "signals_degraded".
+  - Plus "snapshot": the warehouse date (YYYY-MM-DD) the deep dive read from. It is present on every deep-dive result because the batch worker sets it (unlike /scan today), together with "worker_version" and "signals_attempted".
+  - "Attributed" means the organization is what the evidence names for that domain (certificate subject, corroborated by the enrichment signals), not an ownership claim. "Candidate" means a semantic name-similarity guess that is NOT an attribution; a deep dive reports attributions with a confidence band, never bare candidates.
+  - Visual brand verification (VLM) is NOT included in v1: vlm_status stays "pending" or "skipped" and never vetoes a band.
+
+Examples:
+  - Use when: "Run a full attribution deep dive on CNA Financial" -> { company_name: "CNA Financial" }
+  - Use when: "Deep-dive from these seed domains" -> { seed_domain: ["cna.com", "cnasurety.com"] }
+  - Don't use when: you want an answer now — ctscout_search_company / ctscout_lookup_domain are synchronous. Don't resubmit while a job is queued or running; poll it.`,
+      inputSchema: SubmitDeepDiveInputSchema,
+      outputSchema: JobSubmitOutputSchema,
+      annotations: SUBMIT_JOB_ANNOTATIONS,
+    },
+    async (params: SubmitDeepDiveInput) => {
+      const spec: DeepDiveSpec = {
+        ...(params.company_name !== undefined && { company_name: params.company_name }),
+        ...(params.seed_domain !== undefined && { seed_domain: params.seed_domain }),
+      };
+      try {
+        const receipt = await callSubmitJob(spec);
+        // structuredContent mirrors the bounded record in both formats, as
+        // the scan tools' does.
+        const { text: json, structured } = truncateReceiptJsonIfNeeded(receipt);
+        const text =
+          params.response_format === ResponseFormat.JSON
+            ? json
+            : clampText(formatJobSubmittedAsMarkdown(spec, structured));
+        return {
+          content: [{ type: "text", text }],
+          structuredContent: structured as unknown as Record<string, unknown>,
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: explainError(err, "jobs") }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    "ctscout_get_job",
+    {
+      title: "Poll a deep-dive job and read its result",
+      description: `Read the state of an asynchronous Pro deep dive submitted with ctscout_submit_deep_dive, via GET /jobs/{id}. Read-only and free to repeat: polling debits no quota.
+
+Polling:
+  - status is "queued" | "running" | "done" | "failed". Only "done" carries "result"; "failed" carries a short "error".
+  - Back off: about 30 s before the first poll, then longer waits up to 5 min. A deep dive runs on a batch worker that picks up queued jobs every few minutes.
+  - Pro only, and job ids are scoped to the submitting key: HTTP 404 means not your job or an unknown id.
+
+Args:
+  - job_id (string, required): the id returned by ctscout_submit_deep_dive.
+  - response_format ('markdown' | 'json', default 'markdown'): output format.
+
+Returns (on success, structuredContent follows the declared outputSchema; a failed call — 401, 403, 404, timeout — is isError with no structuredContent, so never dereference snapshot on a failed call):
+  - In markdown: the job status lines; once done, the same attribution table as a Pro scan (domain, attributed to, confidence band, signals, evidence) under a snapshot line.
+  - In JSON, structured as:
+    {
+      "job_id": string,
+      "kind": "deep_dive",
+      "status": "queued" | "running" | "done" | "failed",
+      "submitted_at": string, "started_at": string | null, "finished_at": string | null,
+      "result": {                       // only when status is "done"; identical to a Pro /scan result plus the fields below
+        "entity": {...}, "domains": [ { "domain": string, "attributed_to": string, "enrichment": {...}, "base": {...} } ],
+        "run_metadata": {...}, "source": "live-enriched" | "cache-only", "signals_degraded": boolean,
+        "snapshot": string,             // warehouse date (YYYY-MM-DD) the deep dive read from — present, the batch worker sets it
+        "worker_version": string, "signals_attempted": ...
+      },
+      "error": string,                  // only when status is "failed"
+      "snapshot": string | null,        // copy of result.snapshot once done; null (unknown) before that
+      "snapshot_source": "scan" | "unavailable"   // 'scan' = the API response carried the date
+    }
+  - "Attributed" means the organization is what the evidence names for that domain, not an ownership claim. "Candidate" means a semantic name-similarity guess that is NOT an attribution. Deep dives return attributions with a confidence band (verified / likely / possible / insufficient), never bare candidates. When "signals_degraded" is true some signals errored: absence of their evidence is not evidence of absence.
+  - Visual brand verification (VLM) is NOT included in v1: vlm_status stays "pending" or "skipped" and never vetoes a band.
+
+Examples:
+  - Use when: "Is my deep dive abc123 finished?" -> { job_id: "abc123" }
+  - Don't use when: you have no job_id — submit first with ctscout_submit_deep_dive, or use the synchronous tools.`,
+      inputSchema: GetJobInputSchema,
+      outputSchema: JobOutputSchema,
+      annotations: POLL_JOB_ANNOTATIONS,
+    },
+    async (params: GetJobInput) => {
+      try {
+        const job = await callGetJob(params.job_id);
+        const { text, structured } =
+          params.response_format === ResponseFormat.JSON
+            ? truncateJobJsonIfNeeded(job)
+            : formatJobAsMarkdown(job);
+        return {
+          content: [{ type: "text", text }],
+          structuredContent: structured as unknown as Record<string, unknown>,
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: explainError(err, "jobs") }],
           isError: true,
         };
       }
