@@ -191,7 +191,7 @@ export interface ScanResponse {
 //                   that never emitted the field".
 // There is deliberately no other source: a date fetched separately (e.g. GET
 // /stats last_sync) is not generation-coupled to the scan and can disagree with
-// it across the weekly sync, which would claim a provenance the answer lacks.
+// it across the daily sync, which would claim a provenance the answer lacks.
 export type SnapshotSource = "scan" | "unavailable";
 
 export interface SnapshotInfo {
@@ -499,8 +499,8 @@ const SnapshotFields = {
     .string()
     .nullable()
     .describe(
-      "Warehouse/D1 sync date (YYYY-MM-DD) the answer was read from; the free tier " +
-        "serves a weekly snapshot. null when it could not be determined.",
+      "Warehouse/D1 sync date (YYYY-MM-DD) the answer was read from; the warehouse " +
+        "syncs daily. null when the API could not determine it.",
     ),
   snapshot_source: z
     .enum(["scan", "unavailable"])
@@ -2372,7 +2372,7 @@ Returns (on success, structuredContent follows the declared outputSchema; an err
       "total": number,                    // total matching rows in warehouse
       "truncated": boolean,               // true if response is capped
       "upgrade_hint": string,             // present when truncated
-      "source": "warehouse",              // both tiers read the weekly warehouse snapshot
+      "source": "warehouse",              // both tiers read the daily warehouse snapshot
       "match_type": "exact" | "semantic" | "none",   // 'semantic' = domains empty, candidates offered
       "org_match_strategy": string,       // which matching pass produced the answer
       "empty_reason": string,             // present on empty results: why nothing was attributed
@@ -2390,7 +2390,7 @@ Examples:
 
 Auth & limits:
   - Requires CTSCOUT_API_KEY env var. Get a free key (no email) at https://ctscout.dev.
-  - Free tier: 10 queries/day, top 5 results from a weekly snapshot. The response's "snapshot" field carries that snapshot's sync date only when the API reports it; today it does not, so expect snapshot: null / snapshot_source: "unavailable" and treat freshness as unknown.
+  - Free tier: 10 queries/day, top 5 results from a daily snapshot. The response's "snapshot" field carries that snapshot's sync date (the API reports it since X-API-Version 2026-09-05); when it is null the API could not determine it — treat freshness as unknown, never as current.
   - Pro tier: unlimited queries, up to 25 rows, a 12-month window; deep-dive jobs (20/day) for multi-signal attribution.
 
 Error handling:
@@ -2407,7 +2407,7 @@ Legal-vs-brand caveat (important):
 Coverage caveat:
   - Best for established US/EU tech companies with OV/EV certs.
   - Limited coverage on small private companies, cyber MGAs, and entities using only DV (Let's Encrypt) certs.
-  - Warehouse size (organizations, org-domain pairs, last sync) is not stated here because it changes weekly; read the live figures at https://ctscout.dev/stats before treating a miss as meaningful.`,
+  - Warehouse size (organizations, org-domain pairs, last sync) is not stated here because it changes daily; read the live figures at https://ctscout.dev/stats before treating a miss as meaningful.`,
       inputSchema: SearchCompanyInputSchema,
       outputSchema: ScanOutputSchema,
       annotations: QUOTA_DEBITING_READ_ONLY_ANNOTATIONS,

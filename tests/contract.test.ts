@@ -189,7 +189,7 @@ describe("stdio MCP compatibility contract", () => {
       };
       for (const tool of tools) {
         expect(tool.annotations, tool.name).toEqual(expectedAnnotations[tool.name]);
-        // Warehouse size changes weekly; a typed count drifts from the live site
+        // Warehouse size changes daily; a typed count drifts from the live site
         // and agents reason from it when judging a miss (#101).
         expect(tool.description).not.toMatch(
           /~?\d[\d,.]*[KkMm]?\s*(entities|orgs?|organizations|pairs)\b/,

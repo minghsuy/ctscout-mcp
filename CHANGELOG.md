@@ -14,6 +14,11 @@ version heading so the exact package metadata and notes are reviewed together;
 
 ### Changed
 
+- Docs and tool descriptions say the warehouse syncs daily (it has since
+  2026-05-16; "weekly" was stale) and that `/scan` answers carry `snapshot`
+  since the API's 2026-09-05 version, so `snapshot_source` is `"scan"` on the
+  scan tools rather than always `"unavailable"` (ctscout-worker#343)
+
 - README and LIMITATIONS describe what a Pro key gets today: more `/scan`
   rows and a longer window on the same weekly snapshot, and evidence-backed
   `confidence_band`s only through deep-dive jobs; no live enrichment on

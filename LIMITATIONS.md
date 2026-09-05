@@ -43,7 +43,7 @@ In practice, this means **cloud-native modern infrastructure is largely invisibl
 
 The warehouse is best at: established US/EU enterprise, government, financial services, traditional infrastructure, education, defense — anyone who buys OV/EV certs as a matter of policy.
 
-Warehouse size (organizations, org-domain pairs, apex domains, last sync date) grows with every weekly sync, so no figure is typed here; the live counts are published at https://ctscout.dev/stats.
+Warehouse size (organizations, org-domain pairs, apex domains, last sync date) grows with every daily sync, so no figure is typed here; the live counts are published at https://ctscout.dev/stats.
 
 ### Temporal fields mean "when we observed it"
 
