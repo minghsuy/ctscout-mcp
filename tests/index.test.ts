@@ -2839,6 +2839,31 @@ describe("formatJobAsMarkdown", () => {
     }
   });
 
+  it("keeps cert_org_names / rdap_org through the unknown-field strip so the org still renders", () => {
+    // The strip keeps only the keys DeepDiveDomainSchema declares. A row whose
+    // organization is available only through the fallback fields must still
+    // name it after truncation, in the text and in the record.
+    const { enrichment } = proDiscoveredDomain("cna.com");
+    const oversized = "r".repeat(30_000);
+    const cases: Array<[DomainResult, string]> = [
+      [
+        { domain: "cna.com", cert_org_names: ["CNA Financial Corporation"], enrichment },
+        "CNA Financial Corporation",
+      ],
+      [{ domain: "cna.com", rdap_org: "CNA RDAP Org", enrichment }, "CNA RDAP Org"],
+    ];
+    for (const [row, org] of cases) {
+      const job = doneJob([{ ...row, future_row_field: oversized } as DomainResult]);
+      const { text, structured } = formatJobAsMarkdown(job);
+      expect(JSON.stringify(structured).length).toBeLessThanOrEqual(25_000);
+      expect(structured.result?.domains).toHaveLength(1);
+      expect(structured.result?.domains[0]).not.toHaveProperty("future_row_field");
+      expect(structured.result?.upgrade_hint).toContain("unknown domain fields omitted");
+      expect(text).toContain(`| \`cna.com\` | ${org} | ✅ verified |`);
+      expect(text).not.toContain("| `cna.com` | — |");
+    }
+  });
+
   it("drops an oversized signals_attempted before halving domains", () => {
     const job = doneJob([proDiscoveredDomain("cna.com")]);
     job.result = {

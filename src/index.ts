@@ -146,9 +146,8 @@ export interface DomainResult {
   attributed_to?: string;
   enrichment?: ProEnrichment;
   is_seed?: boolean;
-  // Legacy org fallbacks for the deep-dive table: a real row never carries
-  // them at the top level (they sit under `base`), so they only fire on a
-  // flattened row.
+  // Org fallbacks for the deep-dive table when attributed_to is absent;
+  // declared on DeepDiveDomainSchema so the over-budget strip keeps them.
   cert_org_names?: string[];
   rdap_org?: string | null;
 
@@ -663,6 +662,18 @@ const DeepDiveDomainSchema = DomainResultSchema.extend({
       "did not run or failed for this domain, so the attribution stands without evidence " +
       "(see signals_degraded on the result). Still a deep-dive row.",
   ),
+  // Declared here, not on the /scan row: the renderer reads them as the
+  // organization fallback when attributed_to is absent, and the over-budget
+  // strip (KNOWN_DOMAIN_KEYS) keeps only what this shape declares.
+  cert_org_names: z
+    .array(z.string())
+    .optional()
+    .describe("Certificate subject organizations; the org fallback when attributed_to is absent."),
+  rdap_org: z
+    .string()
+    .nullable()
+    .optional()
+    .describe("RDAP registrant organization; the org fallback after cert_org_names."),
 });
 
 // The deep-dive result: a Pro /scan result plus the fields the batch worker
