@@ -20,7 +20,7 @@ version heading so the exact package metadata and notes are reviewed together;
   scan tools rather than always `"unavailable"` (ctscout-worker#343)
 
 - README and LIMITATIONS describe what a Pro key gets today: more `/scan`
-  rows and a longer window on the same weekly snapshot, and evidence-backed
+  rows and a longer window on the same daily snapshot, and evidence-backed
   `confidence_band`s only through deep-dive jobs; no live enrichment on
   `/scan`, no VLM (ctscout-worker#338)
 

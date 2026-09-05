@@ -208,6 +208,9 @@ describe("stdio MCP compatibility contract", () => {
         expect(description, tool?.name).toContain("VLM");
         expect(description, tool?.name).toMatch(/NOT included in v1/);
         expect(description, tool?.name).toContain("batch worker sets it");
+        // The API reports snapshot on /scan since 2026-09-05; no tool may
+        // still tell an agent to expect null by default.
+        expect(description, tool?.name).not.toMatch(/today the API does not/);
         // The deep-dive shape is its own contract; a /scan never carries it.
         expect(description, tool?.name).not.toMatch(/Pro \/?scan/);
         expect(description, tool?.name).toMatch(/deep-dive (result )?shape/);

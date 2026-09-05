@@ -2379,7 +2379,7 @@ Returns (on success, structuredContent follows the declared outputSchema; an err
       "candidates": [                     // only when match_type is 'semantic'; NOT attributions
         { "org": string, "similarity": number, "top_apex_domain": string | null }
       ],
-      "snapshot": string | null,          // warehouse/D1 sync date (YYYY-MM-DD) ONLY when the API reported it; null otherwise — today the API does not, so expect null
+      "snapshot": string | null,          // warehouse/D1 sync date (YYYY-MM-DD) the answer was read from (API version 2026-09-05+); null only when the API could not determine it
       "snapshot_source": "scan" | "unavailable"   // 'scan' = API carried the date; 'unavailable' = it did not (snapshot is null). null means unknown freshness, never "current"
     }
 
@@ -2478,7 +2478,7 @@ Returns (on success, structuredContent follows the declared outputSchema; an err
         { "query": {...}, "error": { "code": number, "message": string } }
       ],
       "remaining_quota": number | null,  // null = unlimited (Pro)
-      "snapshot": string | null,         // sync date shared by every result in the batch, ONLY when the API reported it; null (unknown freshness) otherwise — today the API does not
+      "snapshot": string | null,         // sync date shared by every result in the batch (API version 2026-09-05+); null (unknown freshness) only when the API could not determine it
       "snapshot_source": "scan" | "unavailable"
     }
 
@@ -2619,7 +2619,7 @@ Returns (on success, structuredContent follows the declared outputSchema; a fail
 
 What the finished result contains (read it with ctscout_get_job):
   - The deep-dive result shape (a /scan never carries it): "domains" of attributed apex domains, each with "attributed_to", an "enrichment" object (confidence_band, weight_total, matched_via, evidence, signal_health, vlm_status, vlm_override) and the underlying discovery evidence under "base"; plus "entity", "run_metadata", "source" and "signals_degraded".
-  - Plus "snapshot": the warehouse date (YYYY-MM-DD) the deep dive read from. It is present on every deep-dive result because the batch worker sets it (unlike /scan today), together with "worker_version" and "signals_attempted".
+  - Plus "snapshot": the warehouse date (YYYY-MM-DD) the deep dive read from. It is present on every deep-dive result because the batch worker sets it, together with "worker_version" and "signals_attempted"; a /scan answer carries its own snapshot from the API.
   - "Attributed" means the organization is what the evidence names for that domain (certificate subject, corroborated by the enrichment signals), not an ownership claim. "Candidate" means a semantic name-similarity guess that is NOT an attribution; a deep dive reports attributions with a confidence band, never bare candidates.
   - Visual brand verification (VLM) is NOT included in v1: vlm_status stays "pending" or "skipped" and never vetoes a band.
 
