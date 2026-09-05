@@ -3048,7 +3048,7 @@ describe("formatJobAsMarkdown", () => {
       domains: [{ domain: "cna.com", attributed_to: "CNA Financial Corporation" }],
       entity: { company_name: "CNA Financial" },
       truncated: true,
-      upgrade_hint: expect.stringContaining("all 1 domains kept"),
+      upgrade_hint: expect.stringContaining("omitted to stay under 25000 chars."),
     });
   });
 
@@ -3110,13 +3110,15 @@ describe("formatJobAsMarkdown", () => {
     expect(markdown.structured.result?.domains).toEqual([
       expect.objectContaining({ domain: "cna.com" }),
     ]);
-    expect(markdown.structured.result?.upgrade_hint).toContain("all 1 domains kept");
+    expect(markdown.structured.result?.upgrade_hint).toContain(
+      "omitted to stay under 25000 chars.",
+    );
 
     const json = truncateJobJsonIfNeeded(job);
     expect(json.text.length).toBeLessThanOrEqual(25_000);
     expect(JSON.parse(json.text)).toEqual(json.structured);
     expect(json.structured.result?.domains).toHaveLength(1);
-    expect(json.structured.result?.upgrade_hint).toContain("all 1 domains kept");
+    expect(json.structured.result?.upgrade_hint).toContain("omitted to stay under 25000 chars.");
   });
 
   it("drops a domain's embedded base before the domain itself", () => {
@@ -3200,6 +3202,25 @@ describe("formatJobAsMarkdown", () => {
       expect(JSON.stringify(structured).length).toBeLessThanOrEqual(25_000);
       expect(structured.result?.domains).toHaveLength(1);
       expect(structured.result?.worker_version).toContain("…(truncated, 30000 chars total)");
+    }
+  });
+
+  it("drops unknown row and enrichment fields before halving domains", () => {
+    const row = proDiscoveredDomain("cna.com");
+    const job = doneJob([
+      {
+        ...row,
+        future_row_field: "r".repeat(20_000),
+        enrichment: { ...row.enrichment, future_signal: "e".repeat(20_000) },
+      } as DomainResult,
+    ]);
+    for (const { structured } of [formatJobAsMarkdown(job), truncateJobJsonIfNeeded(job)]) {
+      expect(JSON.stringify(structured).length).toBeLessThanOrEqual(25_000);
+      expect(structured.result?.domains).toHaveLength(1);
+      expect(structured.result?.domains[0]).not.toHaveProperty("future_row_field");
+      expect(structured.result?.domains[0].enrichment).not.toHaveProperty("future_signal");
+      expect(structured.result?.domains[0].enrichment?.confidence_band).toBe("verified");
+      expect(structured.result?.upgrade_hint).toContain("unknown domain fields omitted");
     }
   });
 
@@ -3345,7 +3366,9 @@ describe("truncateJobJsonIfNeeded", () => {
   });
 
   it("collapses to the minimal scan envelope when one row alone is over budget", () => {
-    const huge = { ...proDiscoveredDomain("cna.com"), padding: "x".repeat(30_000) };
+    // A known, rendered field: an unknown one would be stripped before the
+    // row is judged.
+    const huge = { ...proDiscoveredDomain("cna.com"), attributed_to: "x".repeat(30_000) };
     const { text, structured } = truncateJobJsonIfNeeded(doneJob([huge]));
     expect(text.length).toBeLessThanOrEqual(25_000);
     expect(structured).toMatchObject({

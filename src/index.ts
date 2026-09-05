@@ -2028,6 +2028,23 @@ const KNOWN_RESULT_KEYS = new Set([
   "signals_attempted",
 ]);
 
+// The row-level and enrichment-level keys the advertised schema declares;
+// a forward-compatible extra on a row is dropped before any row is.
+const KNOWN_DOMAIN_KEYS = new Set(Object.keys(DeepDiveDomainSchema.shape));
+const KNOWN_ENRICHMENT_KEYS = new Set(Object.keys(DeepDiveEnrichmentSchema.shape));
+
+function knownRowFields(row: DeepDiveDomain): DeepDiveDomain {
+  const kept = Object.fromEntries(
+    Object.entries(row).filter(([key]) => KNOWN_DOMAIN_KEYS.has(key)),
+  ) as DeepDiveDomain;
+  if (kept.enrichment != null) {
+    kept.enrichment = Object.fromEntries(
+      Object.entries(kept.enrichment).filter(([key]) => KNOWN_ENRICHMENT_KEYS.has(key)),
+    ) as ProEnrichment;
+  }
+  return kept;
+}
+
 function knownResultFields(data: DeepDiveResult): DeepDiveResult {
   return Object.fromEntries(
     Object.entries(data).filter(([key]) => KNOWN_RESULT_KEYS.has(key)),
@@ -2049,6 +2066,10 @@ const STRIP_STEPS: Array<{
   { apply: (job, data) => [job, boundResultStrings(data)] },
   { name: "unknown job fields", apply: (job, data) => [minimalJobEnvelope(job), data] },
   { name: "unknown result fields", apply: (job, data) => [job, knownResultFields(data)] },
+  {
+    name: "unknown domain fields",
+    apply: (job, data) => [job, { ...data, domains: data.domains.map(knownRowFields) }],
+  },
   {
     name: "run_metadata",
     apply: (job, { run_metadata: _dropped, ...data }) => [job, data],
@@ -2099,9 +2120,9 @@ function stripNonRendered(
   // before it reached this server.
   const withHint = (d: DeepDiveResult, dropped: string[]): DeepDiveResult => {
     if (dropped.length === 0) return d;
-    const local =
-      `Response truncated: ${dropped.join(", ")} omitted to stay under ${CHARACTER_LIMIT} chars; ` +
-      `all ${d.domains.length} domains kept.`;
+    // No claim about the domain count here: a later halving pass prefixes
+    // its own "K of N domains" notice to this one.
+    const local = `Response truncated: ${dropped.join(", ")} omitted to stay under ${CHARACTER_LIMIT} chars.`;
     return {
       ...d,
       truncated: true,
