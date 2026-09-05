@@ -39,6 +39,7 @@ import {
   callScan,
   callScanBatch,
   callSubmitJob,
+  clampText,
   explainError,
   fairShareBudgets,
   formatBatchAsMarkdown,
@@ -616,9 +617,9 @@ describe("truncateIfNeeded", () => {
     expect(result.structured.upgrade_hint).toContain("Response truncated");
   });
 
-  it("zeroes out domains when a single domain still exceeds the limit", () => {
-    // Construct a 1-domain response whose markdown is over the limit by
-    // giving it a very large evidence string that inflates the rendered text.
+  it("caps an oversized evidence cell so a single domain can never exceed the limit", () => {
+    // Every API-provided string the renderer prints is capped, so a 1-domain
+    // response stays under budget whatever the evidence string holds.
     const bigEvidence = "x".repeat(30_000);
     const domain: DomainResult = {
       org: "Big Co",
@@ -638,36 +639,36 @@ describe("truncateIfNeeded", () => {
     };
     const resp = proResponse([domain]);
     const md = formatScanAsMarkdown("Big Co", resp);
-    expect(md.length).toBeGreaterThan(25_000);
+    expect(md.length).toBeLessThanOrEqual(25_000);
+    expect(md).toContain(`| ${"x".repeat(79)}… |`);
     const result = truncateIfNeeded(md, resp, "Big Co");
-    expect(result.text.length).toBeLessThanOrEqual(25_000);
-    expect(result.structured.domains.length).toBe(0);
-    expect(result.structured.truncated).toBe(true);
-    expect(result.structured.upgrade_hint).toContain("0 of 1 domains");
+    expect(result.text).toBe(md);
+    expect(result.structured.domains.length).toBe(1);
+    expect(result.structured.truncated).toBe(false);
   });
 
   it("no longer recommends response_format='json' as the size escape hatch (#42)", () => {
-    const bigEvidence = "x".repeat(30_000);
-    const resp = proResponse([
-      {
-        org: "Big Co",
-        apex_domain: "big.example",
-        cert_count: 1,
-        subdomain_count: 0,
-        attributed_to: "Big Co",
+    const resp = proResponse(
+      Array.from({ length: 350 }, (_, i) => ({
+        org: `Org ${i}`,
+        apex_domain: `domain-${i}.example`,
+        cert_count: i,
+        subdomain_count: i,
+        attributed_to: `Org ${i}`,
         enrichment: {
-          confidence_band: "verified",
+          confidence_band: "verified" as const,
           weight_total: 5.0,
           matched_via: ["dns_txt_brand_token"],
-          evidence: { dns_txt_brand_token: bigEvidence },
+          evidence: { dns_txt_brand_token: "evidence" },
           signal_health: {},
-          vlm_status: "cached",
+          vlm_status: "cached" as const,
           vlm_override: false,
         },
-      },
-    ]);
+      })),
+    );
     const md = formatScanAsMarkdown("Big Co", resp);
     const result = truncateIfNeeded(md, resp, "Big Co");
+    expect(result.structured.truncated).toBe(true);
     expect(result.structured.upgrade_hint).not.toContain("response_format='json'");
     expect(result.structured.upgrade_hint).toContain("Refine the query");
   });
@@ -702,37 +703,22 @@ describe("truncateIfNeeded", () => {
     expect(result.text).toContain("Response truncated");
   });
 
-  it("markdown text explains the size-based drop (not 'No domains found') when a single domain is zeroed (#41 fold-in)", () => {
-    // 1-domain response whose markdown alone exceeds the limit → truncation
-    // zeroes domains to []. The visible text must NOT say "No domains found";
-    // it must explain the domain was dropped for exceeding the size limit and
-    // surface the upgrade_hint.
-    const bigEvidence = "x".repeat(30_000);
-    const domain: DomainResult = {
-      org: "Big Co",
-      apex_domain: "big.example",
-      cert_count: 1,
-      subdomain_count: 0,
-      attributed_to: "Big Co",
-      enrichment: {
-        confidence_band: "verified",
-        weight_total: 5.0,
-        matched_via: ["dns_txt_brand_token"],
-        evidence: { dns_txt_brand_token: bigEvidence },
-        signal_health: {},
-        vlm_status: "cached",
-        vlm_override: false,
-      },
+  it("markdown text explains the size-based drop (not 'No domains found') when domains were zeroed (#41 fold-in)", () => {
+    // The zeroed structure (domains: [], truncated, our hint) is what the
+    // JSON halving loop can still produce for a single over-budget domain;
+    // rendered, it must NOT say "No domains found" but explain the size drop
+    // and surface the upgrade_hint.
+    const zeroed: ScanResponse = {
+      ...proResponse([]),
+      truncated: true,
+      upgrade_hint: "Response truncated to 0 of 1 domains to stay under 25000 chars.",
     };
-    const resp = proResponse([domain]);
-    const md = formatScanAsMarkdown("Big Co", resp);
-    const result = truncateIfNeeded(md, resp, "Big Co");
-    expect(result.structured.domains.length).toBe(0);
-    expect(result.text).not.toContain("No domains found");
-    expect(result.text).toContain("# ctscout results for: Big Co");
-    expect(result.text).toContain("size limit");
-    expect(result.text).toContain("dropped");
-    expect(result.text).toContain("Response truncated");
+    const text = formatScanAsMarkdown("Big Co", zeroed);
+    expect(text).not.toContain("No domains found");
+    expect(text).toContain("# ctscout results for: Big Co");
+    expect(text).toContain("size limit");
+    expect(text).toContain("dropped");
+    expect(text).toContain("Response truncated");
   });
 });
 
@@ -2845,6 +2831,22 @@ describe("SubmitDeepDiveInputSchema / GetJobInputSchema — client-side validati
   });
 });
 
+describe("clampText", () => {
+  it("returns text under the limit unchanged", () => {
+    expect(clampText("short", 100)).toBe("short");
+  });
+
+  it("cuts at a line boundary and appends the clamp hint", () => {
+    const lines = Array.from({ length: 200 }, (_, i) => `line ${i} ${"x".repeat(40)}`);
+    const clamped = clampText(lines.join("\n"), 1_000);
+    expect(clamped.length).toBeLessThanOrEqual(1_000);
+    const marker = "\n\n> Response clamped to stay under 1000 chars";
+    expect(clamped).toContain(marker);
+    const body = clamped.slice(0, clamped.indexOf(marker));
+    expect(body.split("\n").every((line) => /^line \d+ x{40}$/.test(line))).toBe(true);
+  });
+});
+
 describe("truncateReceiptJsonIfNeeded", () => {
   const receipt = {
     job_id: "abc",
@@ -3013,6 +3015,54 @@ describe("formatJobAsMarkdown", () => {
     });
   });
 
+  it("bounds a zero-domain done job whose API-provided upgrade_hint is oversized", () => {
+    const job = doneJob([]);
+    job.result = {
+      ...job.result,
+      domains: [],
+      truncated: true,
+      upgrade_hint: "h".repeat(30_000),
+    } as JobResponse["result"];
+    const { text, structured } = formatJobAsMarkdown(job);
+    expect(text.length).toBeLessThanOrEqual(25_000);
+    expect(text).toMatch(/> h{199}…/);
+    expect(JSON.stringify(structured).length).toBeLessThanOrEqual(25_000);
+  });
+
+  it("drops non-rendered fields before domains: a 30k run_metadata keeps the shown domain", () => {
+    const job = doneJob([proDiscoveredDomain("cna.com")]);
+    job.result = {
+      ...job.result,
+      run_metadata: { blob: "m".repeat(30_000) },
+    } as JobResponse["result"];
+    const { text, structured } = formatJobAsMarkdown(job);
+    expect(text).toContain("| `cna.com` |");
+    expect(text).toContain("> Response truncated: run_metadata omitted");
+    expect(JSON.stringify(structured).length).toBeLessThanOrEqual(25_000);
+    expect(structured.result).not.toHaveProperty("run_metadata");
+    expect(structured.result).toMatchObject({
+      domains: [{ domain: "cna.com", attributed_to: "CNA Financial Corporation" }],
+      entity: { company_name: "CNA Financial" },
+      truncated: true,
+      upgrade_hint: expect.stringContaining("all 1 domains kept"),
+    });
+  });
+
+  it("drops a domain's embedded base before the domain itself", () => {
+    const row = proDiscoveredDomain("cna.com");
+    const job = doneJob([{ ...row, base: { ...(row.base as object), blob: "b".repeat(30_000) } }]);
+    const { text, structured } = formatJobAsMarkdown(job);
+    expect(text).toContain("| `cna.com` |");
+    // Steps are cumulative: the earlier, cheaper fields go first.
+    expect(text).toContain("> Response truncated: run_metadata, entity, domains[].base omitted");
+    expect(JSON.stringify(structured).length).toBeLessThanOrEqual(25_000);
+    expect(structured.result?.domains).toHaveLength(1);
+    expect(structured.result?.domains[0]).not.toHaveProperty("base");
+    expect(structured.result?.domains[0].enrichment?.confidence_band).toBe("verified");
+    // The evidence map was not needed and survives into the rendered cell.
+    expect(text).toContain("verified via google-site-verification");
+  });
+
   it("collapses a not-done record's structuredContent to the bounded envelope", () => {
     const { text, structured } = formatJobAsMarkdown({
       job_id: "abc",
@@ -3089,7 +3139,7 @@ describe("truncateJobJsonIfNeeded", () => {
     });
   });
 
-  it("collapses the outer envelope too when an unknown top-level field alone is over budget", () => {
+  it("drops an oversized unknown top-level field first and keeps the result intact", () => {
     const job = doneJob([proDiscoveredDomain("cna.com")], { noise: "n".repeat(30_000) });
     const { text, structured } = truncateJobJsonIfNeeded(job);
     expect(text.length).toBeLessThanOrEqual(25_000);
@@ -3103,10 +3153,31 @@ describe("truncateJobJsonIfNeeded", () => {
       submitted_at: "2026-09-04T10:00:00Z",
       started_at: "2026-09-04T10:05:00Z",
       finished_at: "2026-09-04T10:09:30Z",
-      result: { domains: [], truncated: true, snapshot: "2026-08-31", snapshot_source: "scan" },
+      result: {
+        domains: [{ domain: "cna.com" }],
+        run_metadata: { duration_ms: 270_000 },
+        truncated: true,
+        upgrade_hint: expect.stringContaining("unknown job fields omitted"),
+        snapshot: "2026-08-31",
+        snapshot_source: "scan",
+      },
       snapshot: "2026-08-31",
       snapshot_source: "scan",
     });
+  });
+
+  it("drops non-rendered fields before halving domains in JSON too", () => {
+    const job = doneJob([proDiscoveredDomain("cna.com")]);
+    job.result = {
+      ...job.result,
+      run_metadata: { blob: "m".repeat(30_000) },
+    } as JobResponse["result"];
+    const { text, structured } = truncateJobJsonIfNeeded(job);
+    expect(text.length).toBeLessThanOrEqual(25_000);
+    expect(JSON.parse(text)).toEqual(structured);
+    expect(structured.result).not.toHaveProperty("run_metadata");
+    expect(structured.result?.domains).toEqual([expect.objectContaining({ domain: "cna.com" })]);
+    expect(structured.result?.upgrade_hint).toContain("run_metadata omitted");
   });
 
   it("bounds every string the final envelopes keep: an oversized source / empty_reason / error still fits", () => {

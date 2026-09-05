@@ -1106,7 +1106,7 @@ export function formatScanAsMarkdown(
       }
       if (response.truncated && response.upgrade_hint) {
         lines.push("");
-        lines.push(`> ${response.upgrade_hint}`);
+        lines.push(`> ${cellSafe(response.upgrade_hint, ENVELOPE_STRING_LIMIT)}`);
       }
       return lines.join("\n");
     }
@@ -1123,7 +1123,7 @@ export function formatScanAsMarkdown(
     if (response.truncated && response.upgrade_hint) {
       lines.push("All matching results were dropped to keep the response under the size limit.");
       lines.push("");
-      lines.push(`> ${response.upgrade_hint}`);
+      lines.push(`> ${cellSafe(response.upgrade_hint, ENVELOPE_STRING_LIMIT)}`);
       return lines.join("\n");
     }
     lines.push(
@@ -1167,7 +1167,13 @@ export function formatScanAsMarkdown(
 
   const isPro = isScoutResult || isPhase5Pro;
   const totalDisplay = response.total ?? response.domains.length;
-  const sourceDisplay = response.source ?? (isScoutResult ? "scout-result" : "unknown");
+  // Every API-provided string the renderer prints is capped (upgrade_hint and
+  // source here, cells in formatTable): the halving loop can only remove rows,
+  // so a scalar over budget would otherwise leave nothing for it to cut.
+  const sourceDisplay = cellSafe(
+    response.source ?? (isScoutResult ? "scout-result" : "unknown"),
+    40,
+  );
 
   lines.push(
     `Returned **${response.domains.length}** attributed domain(s) of ${totalDisplay} total. ` +
@@ -1175,7 +1181,7 @@ export function formatScanAsMarkdown(
   );
   if (response.truncated && response.upgrade_hint) {
     lines.push("");
-    lines.push(`> ${response.upgrade_hint}`);
+    lines.push(`> ${cellSafe(response.upgrade_hint, ENVELOPE_STRING_LIMIT)}`);
   }
   lines.push("");
 
@@ -1229,7 +1235,7 @@ function formatTable(domains: DomainResult[], kind: TableKind): string {
           : "_none_";
         const topEvidence = topEvidenceLine(enriched.evidence);
         rows.push(
-          `| \`${cellSafe(domain, 60)}\` | ${cellSafe(org, 50)} | ${bandEmoji} ${enriched.confidence_band}${overrideTag} | ${cellSafe(signalSummary)} | ${topEvidence} |`,
+          `| \`${cellSafe(domain, 60)}\` | ${cellSafe(org, 50)} | ${bandEmoji} ${cellSafe(enriched.confidence_band, 20)}${overrideTag} | ${cellSafe(signalSummary)} | ${topEvidence} |`,
         );
       }
     } else if (kind === "scout") {
@@ -1285,7 +1291,7 @@ function cellSafe(s: string | null | undefined, maxLen = 80): string {
     .replace(/[\r\n]+/g, " ")
     .trim();
   if (stripped.length === 0) return "—";
-  return stripped.length > maxLen ? `${stripped.slice(0, maxLen - 1)}…` : stripped;
+  return capLength(stripped, maxLen);
 }
 
 // ---------- Phase-5 fictional Pro renderer helpers (kept for compat) ----------
@@ -1300,6 +1306,8 @@ function bandIndicator(band: ConfidenceBand): string {
       return "🟡";
     case "insufficient":
       return "⚪";
+    default:
+      return "❔";
   }
 }
 
@@ -1320,14 +1328,20 @@ const EVIDENCE_PRIORITY = [
 function topEvidenceLine(evidence: Record<string, string>): string {
   for (const key of EVIDENCE_PRIORITY) {
     if (key in evidence) {
-      return escapeForTable(evidence[key]);
+      return escapeForTable(capLength(evidence[key], 80));
     }
   }
   // Fallback: first key in dict order
   for (const key in evidence) {
-    return escapeForTable(evidence[key]);
+    return escapeForTable(capLength(evidence[key], 80));
   }
   return "_no evidence_";
+}
+
+// Ellipsis-cap a string past `maxLen`, the cellSafe rule without its cell
+// sanitizing, for strings that go through escapeForTable instead.
+function capLength(s: string, maxLen: number): string {
+  return s.length > maxLen ? `${s.slice(0, maxLen - 1)}…` : s;
 }
 
 // Defensive: pipe AND any line terminator (CR, LF, CRLF) would break the
@@ -1874,19 +1888,132 @@ export function formatJobAsMarkdown(job: JobResponse): {
   structured: JobResponse;
 } {
   const header = jobHeader(job);
-  const data = jobResultData(job);
-  if (data === undefined) {
-    return { text: header, structured: boundedJobRecord(job, undefined) };
+  const rawData = jobResultData(job);
+  if (rawData === undefined) {
+    return { text: clampText(header), structured: boundedJobRecord(job, undefined) };
   }
+  // Shrink the record before rendering, so the markdown is rendered from
+  // the same structure the client receives (and shows the strip hint).
+  const stripped = stripNonRendered(job, rawData);
   const label = jobResultLabel(job);
   const render = (s: ScanResponse) => demoteHeading(formatScanAsMarkdown(label, s));
   const { text, structured } = truncateWithRender(
-    render(data),
-    data,
+    render(stripped.data),
+    stripped.data,
     render,
     Math.max(0, CHARACTER_LIMIT - header.length - 2),
   );
-  return { text: `${header}\n\n${text}`, structured: boundedJobRecord(job, structured) };
+  return {
+    text: clampText(`${header}\n\n${text}`),
+    structured: boundedJobRecord(stripped.job, structured),
+  };
+}
+
+// Final, unconditional clamp on the job tools' markdown: every rendered
+// string is capped upstream, so this is the guarantee rather than the
+// mechanism. Cuts at a line boundary and says so, like the halving hint.
+export function clampText(text: string, limit: number = CHARACTER_LIMIT): string {
+  if (text.length <= limit) return text;
+  const hint = `> ${clampHint(limit)}`;
+  const room = Math.max(0, limit - hint.length - 2);
+  const head = text.slice(0, room);
+  const cut = head.lastIndexOf("\n");
+  return `${cut > 0 ? head.slice(0, cut) : head}\n\n${hint}`;
+}
+
+function clampHint(limit: number): string {
+  return (
+    `Response clamped to stay under ${limit} chars; the rendered text was cut here. ` +
+    "Refine the query to narrow the results (JSON output is truncated the same way)."
+  );
+}
+
+// The result's own scalar strings, capped in place (the same cap the minimal
+// envelope applies), so an oversized upgrade_hint or source is bounded
+// without dropping anything else.
+function boundResultStrings(data: DeepDiveResult): DeepDiveResult {
+  return {
+    ...data,
+    ...(data.upgrade_hint !== undefined && { upgrade_hint: boundedField(data.upgrade_hint) }),
+    ...(data.source !== undefined && { source: boundedField(data.source) }),
+    ...(data.empty_reason !== undefined && { empty_reason: boundedField(data.empty_reason) }),
+    ...(data.match_type !== undefined && { match_type: boundedField(data.match_type) }),
+    ...(data.org_match_strategy !== undefined && {
+      org_match_strategy: boundedField(data.org_match_strategy),
+    }),
+    ...(data.snapshot != null && { snapshot: boundedField(data.snapshot) }),
+  };
+}
+
+// Shrink steps for a done job over budget, in order, so structuredContent
+// keeps the domains the text shows for as long as possible: the result's
+// scalar strings are capped (lossless for anything sane, so not reported),
+// then the fields the markdown never renders are dropped — unknown outer
+// fields, run_metadata, entity, each domain's embedded discovery record,
+// then the per-signal evidence maps. Only when the record is still over
+// budget do domains get halved, and only after that does the result
+// collapse to the minimal envelope.
+const STRIP_STEPS: Array<{
+  name?: string;
+  apply: (job: JobResponse, data: DeepDiveResult) => [JobResponse, DeepDiveResult];
+}> = [
+  { apply: (job, data) => [job, boundResultStrings(data)] },
+  { name: "unknown job fields", apply: (job, data) => [minimalJobEnvelope(job), data] },
+  {
+    name: "run_metadata",
+    apply: (job, { run_metadata: _dropped, ...data }) => [job, data],
+  },
+  { name: "entity", apply: (job, { entity: _dropped, ...data }) => [job, data] },
+  {
+    name: "domains[].base",
+    apply: (job, data) => [
+      job,
+      { ...data, domains: data.domains.map(({ base: _dropped, ...row }) => row) },
+    ],
+  },
+  {
+    name: "domains[].enrichment.evidence / signal_health",
+    apply: (job, data) => [
+      job,
+      {
+        ...data,
+        domains: data.domains.map((row) =>
+          row.enrichment == null
+            ? row
+            : { ...row, enrichment: { ...row.enrichment, evidence: {}, signal_health: {} } },
+        ),
+      },
+    ],
+  },
+];
+
+function stripNonRendered(
+  job: JobResponse,
+  data: DeepDiveResult,
+): { job: JobResponse; data: DeepDiveResult } {
+  const size = (j: JobResponse, d: DeepDiveResult) => JSON.stringify(wrapJob(j, d)).length;
+  let current = { job, data };
+  let currentSize = size(job, data);
+  const dropped: string[] = [];
+  for (const step of STRIP_STEPS) {
+    if (currentSize <= CHARACTER_LIMIT) break;
+    const [nextJob, nextData] = step.apply(current.job, current.data);
+    const nextSize = size(nextJob, nextData);
+    if (step.name !== undefined && nextSize < currentSize) dropped.push(step.name);
+    current = { job: nextJob, data: nextData };
+    currentSize = nextSize;
+  }
+  if (dropped.length === 0) return current;
+  return {
+    job: current.job,
+    data: {
+      ...current.data,
+      truncated: true,
+      upgrade_hint:
+        `Response truncated: ${dropped.join(", ")} omitted to stay under ${CHARACTER_LIMIT} chars; ` +
+        `all ${current.data.domains.length} domains kept.`,
+    },
+  };
 }
 
 // The structuredContent of a markdown job response: the record as-is when
@@ -1935,13 +2062,16 @@ export function truncateJobJsonIfNeeded(job: JobResponse): {
   structured: JobResponse;
 } {
   const data = jobResultData(job);
-  const wrap = (s: ScanResponse | undefined) => wrapJob(job, s);
   return serializeBoundedJson(
-    wrap(data),
+    wrapJob(job, data),
     () => wrapJob(minimalJobEnvelope(job), data && minimalScanEnvelope(data)),
     data &&
       (() => {
-        const shrunk = truncateWithRender(JSON.stringify(wrap(data)), data, (s) =>
+        // Non-rendered fields go first, so the domains survive as long as
+        // the record can hold them; only then are they halved.
+        const stripped = stripNonRendered(job, data);
+        const wrap = (s: ScanResponse | undefined) => wrapJob(stripped.job, s);
+        const shrunk = truncateWithRender(JSON.stringify(wrap(stripped.data)), stripped.data, (s) =>
           JSON.stringify(wrap(s)),
         );
         return { text: shrunk.text, structured: wrap(shrunk.structured) };
@@ -2297,7 +2427,7 @@ Examples:
         const text =
           params.response_format === ResponseFormat.JSON
             ? json
-            : formatJobSubmittedAsMarkdown(spec, structured);
+            : clampText(formatJobSubmittedAsMarkdown(spec, structured));
         return {
           content: [{ type: "text", text }],
           structuredContent: structured as unknown as Record<string, unknown>,

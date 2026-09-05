@@ -982,6 +982,69 @@ describe("stdio MCP compatibility contract", () => {
     }
   });
 
+  it("keeps a done job's shown domain in structuredContent when a non-rendered field is oversized, and bounds an oversized upgrade_hint", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_pro_contract_test";
+    const records: unknown[] = [
+      { ...DONE_JOB, result: { ...DONE_JOB.result, run_metadata: { blob: "m".repeat(30_000) } } },
+      { ...DONE_JOB, result: { ...DONE_JOB.result, run_metadata: { blob: "m".repeat(30_000) } } },
+      {
+        ...DONE_JOB,
+        result: {
+          ...DONE_JOB.result,
+          domains: [],
+          truncated: true,
+          upgrade_hint: "h".repeat(30_000),
+        },
+      },
+    ];
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response(JSON.stringify(records.shift()), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+    ) as unknown as typeof fetch;
+
+    const { client, close } = await connect();
+
+    try {
+      for (const format of ["markdown", "json"] as const) {
+        const done = await client.callTool({
+          name: "ctscout_get_job",
+          arguments: { job_id: JOB_ID, response_format: format },
+        });
+        expect(done.isError).not.toBe(true);
+        expect(textOf(done).length).toBeLessThanOrEqual(25_000);
+        expect(JSON.stringify(done.structuredContent).length).toBeLessThanOrEqual(25_000);
+        expect(done.structuredContent).toMatchObject({
+          status: "done",
+          snapshot: "2026-08-31",
+          result: {
+            domains: [{ domain: "cna.com", attributed_to: "CNA Financial Corporation" }],
+            truncated: true,
+            upgrade_hint: expect.stringContaining("run_metadata omitted"),
+          },
+        });
+        expect((done.structuredContent as JobResponse).result).not.toHaveProperty("run_metadata");
+        if (format === "markdown") {
+          expect(textOf(done)).toContain("| `cna.com` |");
+          expect(textOf(done)).toContain("> Response truncated: run_metadata omitted");
+        }
+      }
+
+      const hinted = await client.callTool({
+        name: "ctscout_get_job",
+        arguments: { job_id: JOB_ID },
+      });
+      expect(hinted.isError).not.toBe(true);
+      expect(textOf(hinted).length).toBeLessThanOrEqual(25_000);
+      expect(textOf(hinted)).toMatch(/> h{199}…/);
+      expect(JSON.stringify(hinted.structuredContent).length).toBeLessThanOrEqual(25_000);
+    } finally {
+      await close();
+    }
+  });
+
   it("bounds a not-done record carrying an oversized forward-compatible field in markdown format", async () => {
     process.env.CTSCOUT_API_KEY = "ds_pro_contract_test";
     const oversized = {
