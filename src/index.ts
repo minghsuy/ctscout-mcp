@@ -576,12 +576,107 @@ const JobSubmitOutputSchema = z.looseObject({
   poll: z.string().optional().describe("Relative API path to poll (informational)."),
 });
 
+// Per-domain enrichment evidence of a deep dive (ProDomainEvidence in
+// domain-scout-api's pro_models). Proxied verbatim: loose and optional, with
+// the vocabularies documented rather than closed, as for every proxied enum.
+const DeepDiveEnrichmentSchema = z.looseObject({
+  confidence_band: z
+    .string()
+    .optional()
+    .describe(
+      "Attribution band from the enrichment scorer: 'verified' | 'likely' | 'possible' | " +
+        "'insufficient'. Rendered as reported, never recomputed here.",
+    ),
+  weight_total: z
+    .number()
+    .optional()
+    .describe("Summed signal weights behind the band; can be positive under a VLM override."),
+  matched_via: z
+    .array(z.string())
+    .optional()
+    .describe("Signals that corroborated the attribution."),
+  evidence: z
+    .record(z.string(), z.string())
+    .optional()
+    .describe("Signal name -> human-readable evidence string for that signal."),
+  signal_health: z
+    .record(z.string(), z.string())
+    .optional()
+    .describe(
+      "Signal name -> disposition: 'hit' | 'miss' (checked, nothing found) | 'error' (collector " +
+        "failed, NOT checked) | 'redacted' | 'verified' | 'no' | 'uncertain' | 'unscored' " +
+        "(collected, no detector reads it yet; never moves the band).",
+    ),
+  vlm_status: z
+    .string()
+    .optional()
+    .describe(
+      "'cached' | 'pending' | 'skipped'. v1 deep dives never run the VLM: 'pending' or 'skipped'.",
+    ),
+  vlm_override: z
+    .boolean()
+    .optional()
+    .describe(
+      "true when a VLM 'no' verdict forced the band to 'insufficient' regardless of weight_total.",
+    ),
+});
+
+// A deep-dive domain row (ProDiscoveredDomain): the Pro /scan row plus the
+// embedded discovery evidence and the enrichment above.
+const DeepDiveDomainSchema = DomainResultSchema.extend({
+  is_seed: z
+    .boolean()
+    .optional()
+    .describe("true when the domain was a seed_domain of the request."),
+  base: z
+    .looseObject({})
+    .optional()
+    .describe(
+      "The underlying discovery record (DiscoveredDomain: confidence, sources, evidence, " +
+        "cert_org_names, rdap_org, first_seen, last_seen, resolves) the enrichment was scored on.",
+    ),
+  enrichment: DeepDiveEnrichmentSchema.optional().describe(
+    "Enrichment evidence behind attributed_to; absent means the row is not a deep-dive row.",
+  ),
+});
+
 // The deep-dive result: a Pro /scan result plus the fields the batch worker
 // adds. Proxied, so loose; only `domains` is required, as on ScanOutputSchema.
 const DeepDiveResultSchema = ScanOutputSchema.omit({
   snapshot: true,
   snapshot_source: true,
 }).extend({
+  domains: z
+    .array(DeepDiveDomainSchema)
+    .describe("Attributed apex domains with their evidence. Empty when nothing is attributed."),
+  entity: z
+    .looseObject({
+      company_name: z.string().optional(),
+      seed_domain: z.array(z.string()).optional(),
+    })
+    .optional()
+    .describe("The spec the deep dive ran on, as the batch worker validated it."),
+  run_metadata: z
+    .looseObject({})
+    .optional()
+    .describe(
+      "Audit record of the discovery run (tool_version, timestamp, elapsed_seconds, " +
+        "domains_found, timed_out, errors, config).",
+    ),
+  signals_attempted: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Apex-keyed enrichment signals this deployment ran (or read from cache) for every " +
+        "domain, set even with zero domains. A signal absent here was not configured; one " +
+        "present with signal_health 'error' was attempted and failed.",
+    ),
+  snapshot_source: SnapshotFields.snapshot_source
+    .optional()
+    .describe(
+      "Set by this server from result.snapshot: 'scan' when the batch worker reported the " +
+        "date, 'unavailable' when it did not. Mirrors the top-level snapshot_source.",
+    ),
   job_id: z.string().optional(),
   snapshot: z
     .string()
@@ -1799,27 +1894,34 @@ export function truncateJobJsonIfNeeded(job: JobResponse): {
   if (data === undefined) {
     // No result to shrink: a queued/failed record that is somehow over budget
     // is bounded by dropping the unknown top-level fields.
-    const minimal: JobResponse = {
-      job_id: job.job_id,
-      kind: job.kind,
-      status: job.status,
-      submitted_at: job.submitted_at,
-      started_at: job.started_at,
-      finished_at: job.finished_at,
-      ...(job.error != null && { error: truncateBody(job.error) }),
-      snapshot: null,
-      snapshot_source: "unavailable",
-    };
+    const minimal = wrapJob(minimalJobEnvelope(job), undefined);
     return { text: JSON.stringify(minimal), structured: minimal };
   }
   const result = truncateWithRender(JSON.stringify(wrap(data)), data, (s) =>
     JSON.stringify(wrap(s)),
   );
   if (result.text.length > CHARACTER_LIMIT) {
-    const minimal = wrap(minimalScanEnvelope(data));
+    // The halving loop only shrinks the result: an unknown top-level field
+    // (permitted by the loose schema) can keep the record over budget, so the
+    // outer envelope collapses to known, bounded fields too.
+    const minimal = wrapJob(minimalJobEnvelope(job), minimalScanEnvelope(data));
     return { text: JSON.stringify(minimal), structured: minimal };
   }
   return { text: result.text, structured: wrap(result.structured) };
+}
+
+// The job record reduced to the fields this server knows and bounds; the
+// result and the snapshot fields are attached by wrapJob.
+function minimalJobEnvelope(job: JobResponse): JobResponse {
+  return {
+    job_id: job.job_id,
+    kind: job.kind,
+    status: job.status,
+    submitted_at: job.submitted_at,
+    started_at: job.started_at,
+    finished_at: job.finished_at,
+    ...(job.error != null && { error: truncateBody(job.error) }),
+  };
 }
 
 // ---------- Server + tools ----------

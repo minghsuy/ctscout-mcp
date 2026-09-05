@@ -290,8 +290,43 @@ describe("stdio MCP compatibility contract", () => {
             additionalProperties: {},
             required: expect.arrayContaining(["domains"]),
             properties: {
-              domains: { type: "array" },
+              domains: {
+                type: "array",
+                items: {
+                  type: "object",
+                  additionalProperties: {},
+                  properties: {
+                    domain: { type: "string" },
+                    attributed_to: { type: "string" },
+                    is_seed: { type: "boolean" },
+                    base: { type: "object", additionalProperties: {} },
+                    enrichment: {
+                      type: "object",
+                      additionalProperties: {},
+                      properties: {
+                        confidence_band: { type: "string" },
+                        weight_total: { type: "number" },
+                        matched_via: { type: "array", items: { type: "string" } },
+                        evidence: { type: "object", additionalProperties: { type: "string" } },
+                        signal_health: { type: "object", additionalProperties: { type: "string" } },
+                        vlm_status: { type: "string" },
+                        vlm_override: { type: "boolean" },
+                      },
+                    },
+                  },
+                },
+              },
+              entity: {
+                type: "object",
+                properties: {
+                  company_name: { type: "string" },
+                  seed_domain: { type: "array", items: { type: "string" } },
+                },
+              },
+              run_metadata: { type: "object", additionalProperties: {} },
+              signals_attempted: { type: "array", items: { type: "string" } },
               snapshot: expect.anything(),
+              snapshot_source: { type: "string", enum: ["scan", "unavailable"] },
               worker_version: { type: "string" },
               signals_degraded: { type: "boolean" },
             },
@@ -301,6 +336,24 @@ describe("stdio MCP compatibility contract", () => {
       const getJobProps = getJob?.outputSchema?.properties as Record<string, unknown>;
       expect(getJobProps.status).not.toHaveProperty("enum");
       expect(getJob?.outputSchema?.required).not.toContain("result");
+      // Proxied vocabularies are documented, never closed: an upstream value
+      // added later must widen what an agent sees, not fail the call.
+      type Prop = {
+        enum?: unknown;
+        description?: string;
+        properties?: Record<string, Prop>;
+        items?: Prop;
+      };
+      const resultProp = getJobProps.result as Prop;
+      const enrichment = resultProp.properties?.domains.items?.properties?.enrichment
+        .properties as Record<string, Prop>;
+      expect(enrichment.confidence_band.enum).toBeUndefined();
+      expect(enrichment.confidence_band.description).toContain(
+        "'verified' | 'likely' | 'possible' | 'insufficient'",
+      );
+      expect(enrichment.signal_health.enum).toBeUndefined();
+      expect(enrichment.signal_health.description).toContain("'unscored'");
+      expect(enrichment.vlm_status.description).toContain("'pending' or 'skipped'");
     } finally {
       await close();
     }

@@ -3001,6 +3001,26 @@ describe("truncateJobJsonIfNeeded", () => {
     });
   });
 
+  it("collapses the outer envelope too when an unknown top-level field alone is over budget", () => {
+    const job = doneJob([proDiscoveredDomain("cna.com")], { noise: "n".repeat(30_000) });
+    const { text, structured } = truncateJobJsonIfNeeded(job);
+    expect(text.length).toBeLessThanOrEqual(25_000);
+    const parsed = JSON.parse(text) as JobResponse;
+    expect(parsed).toEqual(structured);
+    expect(parsed).not.toHaveProperty("noise");
+    expect(parsed).toMatchObject({
+      job_id: "0123456789abcdef01234567",
+      kind: "deep_dive",
+      status: "done",
+      submitted_at: "2026-09-04T10:00:00Z",
+      started_at: "2026-09-04T10:05:00Z",
+      finished_at: "2026-09-04T10:09:30Z",
+      result: { domains: [], truncated: true, snapshot: "2026-08-31", snapshot_source: "scan" },
+      snapshot: "2026-08-31",
+      snapshot_source: "scan",
+    });
+  });
+
   it("bounds a result-less record that is over budget by dropping unknown fields", () => {
     const { text, structured } = truncateJobJsonIfNeeded({
       job_id: "abc",
