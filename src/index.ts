@@ -1149,21 +1149,21 @@ export function formatScanAsMarkdown(
   //
   // A ProDiscoveredDomain (the deep-dive result, ProScanResult) also carries
   // `domain` without `apex_domain`, but has `enrichment` — that is the band /
-  // signals table, so an enrichment object on the first row wins over the
-  // ScoutResult check.
+  // signals table. A degraded deep-dive row can lack `enrichment` while the
+  // rows after it carry one, so the Pro shape is read from the source and
+  // from every row, not from the first row alone.
   const first = response.domains[0];
+  const proSource = response.source === "live-enriched" || response.source === "cache-only";
+  const anyEnriched = response.domains.some((d) => d.enrichment != null);
   const isScoutResult =
-    first.enrichment == null &&
+    !proSource &&
+    !anyEnriched &&
     typeof first.domain === "string" &&
     typeof first.apex_domain !== "string";
 
   // Phase-5 Pro detection (ProScanResult shape, also the original assumed
   // Pro shape). Only considered when the response isn't ScoutResult-shaped.
-  const isPhase5Pro =
-    !isScoutResult &&
-    (response.source === "live-enriched" ||
-      response.source === "cache-only" ||
-      response.domains.some((d) => d.enrichment != null));
+  const isPhase5Pro = !isScoutResult && (proSource || anyEnriched);
 
   const isPro = isScoutResult || isPhase5Pro;
   const totalDisplay = response.total ?? response.domains.length;
@@ -2014,7 +2014,14 @@ const STRIP_STEPS: Array<{
         domains: data.domains.map((row) =>
           row.enrichment == null
             ? row
-            : { ...row, enrichment: { ...row.enrichment, evidence: {}, signal_health: {} } },
+            : {
+                ...row,
+                enrichment: {
+                  ...row.enrichment,
+                  ...(row.enrichment.evidence == null ? {} : { evidence: {} }),
+                  ...(row.enrichment.signal_health == null ? {} : { signal_health: {} }),
+                },
+              },
         ),
       },
     ],

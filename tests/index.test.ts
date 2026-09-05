@@ -3130,6 +3130,27 @@ describe("formatJobAsMarkdown", () => {
     expect(text).toContain("verified via google-site-verification");
   });
 
+  it("leaves absent evidence / signal_health maps absent when stripping over-budget rows", () => {
+    const sparse = (i: number): DomainResult => ({
+      domain: `d${i}.cna.com`,
+      attributed_to: "CNA Financial Corporation",
+      is_seed: false,
+      enrichment: {
+        confidence_band: "likely",
+        weight_total: 1.5,
+        matched_via: ["rdap_registrant_match"],
+      },
+    });
+    const rows = Array.from({ length: 400 }, (_, i) => sparse(i));
+    const { structured } = formatJobAsMarkdown(doneJob(rows));
+    expect(JSON.stringify(structured).length).toBeLessThanOrEqual(25_000);
+    for (const row of structured.result?.domains ?? []) {
+      expect(row.enrichment).not.toHaveProperty("evidence");
+      expect(row.enrichment).not.toHaveProperty("signal_health");
+    }
+    expect(structured.result?.upgrade_hint).not.toContain("evidence / signal_health");
+  });
+
   it("collapses a not-done record's structuredContent to the bounded envelope", () => {
     const { text, structured } = formatJobAsMarkdown({
       job_id: "abc",
@@ -3293,6 +3314,20 @@ describe("formatScanAsMarkdown — ProDiscoveredDomain rows (deep-dive result sh
     expect(md).toContain("| Domain | Attributed to | Band | Signals | Evidence |");
     expect(md).not.toContain("| Domain | Attributed to | Confidence | Sources | Evidence |");
     expect(md).toContain("| `cna.com` | CNA Financial Corporation | ✅ verified |");
+  });
+
+  it("reads the Pro shape from the source and later rows when the first row is degraded", () => {
+    const md = formatScanAsMarkdown("CNA Financial", {
+      domains: [
+        { domain: "degraded.cna.com", attributed_to: "CNA Financial Corporation", is_seed: false },
+        proDiscoveredDomain("cna.com"),
+      ],
+      source: "live-enriched",
+      signals_degraded: true,
+    });
+    expect(md).toContain("| Domain | Attributed to | Band | Signals | Evidence |");
+    expect(md).toContain("| `cna.com` | CNA Financial Corporation | ✅ verified |");
+    expect(md).toContain("| `degraded.cna.com` | CNA Financial Corporation |");
   });
 
   it("still renders an enrichment-less `domain` row as a ScoutResult", () => {
