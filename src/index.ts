@@ -2045,6 +2045,30 @@ function knownRowFields(row: DeepDiveDomain): DeepDiveDomain {
   return kept;
 }
 
+// Every string in a row capped and every list or map cut to its first
+// entries, so no single field can cost the row its place: the renderer
+// shows at most a few entries of any list and caps every cell, so a value
+// past these limits was never going to be read. Applied only once the
+// record is over budget, like the other steps.
+const ROW_LIST_LIMIT = 20;
+
+function boundValue(value: unknown): unknown {
+  if (typeof value === "string") return boundedField(value);
+  if (Array.isArray(value)) return value.slice(0, ROW_LIST_LIMIT).map(boundValue);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .slice(0, ROW_LIST_LIMIT)
+        .map(([key, inner]) => [key, boundValue(inner)]),
+    );
+  }
+  return value;
+}
+
+function boundRowValues(row: DeepDiveDomain): DeepDiveDomain {
+  return boundValue(row) as DeepDiveDomain;
+}
+
 function knownResultFields(data: DeepDiveResult): DeepDiveResult {
   return Object.fromEntries(
     Object.entries(data).filter(([key]) => KNOWN_RESULT_KEYS.has(key)),
@@ -2069,6 +2093,10 @@ const STRIP_STEPS: Array<{
   {
     name: "unknown domain fields",
     apply: (job, data) => [job, { ...data, domains: data.domains.map(knownRowFields) }],
+  },
+  {
+    name: "domains[] oversized values",
+    apply: (job, data) => [job, { ...data, domains: data.domains.map(boundRowValues) }],
   },
   {
     name: "run_metadata",

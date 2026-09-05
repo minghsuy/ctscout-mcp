@@ -3121,18 +3121,15 @@ describe("formatJobAsMarkdown", () => {
     expect(json.structured.result?.upgrade_hint).toContain("omitted to stay under 25000 chars.");
   });
 
-  it("drops a domain's embedded base before the domain itself", () => {
+  it("bounds one oversized value inside a domain's embedded base before anything is dropped", () => {
     const row = proDiscoveredDomain("cna.com");
     const job = doneJob([{ ...row, base: { ...(row.base as object), blob: "b".repeat(30_000) } }]);
     const { text, structured } = formatJobAsMarkdown(job);
     expect(text).toContain("| `cna.com` |");
-    // Steps are cumulative: the earlier, cheaper fields go first.
-    expect(text).toContain(
-      "> Response truncated: run_metadata, entity, signals_attempted, domains[].base omitted",
-    );
+    expect(text).toContain("> Response truncated: domains[] oversized values omitted");
     expect(JSON.stringify(structured).length).toBeLessThanOrEqual(25_000);
     expect(structured.result?.domains).toHaveLength(1);
-    expect(structured.result?.domains[0]).not.toHaveProperty("base");
+    expect((structured.result?.domains[0].base as { blob: string }).blob).toContain("…(truncated");
     expect(structured.result?.domains[0].enrichment?.confidence_band).toBe("verified");
     // The evidence map was not needed and survives into the rendered cell.
     expect(text).toContain("verified via google-site-verification");
@@ -3365,18 +3362,48 @@ describe("truncateJobJsonIfNeeded", () => {
     expect(parsed.snapshot).toBe("2026-08-31");
   });
 
-  it("collapses to the minimal scan envelope when one row alone is over budget", () => {
-    // A known, rendered field: an unknown one would be stripped before the
-    // row is judged.
-    const huge = { ...proDiscoveredDomain("cna.com"), attributed_to: "x".repeat(30_000) };
-    const { text, structured } = truncateJobJsonIfNeeded(doneJob([huge]));
-    expect(text.length).toBeLessThanOrEqual(25_000);
-    expect(structured).toMatchObject({
-      status: "done",
-      result: { domains: [], truncated: true, snapshot: "2026-08-31", snapshot_source: "scan" },
-      snapshot: "2026-08-31",
-      snapshot_source: "scan",
-    });
+  it("drops every domain's embedded base before any domain itself", () => {
+    // Many rows whose bases are within the per-value caps but add up: the
+    // base step goes before halving.
+    const base = Object.fromEntries(
+      Array.from({ length: 20 }, (_, i) => [`k${i}`, "b".repeat(150)]),
+    );
+    const rows = Array.from({ length: 40 }, (_, i) => ({
+      ...proDiscoveredDomain(`d${i}.cna.com`),
+      base,
+    }));
+    const { text, structured } = formatJobAsMarkdown(doneJob(rows));
+    expect(text).toContain("domains[].base omitted");
+    expect(JSON.stringify(structured).length).toBeLessThanOrEqual(25_000);
+    const kept = structured.result?.domains ?? [];
+    expect(kept.length).toBeGreaterThan(0);
+    for (const row of kept) expect(row).not.toHaveProperty("base");
+  });
+
+  it("keeps a row whose own values are oversized by bounding them, not by dropping it", () => {
+    const row = proDiscoveredDomain("cna.com");
+    const huge = {
+      ...row,
+      attributed_to: "x".repeat(30_000),
+      enrichment: {
+        ...row.enrichment,
+        matched_via: Array.from({ length: 5000 }, (_, i) => `signal_${i}`).concat(
+          "s".repeat(30_000),
+        ),
+      },
+    };
+    for (const { structured } of [
+      formatJobAsMarkdown(doneJob([huge])),
+      truncateJobJsonIfNeeded(doneJob([huge])),
+    ]) {
+      expect(JSON.stringify(structured).length).toBeLessThanOrEqual(25_000);
+      const kept = structured.result?.domains;
+      expect(kept).toHaveLength(1);
+      expect(kept?.[0].attributed_to).toContain("…(truncated, 30000 chars total)");
+      expect(kept?.[0].enrichment?.matched_via).toHaveLength(20);
+      expect(kept?.[0].enrichment?.confidence_band).toBe("verified");
+      expect(structured.result?.upgrade_hint).toContain("domains[] oversized values omitted");
+    }
   });
 
   it("drops an oversized unknown top-level field first and keeps the result intact", () => {
