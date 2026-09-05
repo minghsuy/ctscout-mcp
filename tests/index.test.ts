@@ -3130,6 +3130,42 @@ describe("formatJobAsMarkdown", () => {
     expect(text).toContain("verified via google-site-verification");
   });
 
+  it("keeps the worker's own upgrade_hint in front of the strip notice", () => {
+    const job = doneJob([proDiscoveredDomain("cna.com")]);
+    job.result = {
+      ...job.result,
+      truncated: true,
+      upgrade_hint: "Deep dive stopped at 50 domains (worker cap).",
+      run_metadata: { blob: "m".repeat(30_000) },
+    } as JobResponse["result"];
+    const { text, structured } = formatJobAsMarkdown(job);
+    expect(structured.result?.upgrade_hint).toMatch(
+      /^Deep dive stopped at 50 domains \(worker cap\)\. Response truncated: run_metadata omitted/,
+    );
+    expect(text).toContain("Deep dive stopped at 50 domains (worker cap).");
+    const json = truncateJobJsonIfNeeded(job);
+    expect(json.structured.result?.upgrade_hint).toMatch(/^Deep dive stopped at 50 domains/);
+  });
+
+  it("halves the structured record when the strip hint alone pushes it over budget", () => {
+    // Many small rows: after the strip steps the compact record sits just
+    // under the limit, and the attached hint tips it over. The markdown
+    // still fits, so the structured record must be halved, not emptied.
+    const rows = Array.from({ length: 170 }, (_, i) => ({
+      ...proDiscoveredDomain(`d${i}.cna.com`),
+      base: { domain: `d${i}.cna.com`, confidence: 0.9, sources: ["ct_org_match"] },
+    }));
+    const job = doneJob(rows);
+    for (let n = 170; n >= 100; n -= 1) {
+      const trial = doneJob(rows.slice(0, n));
+      const { structured } = formatJobAsMarkdown(trial);
+      expect(JSON.stringify(structured).length).toBeLessThanOrEqual(25_000);
+      // Never the empty minimal envelope while the rows can fit by halving.
+      expect(structured.result?.domains.length).toBeGreaterThan(0);
+    }
+    expect(JSON.stringify(formatJobAsMarkdown(job).structured).length).toBeLessThanOrEqual(25_000);
+  });
+
   it("leaves absent evidence / signal_health maps absent when stripping over-budget rows", () => {
     const sparse = (i: number): DomainResult => ({
       domain: `d${i}.cna.com`,

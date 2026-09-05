@@ -1899,11 +1899,17 @@ export function formatJobAsMarkdown(job: JobResponse): {
   // Shrink the record before rendering, so the markdown is rendered from
   // the same structure the client receives (and shows the strip hint).
   const stripped = stripNonRendered(job, rawData);
+  // The structured record must fit the JSON budget on its own: stripping can
+  // leave it just over once the hint is attached, and the markdown limit
+  // below measures rendered text, not the record. Halve against the record
+  // first, then against the rendering, so both carry the same domains.
+  const wrap = (s: ScanResponse) => JSON.stringify(wrapJob(stripped.job, s));
+  const fit = truncateWithRender(wrap(stripped.data), stripped.data, wrap);
   const label = jobResultLabel(job);
   const render = (s: ScanResponse) => demoteHeading(formatScanAsMarkdown(label, s));
   const { text, structured } = truncateWithRender(
-    render(stripped.data),
-    stripped.data,
+    render(fit.structured),
+    fit.structured,
     render,
     Math.max(0, CHARACTER_LIMIT - header.length - 2),
   );
@@ -2034,16 +2040,20 @@ function stripNonRendered(
 ): { job: JobResponse; data: DeepDiveResult } {
   // The hint is part of what is measured: a record just under the limit
   // before the hint is attached would otherwise go over with it.
-  const withHint = (d: DeepDiveResult, dropped: string[]): DeepDiveResult =>
-    dropped.length === 0
-      ? d
-      : {
-          ...d,
-          truncated: true,
-          upgrade_hint:
-            `Response truncated: ${dropped.join(", ")} omitted to stay under ${CHARACTER_LIMIT} chars; ` +
-            `all ${d.domains.length} domains kept.`,
-        };
+  // The worker's own hint (already bounded by the first step) is kept in
+  // front of the local notice: it says why the result was incomplete
+  // before it reached this server.
+  const withHint = (d: DeepDiveResult, dropped: string[]): DeepDiveResult => {
+    if (dropped.length === 0) return d;
+    const local =
+      `Response truncated: ${dropped.join(", ")} omitted to stay under ${CHARACTER_LIMIT} chars; ` +
+      `all ${d.domains.length} domains kept.`;
+    return {
+      ...d,
+      truncated: true,
+      upgrade_hint: data.upgrade_hint ? `${data.upgrade_hint} ${local}` : local,
+    };
+  };
   const size = (j: JobResponse, d: DeepDiveResult) => JSON.stringify(wrapJob(j, d)).length;
   let current = { job, data };
   const dropped: string[] = [];
