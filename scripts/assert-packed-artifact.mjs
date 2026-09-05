@@ -88,16 +88,18 @@ assert.equal(
   "the installed MCP server runtime must match the exact packed manifest pin",
 );
 
-const STATS_LAST_SYNC = "2026-09-03";
+// Only the batch stub carries `snapshot`: it proves the payload-carried path.
+// The single-scan stubs omit it, matching what the hosted API emits today, so
+// they pin the documented transport exception (README "hosted endpoint"):
+// snapshot is null / "unavailable", never a date fetched from elsewhere.
+const PAYLOAD_SNAPSHOT = "2026-09-03";
 
 const apiRequests = [];
 const api = createHttpServer((request, response) => {
   const chunks = [];
   request.on("data", (chunk) => chunks.push(chunk));
   request.on("end", () => {
-    // GET /stats has no body; every scan request carries a JSON one.
-    const body =
-      request.method === "GET" ? undefined : JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
     apiRequests.push({
       method: request.method,
       url: request.url,
@@ -107,11 +109,6 @@ const api = createHttpServer((request, response) => {
     });
 
     response.writeHead(200, { "content-type": "application/json" });
-    if (request.url === "/stats") {
-      response.end(JSON.stringify({ organizations: 1, last_sync: STATS_LAST_SYNC }));
-      return;
-    }
-
     if (request.url === "/scan/batch") {
       response.end(
         JSON.stringify({
@@ -131,6 +128,7 @@ const api = createHttpServer((request, response) => {
             org_match_strategy: "substring",
           })),
           remaining_quota: 7,
+          snapshot: PAYLOAD_SNAPSHOT,
         }),
       );
       return;
@@ -337,14 +335,13 @@ try {
     modernBatch.result.structuredContent.results.map((item) => item.query.company_name),
     ["Alpha", "Beta"],
   );
-  assert.equal(modernBatch.result.structuredContent.snapshot, STATS_LAST_SYNC);
-  assert.equal(modernBatch.result.structuredContent.snapshot_source, "stats");
+  assert.equal(modernBatch.result.structuredContent.snapshot, PAYLOAD_SNAPSHOT);
+  assert.equal(modernBatch.result.structuredContent.snapshot_source, "scan");
   const modernSearch = modernList.result.tools.find(
     (tool) => tool.name === "ctscout_search_company",
   );
   assert.deepEqual(modernSearch.outputSchema.properties.snapshot_source.enum, [
     "scan",
-    "stats",
     "unavailable",
   ]);
   await modern.close();
@@ -432,8 +429,8 @@ try {
     legacySearch.result.structuredContent.domains[0].apex_domain,
     "packed-search.example",
   );
-  assert.equal(legacySearch.result.structuredContent.snapshot, STATS_LAST_SYNC);
-  assert.equal(legacySearch.result.structuredContent.snapshot_source, "stats");
+  assert.equal(legacySearch.result.structuredContent.snapshot, null);
+  assert.equal(legacySearch.result.structuredContent.snapshot_source, "unavailable");
 
   const legacyLookup = await legacy.request({
     jsonrpc: "2.0",
@@ -449,12 +446,12 @@ try {
     legacyLookup.result.structuredContent.domains[0].apex_domain,
     "packed-lookup.example",
   );
-  assert.equal(legacyLookup.result.structuredContent.snapshot, STATS_LAST_SYNC);
+  assert.equal(legacyLookup.result.structuredContent.snapshot, null);
+  assert.equal(legacyLookup.result.structuredContent.snapshot_source, "unavailable");
   for (const tool of legacyList.result.tools) {
     assert.ok(tool.outputSchema, `packed server omitted outputSchema on ${tool.name}`);
     assert.deepEqual(tool.outputSchema.properties.snapshot_source.enum, [
       "scan",
-      "stats",
       "unavailable",
     ]);
   }
@@ -470,8 +467,8 @@ assert.deepEqual(
     apiKey,
     userAgent,
   })),
-  // Each server process reads /stats once after its first successful scan
-  // (public endpoint: no API key) and serves later calls from its cache.
+  // One request per tool call and nothing else: the snapshot date never
+  // triggers a separate fetch.
   [
     {
       method: "POST",
@@ -480,21 +477,9 @@ assert.deepEqual(
       userAgent: `ctscout-mcp-server/${expectedVersion}`,
     },
     {
-      method: "GET",
-      url: "/stats",
-      apiKey: undefined,
-      userAgent: `ctscout-mcp-server/${expectedVersion}`,
-    },
-    {
       method: "POST",
       url: "/scan",
       apiKey: API_KEY,
-      userAgent: `ctscout-mcp-server/${expectedVersion}`,
-    },
-    {
-      method: "GET",
-      url: "/stats",
-      apiKey: undefined,
       userAgent: `ctscout-mcp-server/${expectedVersion}`,
     },
     {
@@ -508,7 +493,7 @@ assert.deepEqual(
 assert.deepEqual(apiRequests[0].body, {
   queries: [{ company_name: "Alpha" }, { company_name: "Beta" }],
 });
-assert.deepEqual(apiRequests[2].body, { company_name: "Packed Search" });
-assert.deepEqual(apiRequests[4].body, { seed_domain: ["packed-lookup.example"] });
+assert.deepEqual(apiRequests[1].body, { company_name: "Packed Search" });
+assert.deepEqual(apiRequests[2].body, { seed_domain: ["packed-lookup.example"] });
 
 process.stdout.write("packed artifact install + modern/legacy protocol contract passed\n");

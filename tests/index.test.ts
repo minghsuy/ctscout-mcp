@@ -38,11 +38,9 @@ import {
   callScanBatch,
   explainError,
   fairShareBudgets,
-  fetchWarehouseSnapshot,
   formatBatchAsMarkdown,
   formatScanAsMarkdown,
   getApiKey,
-  resetSnapshotCache,
   resolveSnapshot,
   SERVER_VERSION,
   SearchCompanyBatchInputSchema,
@@ -2518,85 +2516,20 @@ describe("truncateBatchJsonIfNeeded", () => {
   });
 });
 
-describe("fetchWarehouseSnapshot / resolveSnapshot", () => {
-  let originalFetch: typeof globalThis.fetch;
-
-  beforeEach(() => {
-    originalFetch = globalThis.fetch;
-    resetSnapshotCache();
-  });
-
-  afterEach(() => {
-    globalThis.fetch = originalFetch;
-    resetSnapshotCache();
-  });
-
-  function statsFetch(body: unknown, status = 200): ReturnType<typeof vi.fn> {
-    const mock = vi.fn(
-      async () =>
-        new Response(JSON.stringify(body), {
-          status,
-          headers: { "Content-Type": "application/json" },
-        }),
-    );
-    globalThis.fetch = mock as unknown as typeof fetch;
-    return mock;
-  }
-
-  it("reads last_sync from /stats and caches it for the TTL window", async () => {
-    const mock = statsFetch({ last_sync: "2026-09-03", organizations: 1 });
-    expect(await fetchWarehouseSnapshot(1_000)).toBe("2026-09-03");
-    expect(await fetchWarehouseSnapshot(1_000 + 9 * 60_000)).toBe("2026-09-03");
-    expect(mock).toHaveBeenCalledTimes(1);
-    expect(String(mock.mock.calls[0][0])).toMatch(/\/stats$/);
-
-    // Past the TTL the value is re-read, so a new weekly sync becomes visible.
-    statsFetch({ last_sync: "2026-09-10" });
-    expect(await fetchWarehouseSnapshot(1_000 + 11 * 60_000)).toBe("2026-09-10");
-  });
-
-  it("returns null (and caches nothing) on a non-2xx, a malformed body, or a thrown fetch", async () => {
-    statsFetch({ last_sync: "2026-09-03" }, 503);
-    expect(await fetchWarehouseSnapshot()).toBeNull();
-
-    statsFetch({ organizations: 5 });
-    expect(await fetchWarehouseSnapshot()).toBeNull();
-
-    statsFetch({ last_sync: "" });
-    expect(await fetchWarehouseSnapshot()).toBeNull();
-
-    globalThis.fetch = vi
-      .fn()
-      .mockRejectedValue(new Error("ECONNRESET")) as unknown as typeof fetch;
-    expect(await fetchWarehouseSnapshot()).toBeNull();
-
-    // Nothing above was cached: a healthy /stats is read on the next call.
-    const healthy = statsFetch({ last_sync: "2026-09-03" });
-    expect(await fetchWarehouseSnapshot()).toBe("2026-09-03");
-    expect(healthy).toHaveBeenCalledTimes(1);
-  });
-
-  it("resolves 'scan' from the payload, 'stats' from /stats, else 'unavailable' with null", async () => {
-    const mock = statsFetch({ last_sync: "2026-09-03" });
-    expect(await resolveSnapshot({ snapshot: "2026-08-30" })).toEqual({
+describe("resolveSnapshot", () => {
+  it("resolves 'scan' from a non-empty payload string, else 'unavailable' with null", () => {
+    expect(resolveSnapshot({ snapshot: "2026-08-30" })).toEqual({
       snapshot: "2026-08-30",
       snapshot_source: "scan",
     });
-    expect(mock).not.toHaveBeenCalled();
 
-    // A non-string or empty payload snapshot is not trusted as a date.
-    expect(await resolveSnapshot({ snapshot: 20260830 })).toEqual({
-      snapshot: "2026-09-03",
-      snapshot_source: "stats",
-    });
-    expect(await resolveSnapshot({ snapshot: "" })).toEqual({
-      snapshot: "2026-09-03",
-      snapshot_source: "stats",
-    });
-
-    resetSnapshotCache();
-    statsFetch({}, 500);
-    expect(await resolveSnapshot({})).toEqual({ snapshot: null, snapshot_source: "unavailable" });
+    // A non-string or empty payload snapshot is not trusted as a date, and no
+    // other source is consulted: null is the only honest answer.
+    const unavailable = { snapshot: null, snapshot_source: "unavailable" };
+    expect(resolveSnapshot({ snapshot: 20260830 })).toEqual(unavailable);
+    expect(resolveSnapshot({ snapshot: "" })).toEqual(unavailable);
+    expect(resolveSnapshot({ snapshot: null })).toEqual(unavailable);
+    expect(resolveSnapshot({})).toEqual(unavailable);
   });
 });
 
@@ -2610,10 +2543,10 @@ describe("snapshot line in markdown", () => {
     const stamped: ScanResponse = {
       ...freeResponse([]),
       snapshot: "2026-09-03",
-      snapshot_source: "stats",
+      snapshot_source: "scan",
     };
     expect(formatScanAsMarkdown("Acme", stamped, { kind: "company" })).toContain(
-      "_Warehouse snapshot: 2026-09-03 (last_sync from ",
+      "_Warehouse snapshot: 2026-09-03 (reported by the API response)._",
     );
     const semantic: ScanResponse = {
       ...stamped,
@@ -2628,7 +2561,9 @@ describe("snapshot line in markdown", () => {
       snapshot: null,
       snapshot_source: "unavailable",
     };
-    expect(formatScanAsMarkdown("Acme", unavailable)).toContain("_Warehouse snapshot: unknown (");
+    expect(formatScanAsMarkdown("Acme", unavailable)).toContain(
+      "_Warehouse snapshot: unknown — the API did not report a sync date._",
+    );
   });
 
   it("survives markdown and JSON truncation of a single scan", () => {
@@ -2642,14 +2577,14 @@ describe("snapshot line in markdown", () => {
         })),
       ),
       snapshot: "2026-09-03",
-      snapshot_source: "stats",
+      snapshot_source: "scan",
     };
     const md = truncateIfNeeded(formatScanAsMarkdown("Big", big), big, "Big");
     expect(md.text).toContain("_Warehouse snapshot: 2026-09-03");
     expect(md.structured.snapshot).toBe("2026-09-03");
 
     const json = truncateJsonIfNeeded(big);
-    expect(JSON.parse(json.text).snapshot_source).toBe("stats");
+    expect(JSON.parse(json.text).snapshot_source).toBe("scan");
 
     // The minimal-envelope path (one row alone over the limit) keeps it too.
     const pathological: ScanResponse = {
@@ -2660,7 +2595,7 @@ describe("snapshot line in markdown", () => {
     expect(minimal.structured).toMatchObject({
       domains: [],
       snapshot: "2026-09-03",
-      snapshot_source: "stats",
+      snapshot_source: "scan",
     });
   });
 });

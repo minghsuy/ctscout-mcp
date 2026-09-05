@@ -33,13 +33,6 @@ import { z } from "zod";
 const API_BASE_URL = process.env.CTSCOUT_API_URL ?? "https://ctscout.dev";
 const SCAN_URL = `${API_BASE_URL}/scan`;
 const SCAN_BATCH_URL = `${API_BASE_URL}/scan/batch`;
-const STATS_URL = `${API_BASE_URL}/stats`;
-// The snapshot date is a footer, not the answer: a slow /stats must not hold a
-// finished /scan hostage for the full REQUEST_TIMEOUT_MS.
-const STATS_TIMEOUT_MS = 5_000;
-// The warehouse syncs weekly; re-reading /stats on every tool call would
-// double the network round-trips for a value that changes once a week.
-const SNAPSHOT_CACHE_TTL_MS = 10 * 60_000;
 // Keep in lockstep with ctscout-worker's hosted MCP MAX_BATCH_QUERIES and REST
 // MAX_BATCH_SIZE. Both public transports accept 1–10 names; validation here is
 // belt-and-suspenders (a clean error before a network round-trip), while the
@@ -161,11 +154,13 @@ export interface ScanResponse {
 
 // Where a response's `snapshot` date came from:
 //   "scan"        — the API payload itself carried a `snapshot` string.
-//   "stats"       — read from GET /stats `last_sync` (the warehouse/D1 sync date).
-//   "unavailable" — neither; `snapshot` is null, not missing, so a consumer can
-//                   tell "the server could not say" from "an older server that
-//                   never emitted the field".
-export type SnapshotSource = "scan" | "stats" | "unavailable";
+//   "unavailable" — it did not; `snapshot` is null, not missing, so a consumer
+//                   can tell "the server could not say" from "an older server
+//                   that never emitted the field".
+// There is deliberately no other source: a date fetched separately (e.g. GET
+// /stats last_sync) is not generation-coupled to the scan and can disagree with
+// it across the weekly sync, which would claim a provenance the answer lacks.
+export type SnapshotSource = "scan" | "unavailable";
 
 export interface SnapshotInfo {
   snapshot: string | null;
@@ -339,10 +334,10 @@ const SnapshotFields = {
         "serves a weekly snapshot. null when it could not be determined.",
     ),
   snapshot_source: z
-    .enum(["scan", "stats", "unavailable"])
+    .enum(["scan", "unavailable"])
     .describe(
-      "'scan' = the API response carried the date; 'stats' = read from GET /stats " +
-        "last_sync; 'unavailable' = neither, snapshot is null.",
+      "'scan' = the API response carried the date; 'unavailable' = it did not, " +
+        "snapshot is null and must be treated as unknown, never as current.",
     ),
 };
 
@@ -553,52 +548,15 @@ export async function callScanBatch(queries: ScanRequestBody[]): Promise<ScanBat
   return postScan<ScanBatchResponse>(SCAN_BATCH_URL, { queries });
 }
 
-// GET /stats is public (no key) and serves a precomputed row; `last_sync` is
-// the warehouse/D1 sync date every free-tier answer was read from. Any
-// failure — network, non-2xx, malformed body — resolves to null: the snapshot
-// is a footer on an answer the caller already paid quota for.
-let snapshotCache: { value: string; expiresAt: number } | undefined;
-
-export function resetSnapshotCache(): void {
-  snapshotCache = undefined;
-}
-
-export async function fetchWarehouseSnapshot(now: number = Date.now()): Promise<string | null> {
-  if (snapshotCache && snapshotCache.expiresAt > now) return snapshotCache.value;
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), STATS_TIMEOUT_MS);
-  try {
-    const response = await fetch(STATS_URL, {
-      method: "GET",
-      headers: { Accept: "application/json", "User-Agent": USER_AGENT },
-      signal: controller.signal,
-      redirect: "error",
-    });
-    if (!response.ok) return null;
-    const stats = (await response.json()) as { last_sync?: unknown };
-    if (typeof stats?.last_sync !== "string" || stats.last_sync.length === 0) return null;
-    snapshotCache = { value: stats.last_sync, expiresAt: now + SNAPSHOT_CACHE_TTL_MS };
-    return stats.last_sync;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-// Attach the snapshot date to a /scan or /scan/batch payload. A `snapshot`
-// string on the payload itself wins (the worker does not emit one today; when
-// it does, that is the authoritative per-answer date); otherwise /stats
-// `last_sync`; otherwise null with `snapshot_source: "unavailable"`.
-export async function resolveSnapshot(payload: { snapshot?: unknown }): Promise<SnapshotInfo> {
+// Attach the snapshot date to a /scan or /scan/batch payload. Only a
+// `snapshot` string on the payload itself counts (the worker does not emit one
+// today; when it does, that is the authoritative per-answer date). No separate
+// request supplies it: see SnapshotSource.
+export function resolveSnapshot(payload: { snapshot?: unknown }): SnapshotInfo {
   if (typeof payload.snapshot === "string" && payload.snapshot.length > 0) {
     return { snapshot: payload.snapshot, snapshot_source: "scan" };
   }
-  const fromStats = await fetchWarehouseSnapshot();
-  return fromStats === null
-    ? { snapshot: null, snapshot_source: "unavailable" }
-    : { snapshot: fromStats, snapshot_source: "stats" };
+  return { snapshot: null, snapshot_source: "unavailable" };
 }
 
 export class ApiError extends Error {
@@ -1020,10 +978,8 @@ function snapshotLine(info: Partial<SnapshotInfo>): string {
   switch (info.snapshot_source) {
     case "scan":
       return `_Warehouse snapshot: ${cellSafe(info.snapshot, 40)} (reported by the API response)._`;
-    case "stats":
-      return `_Warehouse snapshot: ${cellSafe(info.snapshot, 40)} (last_sync from ${STATS_URL})._`;
     default:
-      return `_Warehouse snapshot: unknown (${STATS_URL} unavailable)._`;
+      return "_Warehouse snapshot: unknown — the API did not report a sync date._";
   }
 }
 
@@ -1490,7 +1446,7 @@ Returns (structuredContent always follows the declared outputSchema):
         { "org": string, "similarity": number, "top_apex_domain": string | null }
       ],
       "snapshot": string | null,          // warehouse/D1 sync date (YYYY-MM-DD) the answer was read from
-      "snapshot_source": "scan" | "stats" | "unavailable"   // where snapshot came from; null snapshot <=> 'unavailable'
+      "snapshot_source": "scan" | "unavailable"   // where snapshot came from; null snapshot <=> 'unavailable'
     }
 
 Examples:
@@ -1539,7 +1495,7 @@ Coverage caveat:
             purpose: params.purpose,
           }),
         });
-        const data: ScanResponse = { ...raw, ...(await resolveSnapshot(raw)) };
+        const data: ScanResponse = { ...raw, ...resolveSnapshot(raw) };
 
         if (params.response_format === ResponseFormat.JSON) {
           const { text, structured } = truncateJsonIfNeeded(data);
@@ -1589,7 +1545,7 @@ Returns (structuredContent always follows the declared outputSchema):
       ],
       "remaining_quota": number | null,  // null = unlimited (Pro)
       "snapshot": string | null,         // warehouse/D1 sync date shared by every result in the batch
-      "snapshot_source": "scan" | "stats" | "unavailable"
+      "snapshot_source": "scan" | "unavailable"
     }
 
 Partial-failure semantics (important):
@@ -1616,7 +1572,7 @@ Legal-vs-brand and coverage caveats are identical to ctscout_search_company — 
           company_name,
         }));
         const raw = await callScanBatch(queries);
-        const data: ScanBatchResponse = { ...raw, ...(await resolveSnapshot(raw)) };
+        const data: ScanBatchResponse = { ...raw, ...resolveSnapshot(raw) };
 
         if (params.response_format === ResponseFormat.JSON) {
           const { text, structured } = truncateBatchJsonIfNeeded(data);
@@ -1674,7 +1630,7 @@ Auth & limits: same as ctscout_search_company.`,
     async (params: LookupDomainInput) => {
       try {
         const raw = await callScan({ seed_domain: params.domains });
-        const data: ScanResponse = { ...raw, ...(await resolveSnapshot(raw)) };
+        const data: ScanResponse = { ...raw, ...resolveSnapshot(raw) };
 
         if (params.response_format === ResponseFormat.JSON) {
           const { text, structured } = truncateJsonIfNeeded(data);

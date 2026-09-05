@@ -3,43 +3,28 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createServer,
   type DomainResult,
-  resetSnapshotCache,
   type ScanBatchResponse,
   type ScanResponse,
 } from "../src/index.ts";
 
-const STATS_SNAPSHOT = "2026-09-03";
+const PAYLOAD_SNAPSHOT = "2026-09-03";
 
-// Route fetch by URL the way the real API does: POST /scan and /scan/batch get
-// the scan payload, GET /stats gets the warehouse stats row. A fresh Response
-// per call — a Response body can be consumed only once.
-function mockApi(
-  scanPayload: unknown,
-  stats: { status?: number; body?: unknown } = { body: { last_sync: STATS_SNAPSHOT } },
-): ReturnType<typeof vi.fn> {
-  const fetchMock = vi.fn(async (input: string | URL | Request) => {
-    const url = String(input);
-    if (url.endsWith("/stats")) {
-      return new Response(JSON.stringify(stats.body ?? {}), {
-        status: stats.status ?? 200,
+// Every request (POST /scan and /scan/batch) gets the same scan payload. A
+// fresh Response per call — a Response body can be consumed only once.
+function mockApi(scanPayload: unknown): ReturnType<typeof vi.fn> {
+  const fetchMock = vi.fn(
+    async () =>
+      new Response(JSON.stringify(scanPayload), {
+        status: 200,
         headers: { "Content-Type": "application/json" },
-      });
-    }
-    return new Response(JSON.stringify(scanPayload), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
-  });
+      }),
+  );
   globalThis.fetch = fetchMock as unknown as typeof fetch;
   return fetchMock;
 }
 
 function calledUrls(fetchMock: ReturnType<typeof vi.fn>): string[] {
   return fetchMock.mock.calls.map(([input]) => String(input));
-}
-
-function scanCalls(fetchMock: ReturnType<typeof vi.fn>): string[] {
-  return calledUrls(fetchMock).filter((url) => !url.endsWith("/stats"));
 }
 
 async function connect(): Promise<{ client: Client; close: () => Promise<void> }> {
@@ -82,7 +67,6 @@ describe("stdio MCP compatibility contract", () => {
     } else {
       process.env.CTSCOUT_API_KEY = originalApiKey;
     }
-    resetSnapshotCache();
     vi.restoreAllMocks();
   });
 
@@ -171,7 +155,7 @@ describe("stdio MCP compatibility contract", () => {
           type: "object",
           properties: {
             snapshot: { anyOf: [{ type: "string" }, { type: "null" }] },
-            snapshot_source: { type: "string", enum: ["scan", "stats", "unavailable"] },
+            snapshot_source: { type: "string", enum: ["scan", "unavailable"] },
           },
         });
         expect(tool.outputSchema?.required, tool.name).toEqual(
@@ -254,6 +238,7 @@ describe("stdio MCP compatibility contract", () => {
         },
       ],
       remaining_quota: 7,
+      snapshot: PAYLOAD_SNAPSHOT,
     };
     const fetchMock = mockApi(response);
 
@@ -269,14 +254,16 @@ describe("stdio MCP compatibility contract", () => {
       });
 
       expect(result.isError).not.toBe(true);
-      expect(scanCalls(fetchMock)).toHaveLength(1);
+      expect(calledUrls(fetchMock)).toHaveLength(1);
       const [url, init] = fetchMock.mock.calls[0];
       expect(String(url)).toMatch(/\/scan\/batch$/);
       expect(JSON.parse(String(init?.body))).toEqual({
         queries: [{ company_name: "Alpha" }, { company_name: "Beta" }, { company_name: "Gamma" }],
       });
       const text = textOf(result);
-      expect(text).toContain(`_Warehouse snapshot: ${STATS_SNAPSHOT} (last_sync from `);
+      expect(text).toContain(
+        `_Warehouse snapshot: ${PAYLOAD_SNAPSHOT} (reported by the API response)._`,
+      );
       expect(text.indexOf("alpha.example")).toBeLessThan(text.indexOf("Beta Holdings"));
       expect(text.indexOf("Beta Holdings")).toBeLessThan(text.indexOf("HTTP 503"));
       expect(text).toContain("| Domain | Attributed to | Certs | Subdomains |");
@@ -298,8 +285,8 @@ describe("stdio MCP compatibility contract", () => {
           },
         ],
         remaining_quota: 7,
-        snapshot: STATS_SNAPSHOT,
-        snapshot_source: "stats",
+        snapshot: PAYLOAD_SNAPSHOT,
+        snapshot_source: "scan",
       });
     } finally {
       await close();
@@ -357,7 +344,7 @@ describe("stdio MCP compatibility contract", () => {
       });
 
       expect(result.isError).not.toBe(true);
-      expect(scanCalls(fetchMock)).toHaveLength(1);
+      expect(calledUrls(fetchMock)).toHaveLength(1);
       const [, init] = fetchMock.mock.calls[0];
       expect(JSON.parse(String(init?.body))).toEqual({
         company_name: "Acme Corporation",
@@ -374,8 +361,8 @@ describe("stdio MCP compatibility contract", () => {
           response_format: "json",
         },
       });
-      expect(scanCalls(fetchMock)).toHaveLength(2);
-      const [, defaultInit] = fetchMock.mock.calls[2];
+      expect(calledUrls(fetchMock)).toHaveLength(2);
+      const [, defaultInit] = fetchMock.mock.calls[1];
       expect(JSON.parse(String(defaultInit?.body))).toEqual({
         company_name: "Acme Corporation",
       });
@@ -384,13 +371,14 @@ describe("stdio MCP compatibility contract", () => {
     }
   });
 
-  it("stamps the /stats last_sync on search results and reads /stats once per cache window", async () => {
+  it("stamps the payload snapshot on search results in both formats with one request per call", async () => {
     process.env.CTSCOUT_API_KEY = "ds_free_contract_test";
     const fetchMock = mockApi({
       domains: warehouseDomains("acme", 2),
       total: 2,
       source: "warehouse",
       match_type: "exact",
+      snapshot: PAYLOAD_SNAPSHOT,
     });
 
     const { client, close } = await connect();
@@ -403,14 +391,15 @@ describe("stdio MCP compatibility contract", () => {
       expect(markdown.isError).not.toBe(true);
       const text = textOf(markdown);
       expect(text).toContain("# ctscout results for: Acme");
-      expect(text).toContain(`_Warehouse snapshot: ${STATS_SNAPSHOT} (last_sync from `);
-      expect(text).toContain("/stats)._");
+      expect(text).toContain(
+        `_Warehouse snapshot: ${PAYLOAD_SNAPSHOT} (reported by the API response)._`,
+      );
       expect(text).toContain("**2** attributed domain(s) of 2 total");
       expect(text).toContain("| Domain | Attributed to | Certs | Subdomains |");
       expect(markdown.structuredContent).toMatchObject({
         domains: [{ apex_domain: "acme-0.example.com" }, { apex_domain: "acme-1.example.com" }],
-        snapshot: STATS_SNAPSHOT,
-        snapshot_source: "stats",
+        snapshot: PAYLOAD_SNAPSHOT,
+        snapshot_source: "scan",
       });
 
       const json = await client.callTool({
@@ -419,26 +408,21 @@ describe("stdio MCP compatibility contract", () => {
       });
       expect(json.isError).not.toBe(true);
       const parsed = JSON.parse(textOf(json)) as ScanResponse;
-      expect(parsed.snapshot).toBe(STATS_SNAPSHOT);
-      expect(parsed.snapshot_source).toBe("stats");
+      expect(parsed.snapshot).toBe(PAYLOAD_SNAPSHOT);
+      expect(parsed.snapshot_source).toBe("scan");
       expect(json.structuredContent).toEqual(parsed);
 
-      // /scan is called per tool call; /stats is read once and cached.
+      // Exactly one /scan per tool call: the snapshot never costs a request.
       expect(calledUrls(fetchMock).map((url) => url.replace(/^.*\//, "/"))).toEqual([
         "/scan",
-        "/stats",
         "/scan",
       ]);
-      // /stats is public: no API key is sent with it.
-      const [, statsInit] = fetchMock.mock.calls[1];
-      expect(statsInit).toMatchObject({ method: "GET" });
-      expect((statsInit as RequestInit).headers).not.toHaveProperty("X-API-Key");
     } finally {
       await close();
     }
   });
 
-  it("prefers a snapshot carried by the API payload and skips /stats", async () => {
+  it("reads the snapshot carried by a lookup payload", async () => {
     process.env.CTSCOUT_API_KEY = "ds_free_contract_test";
     const fetchMock = mockApi({
       domains: warehouseDomains("gs", 1),
@@ -462,19 +446,36 @@ describe("stdio MCP compatibility contract", () => {
         snapshot: "2026-08-30",
         snapshot_source: "scan",
       });
-      expect(calledUrls(fetchMock).some((url) => url.endsWith("/stats"))).toBe(false);
+      expect(calledUrls(fetchMock)).toHaveLength(1);
     } finally {
       await close();
     }
   });
 
-  it("reports snapshot null / 'unavailable' when /stats fails, without failing the answer", async () => {
+  // Hosted-transport parity exception (README "hosted endpoint", AGENTS.md
+  // "Cross-repository parity"): the hosted MCP in ctscout-worker does not emit
+  // `snapshot` today, so a payload without one must surface as null /
+  // "unavailable" — never as a date obtained from a separate request. The
+  // closed enum is the parity check: it fails the moment a client-side source
+  // is re-added.
+  it("reports snapshot null / 'unavailable' when the payload carries no snapshot, with no extra request", async () => {
     process.env.CTSCOUT_API_KEY = "ds_free_contract_test";
-    mockApi({ domains: warehouseDomains("gs", 1), total: 1, source: "warehouse" }, { status: 503 });
+    const fetchMock = mockApi({
+      domains: warehouseDomains("gs", 1),
+      total: 1,
+      source: "warehouse",
+    });
 
     const { client, close } = await connect();
 
     try {
+      const { tools } = await client.listTools();
+      for (const tool of tools) {
+        expect(tool.outputSchema?.properties, tool.name).toMatchObject({
+          snapshot_source: { enum: ["scan", "unavailable"] },
+        });
+      }
+
       const result = await client.callTool({
         name: "ctscout_lookup_domain",
         arguments: { domains: ["gs-0.example.com"], response_format: "json" },
@@ -492,8 +493,13 @@ describe("stdio MCP compatibility contract", () => {
         name: "ctscout_lookup_domain",
         arguments: { domains: ["gs-0.example.com"] },
       });
-      expect(textOf(markdown)).toContain("_Warehouse snapshot: unknown (");
-      expect(textOf(markdown)).toContain("/stats unavailable)._");
+      expect(textOf(markdown)).toContain(
+        "_Warehouse snapshot: unknown — the API did not report a sync date._",
+      );
+      expect(calledUrls(fetchMock).map((url) => url.replace(/^.*\//, "/"))).toEqual([
+        "/scan",
+        "/scan",
+      ]);
     } finally {
       await close();
     }
@@ -508,6 +514,7 @@ describe("stdio MCP compatibility contract", () => {
       total: 1,
       source: "warehouse",
       match_type: "exact",
+      snapshot: PAYLOAD_SNAPSHOT,
     });
 
     const { client, close } = await connect();
@@ -521,8 +528,8 @@ describe("stdio MCP compatibility contract", () => {
       expect(result.structuredContent).toMatchObject({
         domains: [],
         truncated: true,
-        snapshot: STATS_SNAPSHOT,
-        snapshot_source: "stats",
+        snapshot: PAYLOAD_SNAPSHOT,
+        snapshot_source: "scan",
       });
       expect(textOf(result).length).toBeLessThanOrEqual(25_000);
     } finally {
@@ -550,6 +557,7 @@ describe("stdio MCP compatibility contract", () => {
         },
       ],
       remaining_quota: null,
+      snapshot: PAYLOAD_SNAPSHOT,
     });
 
     const { client, close } = await connect();
@@ -564,8 +572,8 @@ describe("stdio MCP compatibility contract", () => {
         expect(textOf(result).length).toBeLessThanOrEqual(25_000);
         expect(result.structuredContent).toMatchObject({
           remaining_quota: null,
-          snapshot: STATS_SNAPSHOT,
-          snapshot_source: "stats",
+          snapshot: PAYLOAD_SNAPSHOT,
+          snapshot_source: "scan",
         });
         const structured = result.structuredContent as ScanBatchResponse;
         expect(structured.results).toHaveLength(2);
@@ -577,13 +585,13 @@ describe("stdio MCP compatibility contract", () => {
             arguments: { company_names: ["Giant", "Tiny"] },
           }),
         ),
-      ).toContain(`_Warehouse snapshot: ${STATS_SNAPSHOT}`);
+      ).toContain(`_Warehouse snapshot: ${PAYLOAD_SNAPSHOT}`);
     } finally {
       await close();
     }
   });
 
-  it("returns an isError result with no /stats read when the scan itself fails", async () => {
+  it("returns an isError result with no structuredContent when the scan itself fails", async () => {
     process.env.CTSCOUT_API_KEY = "ds_free_contract_test";
     const fetchMock = vi.fn(
       async () => new Response("quota", { status: 429, headers: { "Content-Type": "text/plain" } }),
@@ -600,8 +608,7 @@ describe("stdio MCP compatibility contract", () => {
       expect(result.isError).toBe(true);
       expect(textOf(result)).toContain("Daily request quota exceeded");
       expect(result.structuredContent).toBeUndefined();
-      expect(scanCalls(fetchMock)).toHaveLength(1);
-      expect(calledUrls(fetchMock).some((url) => url.endsWith("/stats"))).toBe(false);
+      expect(calledUrls(fetchMock)).toHaveLength(1);
     } finally {
       await close();
     }
