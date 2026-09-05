@@ -3135,11 +3135,13 @@ describe("formatJobAsMarkdown", () => {
       domain: `d${i}.cna.com`,
       attributed_to: "CNA Financial Corporation",
       is_seed: false,
+      // The wire shape may omit the maps the type marks required; the strip
+      // step must not synthesize them.
       enrichment: {
         confidence_band: "likely",
         weight_total: 1.5,
         matched_via: ["rdap_registrant_match"],
-      },
+      } as unknown as DomainResult["enrichment"],
     });
     const rows = Array.from({ length: 400 }, (_, i) => sparse(i));
     const { structured } = formatJobAsMarkdown(doneJob(rows));
