@@ -4,7 +4,7 @@ ctscout is built to be honest about what it does and what it doesn't. Read this 
 
 ## What ctscout is
 
-A digital entity resolution tool that maps apex domains to the organizations attributed in their Certificate Transparency (CT) records, with optional multi-signal corroboration (DNS, RDAP, IP/ASN, favicon, visual brand verification).
+A digital entity resolution tool that maps apex domains to the organizations attributed in their Certificate Transparency (CT) records, with optional multi-signal corroboration in a Pro deep dive (DNS, RDAP, IP/ASN, homepage metadata, favicon; visual brand verification is planned, not shipped).
 
 ctscout indexes **OV and EV certificates exclusively** — the ones where the issuing CA validated the organization's legal identity and embedded it in the cert subject. DV certs (Let's Encrypt, ZeroSSL, ACME-defaulting cloud hosts) are filtered at ingest and are never stored, never queryable. This is a deliberate scoping decision, not a coverage gap to be filled later.
 

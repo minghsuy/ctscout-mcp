@@ -476,8 +476,8 @@ export const GetJobInputSchema = z
       .nativeEnum(ResponseFormat)
       .default(ResponseFormat.MARKDOWN)
       .describe(
-        "Output format: 'markdown' for the job status and, once done, the same " +
-          "attribution table as a Pro scan; 'json' for the raw job record.",
+        "Output format: 'markdown' for the job status and, once done, the deep-dive " +
+          "attribution table (band, signals, evidence); 'json' for the raw job record.",
       ),
   })
   .strict();
@@ -2674,7 +2674,7 @@ Args:
   - response_format ('markdown' | 'json', default 'markdown'): output format.
 
 Returns (on success, structuredContent follows the declared outputSchema; a failed call — 401, 403, 404, timeout — is isError with no structuredContent, so never dereference snapshot on a failed call):
-  - In markdown: the job status lines; once done, the same attribution table as a Pro scan (domain, attributed to, confidence band, signals, evidence) under a snapshot line.
+  - In markdown: the job status lines; once done, the deep-dive attribution table (domain, attributed to, confidence band, signals, evidence) under a snapshot line. No /scan output carries this table.
   - In JSON, structured as:
     {
       "job_id": string,

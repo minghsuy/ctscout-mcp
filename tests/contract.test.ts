@@ -209,7 +209,7 @@ describe("stdio MCP compatibility contract", () => {
         expect(description, tool?.name).toMatch(/NOT included in v1/);
         expect(description, tool?.name).toContain("batch worker sets it");
         // The deep-dive shape is its own contract; a /scan never carries it.
-        expect(description, tool?.name).not.toContain("Pro /scan");
+        expect(description, tool?.name).not.toMatch(/Pro \/?scan/);
         expect(description, tool?.name).toMatch(/deep-dive (result )?shape/);
         expect(description, tool?.name).toContain('"Attributed"');
         expect(description, tool?.name).toContain('"Candidate"');
