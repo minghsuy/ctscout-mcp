@@ -4,13 +4,15 @@ MCP server for [ctscout.dev](https://ctscout.dev) — **named-entity attribution
 
 DV-only infrastructure (Let's Encrypt, ZeroSSL, cloud-native shops) is invisible to ctscout by design. See [LIMITATIONS.md](LIMITATIONS.md) for what that means in practice.
 
-Three tools:
+Five tools:
 
 - **`ctscout_search_company`** — find apex domains attributed to an organization by name
 - **`ctscout_search_company_batch`** — the same, for up to 10 organization names in one call
 - **`ctscout_lookup_domain`** — reverse-lookup the organization attributed to one or more domains
+- **`ctscout_submit_deep_dive`** — Pro only: queue an asynchronous multi-signal deep dive (see [Deep dives](#deep-dives-pro-async))
+- **`ctscout_get_job`** — poll a deep dive and read its result
 
-All three work over the public ctscout.dev `/scan` API (the batch tool wraps `/scan/batch`). Free tier requires an API key (no email, no signup). Pro tier returns a `confidence_band` per attribution plus the underlying signal evidence (DNS brand tokens, og:site_name match, RDAP, IP/ASN, VLM verdict).
+The first three work over the public ctscout.dev `/scan` API (the batch tool wraps `/scan/batch`); the deep-dive pair wraps `/jobs`. Free tier requires an API key (no email, no signup). Pro tier returns a `confidence_band` per attribution plus the underlying signal evidence (DNS brand tokens, og:site_name match, RDAP, IP/ASN, VLM verdict).
 
 **Not a cyber-risk-scoring tool.** See [LIMITATIONS.md](LIMITATIONS.md) for what ctscout is and isn't, the DV-cert coverage gap, and the corrections path.
 
@@ -94,12 +96,14 @@ The hosted endpoint is the authoritative MCP contract and is the recommended
 path. The stdio package is a compatibility adapter over the same ctscout.dev
 API for clients that cannot connect to remote MCP servers yet.
 
-Hosted and stdio both expose the same three public tool names, including the
+Hosted and stdio both expose the same public tool names, including the
 names-only `ctscout_search_company_batch` contract (1–10 organization names,
-ordered partial-failure results). Contract tests pin the stdio schema and
-quota-sensitive annotations against the hosted surface. The remaining
-shared-core/forwarding and automated cross-repository comparison work is tracked
-in [#72](https://github.com/minghsuy/ctscout-mcp/issues/72).
+ordered partial-failure results) and the deep-dive pair specified in
+[ctscout-worker#344](https://github.com/minghsuy/ctscout-worker/issues/344)
+(contract v1; the hosted tools land in that Worker change). Contract tests pin
+the stdio schema and quota-sensitive annotations against the hosted surface.
+The remaining shared-core/forwarding and automated cross-repository comparison
+work is tracked in [#72](https://github.com/minghsuy/ctscout-mcp/issues/72).
 
 One documented, transport-specific difference: this package advertises an
 `outputSchema` on every tool and, on every successful call, returns `snapshot`
@@ -160,6 +164,48 @@ Free tier returns the legacy `(domain, organization, certs, subdomains)` table. 
 ```
 
 Bands map to confidence intervals (`verified` ≥ multiple strong independent signals, down to `insufficient` = no signals or signals disagree). The `🚫VLM-veto` tag appears when visual brand verification overrode the positive-signal accumulation. Full structured payload is available via `response_format: "json"`.
+
+## Deep dives (Pro, async)
+
+A deep dive is the full multi-signal attribution run executed by a batch worker
+rather than inside the request. It is **asynchronous** and **Pro only**
+([ctscout-worker#344](https://github.com/minghsuy/ctscout-worker/issues/344),
+contract v1):
+
+1. **`ctscout_submit_deep_dive`** (`POST /jobs`) takes `company_name` and/or
+   `seed_domain` (max 10, validated exactly like `/scan`) and returns a receipt
+   immediately: `{job_id, status: "queued", submitted_at, poll}`. Nothing is
+   attributed yet. A free key gets HTTP 403 with the API's upgrade text; the
+   quota is 20 submissions per key per day (HTTP 429 over). Submitting is not
+   idempotent — a retry queues a second job.
+2. **`ctscout_get_job`** (`GET /jobs/{id}`) returns
+   `{job_id, kind, status, submitted_at, started_at, finished_at, result?, error?}`.
+   `status` is `queued` | `running` | `done` | `failed`; `result` is present
+   only when `done`, `error` only when `failed`. Polling is read-only and
+   debits no quota. Job ids are scoped to the submitting key, so an id another
+   key submitted answers 404 exactly like an unknown id.
+
+**Poll with backoff:** wait about 30 s before the first poll, then back off
+toward 5 min between polls. The batch worker picks up queued jobs every few
+minutes and a deep dive can take several minutes to run.
+
+**The result** carries the same fields as a Pro `/scan` result — `domains`
+with `attributed_to` and an `enrichment` object per domain, plus `entity`,
+`run_metadata`, `source`, `signals_degraded` — and three fields the batch
+worker adds: `snapshot` (the warehouse date the deep dive read from, present on
+every deep-dive result because the worker sets it), `worker_version` and
+`signals_attempted`. The markdown output renders the same band / signals /
+evidence table as a Pro scan under the job's status lines; `structuredContent`
+carries the record with the top-level `snapshot` / `snapshot_source` resolved
+from `result.snapshot` (`null` / `"unavailable"` until the job is done).
+"Attributed" and "candidate" mean what they mean elsewhere in this package: an
+attribution is what the evidence names for a domain, a candidate is a
+name-similarity guess — deep dives report attributions with a confidence band,
+never bare candidates.
+
+**Not in v1:** visual brand verification (VLM) — `vlm_status` stays `pending`
+or `skipped` and never vetoes a band; webhooks, cancellation, retries and
+result expiry are follow-ups on the Worker side.
 
 ---
 

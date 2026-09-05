@@ -29,24 +29,32 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   BatchResultItem,
   DomainResult,
+  JobResponse,
   ScanBatchResponse,
   ScanResponse,
 } from "../src/index.ts";
 import {
   ApiError,
+  callGetJob,
   callScan,
   callScanBatch,
+  callSubmitJob,
   explainError,
   fairShareBudgets,
   formatBatchAsMarkdown,
+  formatJobAsMarkdown,
+  formatJobSubmittedAsMarkdown,
   formatScanAsMarkdown,
+  GetJobInputSchema,
   getApiKey,
   resolveSnapshot,
   SERVER_VERSION,
   SearchCompanyBatchInputSchema,
+  SubmitDeepDiveInputSchema,
   TimeoutError,
   truncateBatchJsonIfNeeded,
   truncateIfNeeded,
+  truncateJobJsonIfNeeded,
   truncateJsonIfNeeded,
 } from "../src/index.ts";
 
@@ -2597,5 +2605,432 @@ describe("snapshot line in markdown", () => {
       snapshot: "2026-09-03",
       snapshot_source: "scan",
     });
+  });
+});
+
+// ---------- Async deep-dive jobs (ctscout-worker#344 contract v1) ----------
+
+// One ProDiscoveredDomain as the batch worker writes it: `domain` (no
+// apex_domain) + `attributed_to` + `enrichment` + the embedded free-tier
+// `base`. This is the deep-dive result row shape, distinct from both the
+// warehouse row and the enrichment-less ScoutResult row.
+function proDiscoveredDomain(
+  domain: string,
+  band: "verified" | "likely" = "verified",
+): DomainResult {
+  return {
+    domain,
+    attributed_to: "CNA Financial Corporation",
+    is_seed: false,
+    base: { domain, confidence: 0.95, sources: ["ct_org_match"] },
+    enrichment: {
+      confidence_band: band,
+      weight_total: 4.2,
+      matched_via: ["dns_txt_brand_token", "rdap_registrant_match"],
+      evidence: { dns_txt_brand_token: "verified via google-site-verification" },
+      signal_health: { dns_txt_brand_token: "hit", vlm_verdict: "pending" },
+      vlm_status: "pending",
+      vlm_override: false,
+    },
+  };
+}
+
+function doneJob(domains: DomainResult[], extra: Partial<JobResponse> = {}): JobResponse {
+  return {
+    job_id: "0123456789abcdef01234567",
+    kind: "deep_dive",
+    status: "done",
+    submitted_at: "2026-09-04T10:00:00Z",
+    started_at: "2026-09-04T10:05:00Z",
+    finished_at: "2026-09-04T10:09:30Z",
+    result: {
+      job_id: "0123456789abcdef01234567",
+      entity: { company_name: "CNA Financial", seed_domain: [] },
+      domains,
+      run_metadata: { duration_ms: 270_000 },
+      source: "live-enriched",
+      signals_degraded: false,
+      snapshot: "2026-08-31",
+      worker_version: "abc1234",
+      signals_attempted: ["dns", "rdap", "homepage", "ip_asn"],
+    },
+    ...extra,
+  };
+}
+
+describe("callSubmitJob / callGetJob", () => {
+  let originalFetch: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    process.env.CTSCOUT_API_KEY = "test-key";
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("POSTs the spec to /jobs with the API key and the shared request settings", async () => {
+    const receipt = {
+      job_id: "abc",
+      status: "queued",
+      submitted_at: "2026-09-04T10:00:00Z",
+      poll: "/jobs/abc",
+    };
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue({ ok: true, json: async () => receipt } as Response);
+
+    const result = await callSubmitJob({ company_name: "CNA Financial", seed_domain: ["cna.com"] });
+
+    expect(result).toEqual(receipt);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    const [url, init] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(String(url)).toMatch(/\/jobs$/);
+    expect(init).toMatchObject({
+      method: "POST",
+      redirect: "error",
+      headers: expect.objectContaining({
+        "X-API-Key": "test-key",
+        "Content-Type": "application/json",
+        "User-Agent": `ctscout-mcp-server/${SERVER_VERSION}`,
+      }),
+      body: JSON.stringify({ company_name: "CNA Financial", seed_domain: ["cna.com"] }),
+    });
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("GETs /jobs/{id} with no body, URL-encoding the id", async () => {
+    const job = { job_id: "abc", status: "queued", submitted_at: "2026-09-04T10:00:00Z" };
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => job } as Response);
+
+    const result = await callGetJob("abc def");
+
+    expect(result).toEqual(job);
+    const [url, init] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(String(url)).toMatch(/\/jobs\/abc%20def$/);
+    expect(init.method).toBe("GET");
+    expect(init.body).toBeUndefined();
+    expect(init.headers).not.toHaveProperty("Content-Type");
+    expect(init.headers).toMatchObject({ "X-API-Key": "test-key", Accept: "application/json" });
+    expect(init.redirect).toBe("error");
+  });
+
+  it("surfaces a non-2xx job response as ApiError with the bounded body", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ error: "not found" }), { status: 404 }));
+
+    let caught: unknown;
+    try {
+      await callGetJob("missing");
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(ApiError);
+    expect((caught as ApiError).status).toBe(404);
+  });
+
+  it("maps an aborted job request to TimeoutError", async () => {
+    const abortError = new Error("aborted");
+    abortError.name = "AbortError";
+    globalThis.fetch = vi.fn().mockRejectedValue(abortError);
+    await expect(callSubmitJob({ company_name: "Acme" })).rejects.toThrowError(TimeoutError);
+  });
+});
+
+describe("explainError — jobs surface", () => {
+  it("maps 403 to Pro-required with the API's upgrade_hint, bounded and escaped", () => {
+    const body = JSON.stringify({
+      error: "pro_required",
+      upgrade_hint: "Deep dives need a Pro key: email pro@ctscout.dev [link](x)\nsecond line",
+    });
+    const msg = explainError(new ApiError(403, body), "jobs");
+    expect(msg).toContain("Deep dives require a Pro key");
+    expect(msg).toContain("email pro@ctscout.dev");
+    expect(msg).toContain("\\[link\\]\\(x\\)");
+    expect(msg).not.toContain("\n");
+    expect(msg).not.toContain("revoked");
+  });
+
+  it("falls back to the concierge text when the 403 body carries no upgrade_hint", () => {
+    expect(explainError(new ApiError(403, "Forbidden"), "jobs")).toContain(
+      "Pro is concierge-only: email pro@ctscout.dev",
+    );
+    expect(
+      explainError(new ApiError(403, JSON.stringify({ upgrade_hint: "  " })), "jobs"),
+    ).toContain("Pro is concierge-only");
+  });
+
+  it("bounds an oversized upgrade_hint", () => {
+    const body = JSON.stringify({ upgrade_hint: "u".repeat(30_000) });
+    const msg = explainError(new ApiError(403, body), "jobs");
+    expect(msg.length).toBeLessThan(1_000);
+    expect(msg).toContain("truncated, 30000 chars total");
+  });
+
+  it("maps 404 to not-your-job / unknown id", () => {
+    const msg = explainError(new ApiError(404, "{}"), "jobs");
+    expect(msg).toContain("No job with that id for this API key");
+    expect(msg).toContain("not your job or an unknown id");
+  });
+
+  it("maps 429 to the daily jobs quota, not the scan quota", () => {
+    const msg = explainError(new ApiError(429, "{}"), "jobs");
+    expect(msg).toContain("Daily deep-dive quota exceeded (20 submissions per key per day)");
+    expect(msg).toContain("can still be polled");
+    expect(msg).not.toContain("Free tier is 10 queries/day");
+  });
+
+  it("delegates every other status and error kind to the shared mapping", () => {
+    expect(explainError(new ApiError(401, "x"), "jobs")).toContain(
+      "Invalid or missing CTSCOUT_API_KEY",
+    );
+    expect(explainError(new ApiError(400, "bad spec"), "jobs")).toContain("Bad request: bad spec");
+    expect(explainError(new ApiError(503, ""), "jobs")).toContain("ctscout server error (503)");
+    expect(explainError(new TimeoutError(), "jobs")).toContain("timed out");
+  });
+
+  it("leaves the scan surface's 403/404/429 mapping unchanged", () => {
+    expect(explainError(new ApiError(403, "Forbidden"))).toContain("revoked");
+    expect(explainError(new ApiError(429, "Quota"))).toContain("Free tier is 10 queries/day");
+    expect(explainError(new ApiError(404, "nope"))).toContain("HTTP 404");
+  });
+});
+
+describe("SubmitDeepDiveInputSchema / GetJobInputSchema — client-side validation", () => {
+  it("requires company_name or seed_domain and accepts either or both", () => {
+    expect(SubmitDeepDiveInputSchema.safeParse({}).success).toBe(false);
+    expect(SubmitDeepDiveInputSchema.safeParse({ company_name: "Acme" }).success).toBe(true);
+    expect(SubmitDeepDiveInputSchema.safeParse({ seed_domain: ["acme.com"] }).success).toBe(true);
+    expect(
+      SubmitDeepDiveInputSchema.safeParse({ company_name: "Acme", seed_domain: ["acme.com"] })
+        .success,
+    ).toBe(true);
+  });
+
+  it("caps seed_domain at 10 and rejects unknown keys", () => {
+    const eleven = Array.from({ length: 11 }, (_, i) => `seed-${i}.example`);
+    const over = SubmitDeepDiveInputSchema.safeParse({ seed_domain: eleven });
+    expect(over.success).toBe(false);
+    expect(JSON.stringify(over.error?.issues)).toContain("At most 10 seed domains");
+    expect(SubmitDeepDiveInputSchema.safeParse({ seed_domain: [] }).success).toBe(false);
+    expect(
+      SubmitDeepDiveInputSchema.safeParse({ company_name: "Acme", purpose: "underwriting" })
+        .success,
+    ).toBe(false);
+  });
+
+  it("accepts only an opaque path-safe job_id", () => {
+    expect(GetJobInputSchema.safeParse({ job_id: "0123456789abcdef01234567" }).success).toBe(true);
+    expect(GetJobInputSchema.safeParse({ job_id: "../keys" }).success).toBe(false);
+    expect(GetJobInputSchema.safeParse({ job_id: "abc?x=1" }).success).toBe(false);
+    expect(GetJobInputSchema.safeParse({ job_id: "" }).success).toBe(false);
+  });
+});
+
+describe("formatJobSubmittedAsMarkdown", () => {
+  it("renders a receipt that says nothing is attributed yet and how to poll", () => {
+    const md = formatJobSubmittedAsMarkdown(
+      { company_name: "CNA\nFinancial", seed_domain: ["cna.com"] },
+      {
+        job_id: "abc|def",
+        status: "queued",
+        submitted_at: "2026-09-04T10:00:00Z",
+        poll: "/jobs/abc",
+      },
+    );
+    expect(md).toContain("# ctscout deep dive submitted");
+    expect(md).toContain("- Target: CNA Financial / cna.com");
+    expect(md).toContain("- Job id: `abc│def`");
+    expect(md).toContain("- Status: `queued`");
+    expect(md).toContain("nothing is attributed yet");
+    expect(md).toContain("wait about 30 s before the first poll, then back off toward 5 min");
+    expect(md).toContain("ctscout_get_job");
+  });
+});
+
+describe("formatJobAsMarkdown", () => {
+  it("renders a queued job with polling guidance and null snapshot fields", () => {
+    const { text, structured } = formatJobAsMarkdown({
+      job_id: "abc",
+      kind: "deep_dive",
+      status: "queued",
+      submitted_at: "2026-09-04T10:00:00Z",
+      started_at: null,
+      finished_at: null,
+    });
+    expect(text).toContain("# ctscout deep dive `abc`");
+    expect(text).toContain("- Status: `queued`");
+    expect(text).toContain("Not finished yet; no attribution to report.");
+    expect(text).toContain("back off toward 5 min");
+    expect(text).not.toContain("Started at");
+    expect(text).not.toContain("| Domain |");
+    expect(structured).toMatchObject({
+      job_id: "abc",
+      status: "queued",
+      snapshot: null,
+      snapshot_source: "unavailable",
+    });
+    expect(structured.result).toBeUndefined();
+  });
+
+  it("renders a failed job's error bounded and escaped, with no table", () => {
+    const { text, structured } = formatJobAsMarkdown({
+      job_id: "abc",
+      status: "failed",
+      submitted_at: "2026-09-04T10:00:00Z",
+      started_at: "2026-09-04T10:05:00Z",
+      finished_at: "2026-09-04T10:06:00Z",
+      error: "timeout: [origin](x) gave up\n# not a heading",
+    });
+    expect(text).toContain("- Started at: 2026-09-04T10:05:00Z");
+    expect(text).toContain("- Error: timeout: \\[origin\\]\\(x\\) gave up # not a heading");
+    expect(text).toContain("The deep dive failed; there is no result.");
+    expect(text).not.toContain("\n# not a heading");
+    expect(structured.snapshot_source).toBe("unavailable");
+  });
+
+  it("renders a done job as the Pro band table under the worker-set snapshot line", () => {
+    const { text, structured } = formatJobAsMarkdown(
+      doneJob([proDiscoveredDomain("cna.com"), proDiscoveredDomain("cnasurety.com", "likely")]),
+    );
+    expect(text).toContain("- Status: `done`");
+    expect(text).toContain("- Worker version: abc1234");
+    expect(text).toContain("Visual brand verification (VLM) is not part of deep dives in v1");
+    // The scan section nests under the job heading.
+    expect(text).toContain("## ctscout results for: CNA Financial");
+    expect(text).toContain("_Warehouse snapshot: 2026-08-31 (reported by the API response)._");
+    expect(text).toContain("| Domain | Attributed to | Band | Signals | Evidence |");
+    expect(text).toContain("| `cna.com` | CNA Financial Corporation | ✅ verified |");
+    expect(text).toContain("| `cnasurety.com` | CNA Financial Corporation | 🟢 likely |");
+    expect(text).toContain("Source: `live-enriched` _(Pro tier — multi-signal attribution)_");
+    expect(text).not.toContain("undefined");
+    expect(structured).toMatchObject({
+      status: "done",
+      snapshot: "2026-08-31",
+      snapshot_source: "scan",
+      result: { snapshot: "2026-08-31", snapshot_source: "scan", worker_version: "abc1234" },
+    });
+  });
+
+  it("labels the results by seed domains when the entity has no name, else by job id", () => {
+    const seeded = doneJob([proDiscoveredDomain("cna.com")]);
+    seeded.result = {
+      ...seeded.result,
+      entity: { company_name: "", seed_domain: ["cna.com"] },
+    } as JobResponse["result"];
+    expect(formatJobAsMarkdown(seeded).text).toContain("## ctscout results for: cna.com");
+
+    const bare = doneJob([proDiscoveredDomain("cna.com")]);
+    bare.result = { ...bare.result, entity: undefined } as JobResponse["result"];
+    expect(formatJobAsMarkdown(bare).text).toContain(
+      "## ctscout results for: 0123456789abcdef01234567",
+    );
+  });
+
+  it("treats a done job whose result lacks snapshot as unknown freshness", () => {
+    const job = doneJob([proDiscoveredDomain("cna.com")]);
+    job.result = { ...job.result, snapshot: undefined } as JobResponse["result"];
+    const { text, structured } = formatJobAsMarkdown(job);
+    expect(text).toContain("_Warehouse snapshot: unknown — the API did not report a sync date._");
+    expect(structured).toMatchObject({ snapshot: null, snapshot_source: "unavailable" });
+  });
+
+  it("bounds a huge done result to the character limit and keeps the snapshot", () => {
+    const many = Array.from({ length: 3000 }, (_, i) => proDiscoveredDomain(`d-${i}.example`));
+    const { text, structured } = formatJobAsMarkdown(doneJob(many));
+    expect(text.length).toBeLessThanOrEqual(25_000);
+    expect(text).toContain("# ctscout deep dive `0123456789abcdef01234567`");
+    expect(text).toContain("Response truncated to");
+    expect(structured.result?.truncated).toBe(true);
+    expect(structured.result?.domains.length).toBeLessThan(3000);
+    expect(structured.snapshot).toBe("2026-08-31");
+  });
+});
+
+describe("truncateJobJsonIfNeeded", () => {
+  it("pretty-prints a small record with the resolved snapshot fields", () => {
+    const { text, structured } = truncateJobJsonIfNeeded(doneJob([proDiscoveredDomain("cna.com")]));
+    expect(JSON.parse(text)).toEqual(structured);
+    expect(text).toContain("\n  ");
+    expect(structured).toMatchObject({
+      status: "done",
+      snapshot: "2026-08-31",
+      snapshot_source: "scan",
+      result: { domains: [{ domain: "cna.com" }], snapshot: "2026-08-31" },
+    });
+  });
+
+  it("returns a queued record with null / unavailable snapshot fields", () => {
+    const { structured } = truncateJobJsonIfNeeded({
+      job_id: "abc",
+      status: "queued",
+      submitted_at: "2026-09-04T10:00:00Z",
+    });
+    expect(structured).toEqual({
+      job_id: "abc",
+      status: "queued",
+      submitted_at: "2026-09-04T10:00:00Z",
+      snapshot: null,
+      snapshot_source: "unavailable",
+    });
+  });
+
+  it("halves the result's domains inside the envelope until the whole record fits", () => {
+    const many = Array.from({ length: 3000 }, (_, i) => proDiscoveredDomain(`d-${i}.example`));
+    const { text, structured } = truncateJobJsonIfNeeded(doneJob(many));
+    expect(text.length).toBeLessThanOrEqual(25_000);
+    const parsed = JSON.parse(text) as JobResponse;
+    expect(parsed).toEqual(structured);
+    expect(parsed.job_id).toBe("0123456789abcdef01234567");
+    expect(parsed.result?.truncated).toBe(true);
+    expect(parsed.result?.domains.length).toBeGreaterThan(0);
+    expect(parsed.snapshot).toBe("2026-08-31");
+  });
+
+  it("collapses to the minimal scan envelope when one row alone is over budget", () => {
+    const huge = { ...proDiscoveredDomain("cna.com"), padding: "x".repeat(30_000) };
+    const { text, structured } = truncateJobJsonIfNeeded(doneJob([huge]));
+    expect(text.length).toBeLessThanOrEqual(25_000);
+    expect(structured).toMatchObject({
+      status: "done",
+      result: { domains: [], truncated: true, snapshot: "2026-08-31", snapshot_source: "scan" },
+      snapshot: "2026-08-31",
+      snapshot_source: "scan",
+    });
+  });
+
+  it("bounds a result-less record that is over budget by dropping unknown fields", () => {
+    const { text, structured } = truncateJobJsonIfNeeded({
+      job_id: "abc",
+      status: "failed",
+      submitted_at: "2026-09-04T10:00:00Z",
+      error: "e".repeat(30_000),
+      noise: "n".repeat(30_000),
+    });
+    expect(text.length).toBeLessThanOrEqual(25_000);
+    expect(structured).not.toHaveProperty("noise");
+    expect(structured.error).toContain("truncated, 30000 chars total");
+    expect(structured.snapshot_source).toBe("unavailable");
+  });
+});
+
+describe("formatScanAsMarkdown — ProDiscoveredDomain rows (deep-dive result shape)", () => {
+  it("renders `domain` + `enrichment` rows through the band table, not the ScoutResult table", () => {
+    const md = formatScanAsMarkdown("CNA Financial", {
+      domains: [proDiscoveredDomain("cna.com")],
+      source: "live-enriched",
+    });
+    expect(md).toContain("| Domain | Attributed to | Band | Signals | Evidence |");
+    expect(md).not.toContain("| Domain | Attributed to | Confidence | Sources | Evidence |");
+    expect(md).toContain("| `cna.com` | CNA Financial Corporation | ✅ verified |");
+  });
+
+  it("still renders an enrichment-less `domain` row as a ScoutResult", () => {
+    const md = formatScanAsMarkdown("CNA Financial", {
+      domains: [{ domain: "cna.com", confidence: 0.95, sources: ["ct_org_match"] }],
+    });
+    expect(md).toContain("| Domain | Attributed to | Confidence | Sources | Evidence |");
   });
 });

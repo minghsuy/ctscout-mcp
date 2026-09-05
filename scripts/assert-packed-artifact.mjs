@@ -93,13 +93,20 @@ assert.equal(
 // they pin the documented transport exception (README "hosted endpoint"):
 // snapshot is null / "unavailable", never a date fetched from elsewhere.
 const PAYLOAD_SNAPSHOT = "2026-09-03";
+// The deep-dive stubs follow ctscout-worker#344 contract v1: POST /jobs
+// answers 202 with a receipt; GET /jobs/<id> answers the done record whose
+// result carries the worker-set `snapshot`.
+const JOB_ID = "0123456789abcdef01234567";
+const JOB_SNAPSHOT = "2026-08-31";
 
 const apiRequests = [];
 const api = createHttpServer((request, response) => {
   const chunks = [];
   request.on("data", (chunk) => chunks.push(chunk));
   request.on("end", () => {
-    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    const raw = Buffer.concat(chunks).toString("utf8");
+    // A GET carries no body; record it as undefined rather than failing to parse.
+    const body = raw.length > 0 ? JSON.parse(raw) : undefined;
     apiRequests.push({
       method: request.method,
       url: request.url,
@@ -107,6 +114,61 @@ const api = createHttpServer((request, response) => {
       userAgent: request.headers["user-agent"],
       body,
     });
+
+    if (request.method === "POST" && request.url === "/jobs") {
+      response.writeHead(202, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({
+          job_id: JOB_ID,
+          status: "queued",
+          submitted_at: "2026-09-04T10:00:00Z",
+          poll: `/jobs/${JOB_ID}`,
+        }),
+      );
+      return;
+    }
+
+    if (request.method === "GET" && request.url === `/jobs/${JOB_ID}`) {
+      response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      response.end(
+        JSON.stringify({
+          job_id: JOB_ID,
+          kind: "deep_dive",
+          status: "done",
+          submitted_at: "2026-09-04T10:00:00Z",
+          started_at: "2026-09-04T10:05:00Z",
+          finished_at: "2026-09-04T10:09:30Z",
+          result: {
+            job_id: JOB_ID,
+            entity: { company_name: "Packed Deep Dive", seed_domain: [] },
+            domains: [
+              {
+                domain: "packed-deep-dive.example",
+                attributed_to: "Packed Deep Dive Incorporated",
+                is_seed: false,
+                base: { domain: "packed-deep-dive.example", confidence: 0.95 },
+                enrichment: {
+                  confidence_band: "verified",
+                  weight_total: 4.2,
+                  matched_via: ["dns_txt_brand_token"],
+                  evidence: { dns_txt_brand_token: "verified via google-site-verification" },
+                  signal_health: { vlm_verdict: "pending" },
+                  vlm_status: "pending",
+                  vlm_override: false,
+                },
+              },
+            ],
+            run_metadata: {},
+            source: "live-enriched",
+            signals_degraded: false,
+            snapshot: JOB_SNAPSHOT,
+            worker_version: "abc1234",
+            signals_attempted: ["dns", "rdap"],
+          },
+        }),
+      );
+      return;
+    }
 
     response.writeHead(200, { "content-type": "application/json" });
     if (request.url === "/scan/batch") {
@@ -316,6 +378,8 @@ try {
       "ctscout_search_company",
       "ctscout_search_company_batch",
       "ctscout_lookup_domain",
+      "ctscout_submit_deep_dive",
+      "ctscout_get_job",
     ],
   );
 
@@ -344,6 +408,67 @@ try {
     "scan",
     "unavailable",
   ]);
+
+  // Deep dive: submit (POST /jobs, 202 receipt) then poll (GET /jobs/<id>).
+  // The receipt is the raw 202 body; the done record carries the worker-set
+  // snapshot both inside `result` and as the top-level resolved copy.
+  const modernSubmit = await modern.request({
+    jsonrpc: "2.0",
+    id: "modern-submit",
+    method: "tools/call",
+    params: {
+      name: "ctscout_submit_deep_dive",
+      arguments: { company_name: "Packed Deep Dive", response_format: "json" },
+      _meta: modernMeta,
+    },
+  });
+  assert.equal(modernSubmit.error, undefined);
+  assert.equal(modernSubmit.result.isError, undefined);
+  assert.deepEqual(modernSubmit.result.structuredContent, {
+    job_id: JOB_ID,
+    status: "queued",
+    submitted_at: "2026-09-04T10:00:00Z",
+    poll: `/jobs/${JOB_ID}`,
+  });
+  const modernJob = await modern.request({
+    jsonrpc: "2.0",
+    id: "modern-job",
+    method: "tools/call",
+    params: {
+      name: "ctscout_get_job",
+      arguments: { job_id: modernSubmit.result.structuredContent.job_id },
+      _meta: modernMeta,
+    },
+  });
+  assert.equal(modernJob.error, undefined);
+  assert.equal(modernJob.result.isError, undefined);
+  assert.equal(modernJob.result.structuredContent.status, "done");
+  assert.equal(modernJob.result.structuredContent.snapshot, JOB_SNAPSHOT);
+  assert.equal(modernJob.result.structuredContent.snapshot_source, "scan");
+  assert.equal(modernJob.result.structuredContent.result.snapshot, JOB_SNAPSHOT);
+  assert.equal(
+    modernJob.result.structuredContent.result.domains[0].attributed_to,
+    "Packed Deep Dive Incorporated",
+  );
+  const modernJobText = modernJob.result.content.find((item) => item.type === "text").text;
+  assert.ok(modernJobText.includes("| Domain | Attributed to | Band | Signals | Evidence |"));
+  assert.ok(modernJobText.includes(`_Warehouse snapshot: ${JOB_SNAPSHOT}`));
+  const modernSubmitTool = modernList.result.tools.find(
+    (tool) => tool.name === "ctscout_submit_deep_dive",
+  );
+  assert.deepEqual(modernSubmitTool.annotations, {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: true,
+  });
+  const modernGetJobTool = modernList.result.tools.find((tool) => tool.name === "ctscout_get_job");
+  assert.deepEqual(modernGetJobTool.annotations, {
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: true,
+  });
   await modern.close();
 
   const legacy = launchPackedServer();
@@ -406,7 +531,9 @@ try {
   assert.equal(batch.inputSchema.properties.company_names.items.maxLength, 200);
   assert.deepEqual(batch.inputSchema.properties.response_format.enum, ["markdown", "json"]);
 
-  for (const tool of legacyList.result.tools) {
+  // The three scan tools debit quota on every call: read-only, not idempotent.
+  // The job tools' annotations are asserted on the modern client above.
+  for (const tool of legacyList.result.tools.filter((t) => !t.name.includes("job") && !t.name.includes("deep_dive"))) {
     assert.deepEqual(tool.annotations, {
       readOnlyHint: true,
       destructiveHint: false,
@@ -450,6 +577,11 @@ try {
   assert.equal(legacyLookup.result.structuredContent.snapshot_source, "unavailable");
   for (const tool of legacyList.result.tools) {
     assert.ok(tool.outputSchema, `packed server omitted outputSchema on ${tool.name}`);
+    // A submission receipt carries no attribution and so no snapshot.
+    if (tool.name === "ctscout_submit_deep_dive") {
+      assert.equal(tool.outputSchema.properties.snapshot_source, undefined);
+      continue;
+    }
     assert.deepEqual(tool.outputSchema.properties.snapshot_source.enum, [
       "scan",
       "unavailable",
@@ -468,11 +600,24 @@ assert.deepEqual(
     userAgent,
   })),
   // One request per tool call and nothing else: the snapshot date never
-  // triggers a separate fetch.
+  // triggers a separate fetch, and neither job tool calls anything but the
+  // Worker's /jobs endpoints.
   [
     {
       method: "POST",
       url: "/scan/batch",
+      apiKey: API_KEY,
+      userAgent: `ctscout-mcp-server/${expectedVersion}`,
+    },
+    {
+      method: "POST",
+      url: "/jobs",
+      apiKey: API_KEY,
+      userAgent: `ctscout-mcp-server/${expectedVersion}`,
+    },
+    {
+      method: "GET",
+      url: `/jobs/${JOB_ID}`,
       apiKey: API_KEY,
       userAgent: `ctscout-mcp-server/${expectedVersion}`,
     },
@@ -493,7 +638,9 @@ assert.deepEqual(
 assert.deepEqual(apiRequests[0].body, {
   queries: [{ company_name: "Alpha" }, { company_name: "Beta" }],
 });
-assert.deepEqual(apiRequests[1].body, { company_name: "Packed Search" });
-assert.deepEqual(apiRequests[2].body, { seed_domain: ["packed-lookup.example"] });
+assert.deepEqual(apiRequests[1].body, { company_name: "Packed Deep Dive" });
+assert.equal(apiRequests[2].body, undefined);
+assert.deepEqual(apiRequests[3].body, { company_name: "Packed Search" });
+assert.deepEqual(apiRequests[4].body, { seed_domain: ["packed-lookup.example"] });
 
 process.stdout.write("packed artifact install + modern/legacy protocol contract passed\n");

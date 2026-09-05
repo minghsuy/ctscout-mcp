@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createServer,
   type DomainResult,
+  type JobResponse,
   type ScanBatchResponse,
   type ScanResponse,
 } from "../src/index.ts";
@@ -70,7 +71,7 @@ describe("stdio MCP compatibility contract", () => {
     vi.restoreAllMocks();
   });
 
-  it("advertises the stable three-tool surface, hosted schemas, and quota-safe annotations", async () => {
+  it("advertises the stable five-tool surface, hosted schemas, and quota-safe annotations", async () => {
     const { client, close } = await connect();
 
     try {
@@ -79,6 +80,8 @@ describe("stdio MCP compatibility contract", () => {
         "ctscout_search_company",
         "ctscout_search_company_batch",
         "ctscout_lookup_domain",
+        "ctscout_submit_deep_dive",
+        "ctscout_get_job",
       ]);
 
       const search = tools.find((tool) => tool.name === "ctscout_search_company");
@@ -125,13 +128,62 @@ describe("stdio MCP compatibility contract", () => {
           },
         },
       });
-      for (const tool of tools) {
-        expect(tool.annotations).toEqual({
-          readOnlyHint: true,
+      const submit = tools.find((tool) => tool.name === "ctscout_submit_deep_dive");
+      expect(submit?.inputSchema).toMatchObject({
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          company_name: { type: "string", minLength: 2, maxLength: 200 },
+          seed_domain: {
+            type: "array",
+            minItems: 1,
+            maxItems: 10,
+            items: { type: "string", minLength: 3, maxLength: 253 },
+          },
+          response_format: { type: "string", enum: ["markdown", "json"], default: "markdown" },
+        },
+      });
+      // Neither input is required on its own; the either/or rule is a refine.
+      expect(submit?.inputSchema.required ?? []).not.toContain("company_name");
+      const getJob = tools.find((tool) => tool.name === "ctscout_get_job");
+      expect(getJob?.inputSchema).toMatchObject({
+        type: "object",
+        required: ["job_id"],
+        additionalProperties: false,
+        properties: {
+          job_id: { type: "string", minLength: 1, maxLength: 64, pattern: "^[A-Za-z0-9_-]+$" },
+          response_format: { type: "string", enum: ["markdown", "json"], default: "markdown" },
+        },
+      });
+
+      // Scan tools debit quota on every call (read-only, not idempotent).
+      // Submitting a job creates state and debits the jobs quota (neither).
+      // Polling a job debits nothing (read-only and idempotent).
+      const quotaDebitingReadOnly = {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      };
+      const expectedAnnotations: Record<string, unknown> = {
+        ctscout_search_company: quotaDebitingReadOnly,
+        ctscout_search_company_batch: quotaDebitingReadOnly,
+        ctscout_lookup_domain: quotaDebitingReadOnly,
+        ctscout_submit_deep_dive: {
+          readOnlyHint: false,
           destructiveHint: false,
           idempotentHint: false,
           openWorldHint: true,
-        });
+        },
+        ctscout_get_job: {
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: true,
+        },
+      };
+      for (const tool of tools) {
+        expect(tool.annotations, tool.name).toEqual(expectedAnnotations[tool.name]);
         // Warehouse size changes weekly; a typed count drifts from the live site
         // and agents reason from it when judging a miss (#101).
         expect(tool.description).not.toMatch(
@@ -139,18 +191,45 @@ describe("stdio MCP compatibility contract", () => {
         );
       }
       expect(search?.description).toContain("https://ctscout.dev/stats");
+
+      // The job tools' descriptions carry the contract's facts an agent must
+      // act on (worker#344 contract v1).
+      for (const tool of [submit, getJob]) {
+        const description = tool?.description ?? "";
+        expect(description, tool?.name).toMatch(/[Aa]synchronous/);
+        expect(description, tool?.name).toContain("30 s");
+        expect(description, tool?.name).toContain("5 min");
+        expect(description, tool?.name).toContain("Pro");
+        expect(description, tool?.name).toContain("VLM");
+        expect(description, tool?.name).toMatch(/NOT included in v1/);
+        expect(description, tool?.name).toContain("batch worker sets it");
+        expect(description, tool?.name).toContain("Pro /scan");
+        expect(description, tool?.name).toContain('"Attributed"');
+        expect(description, tool?.name).toContain('"Candidate"');
+      }
+      expect(submit?.description).toContain("20 submissions per key per day");
     } finally {
       await close();
     }
   });
 
-  it("declares an outputSchema on every tool that requires snapshot and snapshot_source", async () => {
+  it("declares an outputSchema on every tool; every result-bearing tool requires snapshot and snapshot_source", async () => {
     const { client, close } = await connect();
 
     try {
       const { tools } = await client.listTools();
-      expect(tools).toHaveLength(3);
-      for (const tool of tools) {
+      expect(tools).toHaveLength(5);
+      // A submission receipt carries no attribution data, so it carries no
+      // snapshot either: a date there would be invented.
+      const submit = tools.find((tool) => tool.name === "ctscout_submit_deep_dive");
+      expect(submit?.outputSchema).toMatchObject({
+        type: "object",
+        required: expect.arrayContaining(["job_id", "status", "submitted_at"]),
+      });
+      expect(submit?.outputSchema?.properties).not.toHaveProperty("snapshot");
+      const resultBearing = tools.filter((tool) => tool.name !== "ctscout_submit_deep_dive");
+      expect(resultBearing).toHaveLength(4);
+      for (const tool of resultBearing) {
         expect(tool.outputSchema, tool.name).toMatchObject({
           type: "object",
           properties: {
@@ -192,6 +271,31 @@ describe("stdio MCP compatibility contract", () => {
           remaining_quota: { anyOf: [{ type: "number" }, { type: "null" }] },
         },
       });
+
+      // The job record is proxied too: status stays a documented string, the
+      // result is the (open) scan shape plus the worker-set fields.
+      const getJob = tools.find((tool) => tool.name === "ctscout_get_job");
+      expect(getJob?.outputSchema).toMatchObject({
+        additionalProperties: {},
+        required: expect.arrayContaining(["job_id", "status", "submitted_at"]),
+        properties: {
+          status: { type: "string" },
+          result: {
+            type: "object",
+            additionalProperties: {},
+            required: expect.arrayContaining(["domains"]),
+            properties: {
+              domains: { type: "array" },
+              snapshot: expect.anything(),
+              worker_version: { type: "string" },
+              signals_degraded: { type: "boolean" },
+            },
+          },
+        },
+      });
+      const getJobProps = getJob?.outputSchema?.properties as Record<string, unknown>;
+      expect(getJobProps.status).not.toHaveProperty("enum");
+      expect(getJob?.outputSchema?.required).not.toContain("result");
     } finally {
       await close();
     }
@@ -470,7 +574,8 @@ describe("stdio MCP compatibility contract", () => {
 
     try {
       const { tools } = await client.listTools();
-      for (const tool of tools) {
+      // The submission receipt carries no snapshot (nothing attributed yet).
+      for (const tool of tools.filter((t) => t.name !== "ctscout_submit_deep_dive")) {
         expect(tool.outputSchema?.properties, tool.name).toMatchObject({
           snapshot_source: { enum: ["scan", "unavailable"] },
         });
@@ -609,6 +714,338 @@ describe("stdio MCP compatibility contract", () => {
       expect(textOf(result)).toContain("Daily request quota exceeded");
       expect(result.structuredContent).toBeUndefined();
       expect(calledUrls(fetchMock)).toHaveLength(1);
+    } finally {
+      await close();
+    }
+  });
+
+  // ---------- Async deep-dive jobs (ctscout-worker#344 contract v1) ----------
+
+  const JOB_ID = "0123456789abcdef01234567";
+  const RECEIPT = {
+    job_id: JOB_ID,
+    status: "queued",
+    submitted_at: "2026-09-04T10:00:00Z",
+    poll: `/jobs/${JOB_ID}`,
+  };
+  const DEEP_DIVE_ROW: DomainResult = {
+    domain: "cna.com",
+    attributed_to: "CNA Financial Corporation",
+    is_seed: true,
+    base: { domain: "cna.com", confidence: 0.95, sources: ["ct_org_match"] },
+    enrichment: {
+      confidence_band: "verified",
+      weight_total: 4.2,
+      matched_via: ["dns_txt_brand_token"],
+      evidence: { dns_txt_brand_token: "verified via google-site-verification" },
+      signal_health: { vlm_verdict: "pending" },
+      vlm_status: "pending",
+      vlm_override: false,
+    },
+  };
+  const DONE_JOB: JobResponse = {
+    job_id: JOB_ID,
+    kind: "deep_dive",
+    status: "done",
+    submitted_at: "2026-09-04T10:00:00Z",
+    started_at: "2026-09-04T10:05:00Z",
+    finished_at: "2026-09-04T10:09:30Z",
+    result: {
+      job_id: JOB_ID,
+      entity: { company_name: "CNA Financial", seed_domain: ["cna.com"] },
+      domains: [DEEP_DIVE_ROW],
+      run_metadata: {},
+      source: "live-enriched",
+      signals_degraded: false,
+      snapshot: "2026-08-31",
+      worker_version: "abc1234",
+      signals_attempted: ["dns", "rdap"],
+    },
+  };
+
+  it("submits a deep dive with one POST /jobs carrying only the spec, in both formats", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_pro_contract_test";
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify(RECEIPT), {
+          status: 202,
+          headers: { "Content-Type": "application/json" },
+        }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const { client, close } = await connect();
+
+    try {
+      const markdown = await client.callTool({
+        name: "ctscout_submit_deep_dive",
+        arguments: { company_name: "CNA Financial", seed_domain: ["cna.com"] },
+      });
+      expect(markdown.isError).not.toBe(true);
+      const text = textOf(markdown);
+      expect(text).toContain("# ctscout deep dive submitted");
+      expect(text).toContain(`- Job id: \`${JOB_ID}\``);
+      expect(text).toContain("nothing is attributed yet");
+      expect(text).toContain("ctscout_get_job");
+      expect(markdown.structuredContent).toEqual(RECEIPT);
+
+      const json = await client.callTool({
+        name: "ctscout_submit_deep_dive",
+        arguments: { seed_domain: ["cna.com"], response_format: "json" },
+      });
+      expect(json.isError).not.toBe(true);
+      expect(JSON.parse(textOf(json))).toEqual(RECEIPT);
+      expect(json.structuredContent).toEqual(RECEIPT);
+
+      const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit]>;
+      expect(calls.map(([url]) => url.replace(/^.*\/\/[^/]+/, ""))).toEqual(["/jobs", "/jobs"]);
+      for (const [, init] of calls) {
+        expect(init.method).toBe("POST");
+        expect(init.redirect).toBe("error");
+        expect(init.headers).toMatchObject({ "X-API-Key": "ds_pro_contract_test" });
+      }
+      // response_format never reaches the API; the spec is exactly what /scan validates.
+      expect(JSON.parse(String(calls[0][1].body))).toEqual({
+        company_name: "CNA Financial",
+        seed_domain: ["cna.com"],
+      });
+      expect(JSON.parse(String(calls[1][1].body))).toEqual({ seed_domain: ["cna.com"] });
+    } finally {
+      await close();
+    }
+  });
+
+  it("rejects a deep dive with neither company_name nor seed_domain, or too many seeds, before any network call", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_pro_contract_test";
+    globalThis.fetch = vi.fn();
+
+    const { client, close } = await connect();
+
+    try {
+      const empty = await client.callTool({ name: "ctscout_submit_deep_dive", arguments: {} });
+      expect(empty.isError).toBe(true);
+      expect(textOf(empty)).toContain("Provide company_name, seed_domain, or both");
+
+      const over = await client.callTool({
+        name: "ctscout_submit_deep_dive",
+        arguments: { seed_domain: Array.from({ length: 11 }, (_, i) => `seed-${i}.example`) },
+      });
+      expect(over.isError).toBe(true);
+      expect(textOf(over)).toContain("At most 10 seed domains per deep dive");
+
+      const badId = await client.callTool({
+        name: "ctscout_get_job",
+        arguments: { job_id: "../keys" },
+      });
+      expect(badId.isError).toBe(true);
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    } finally {
+      await close();
+    }
+  });
+
+  it("explains a free key's 403 with the API's upgrade text and the jobs quota's 429, with no structuredContent", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_free_contract_test";
+    const responses = [
+      new Response(
+        JSON.stringify({
+          error: "pro_required",
+          upgrade_hint: "Deep dives are a Pro feature; email pro@ctscout.dev for a key.",
+        }),
+        { status: 403, headers: { "Content-Type": "application/json" } },
+      ),
+      new Response(JSON.stringify({ error: "jobs quota" }), { status: 429 }),
+    ];
+    const fetchMock = vi.fn(async () => responses.shift() as Response);
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const { client, close } = await connect();
+
+    try {
+      const forbidden = await client.callTool({
+        name: "ctscout_submit_deep_dive",
+        arguments: { company_name: "CNA Financial" },
+      });
+      expect(forbidden.isError).toBe(true);
+      expect(textOf(forbidden)).toContain("Deep dives require a Pro key");
+      expect(textOf(forbidden)).toContain(
+        "Deep dives are a Pro feature; email pro@ctscout.dev for a key.",
+      );
+      expect(textOf(forbidden)).not.toContain("revoked");
+      expect(forbidden.structuredContent).toBeUndefined();
+
+      const quota = await client.callTool({
+        name: "ctscout_submit_deep_dive",
+        arguments: { company_name: "CNA Financial" },
+      });
+      expect(quota.isError).toBe(true);
+      expect(textOf(quota)).toContain("Daily deep-dive quota exceeded (20 submissions");
+      expect(quota.structuredContent).toBeUndefined();
+      expect(calledUrls(fetchMock)).toHaveLength(2);
+    } finally {
+      await close();
+    }
+  });
+
+  it("polls a job with one GET /jobs/{id}: queued, then done with the worker-set snapshot, then failed", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_pro_contract_test";
+    const records: unknown[] = [
+      { job_id: JOB_ID, kind: "deep_dive", status: "queued", submitted_at: "2026-09-04T10:00:00Z" },
+      DONE_JOB,
+      DONE_JOB,
+      {
+        job_id: JOB_ID,
+        kind: "deep_dive",
+        status: "failed",
+        submitted_at: "2026-09-04T10:00:00Z",
+        started_at: "2026-09-04T10:05:00Z",
+        finished_at: "2026-09-04T10:06:00Z",
+        error: "origin_timeout: enrichment gave up",
+      },
+    ];
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify(records.shift()), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const { client, close } = await connect();
+
+    try {
+      const queued = await client.callTool({
+        name: "ctscout_get_job",
+        arguments: { job_id: JOB_ID },
+      });
+      expect(queued.isError).not.toBe(true);
+      expect(textOf(queued)).toContain("- Status: `queued`");
+      expect(textOf(queued)).toContain("Not finished yet");
+      expect(queued.structuredContent).toEqual({
+        job_id: JOB_ID,
+        kind: "deep_dive",
+        status: "queued",
+        submitted_at: "2026-09-04T10:00:00Z",
+        snapshot: null,
+        snapshot_source: "unavailable",
+      });
+
+      const done = await client.callTool({
+        name: "ctscout_get_job",
+        arguments: { job_id: JOB_ID },
+      });
+      expect(done.isError).not.toBe(true);
+      const doneText = textOf(done);
+      expect(doneText).toContain("- Status: `done`");
+      expect(doneText).toContain(
+        "_Warehouse snapshot: 2026-08-31 (reported by the API response)._",
+      );
+      expect(doneText).toContain("| Domain | Attributed to | Band | Signals | Evidence |");
+      expect(doneText).toContain("| `cna.com` | CNA Financial Corporation | ✅ verified |");
+      expect(doneText).toContain("VLM");
+      expect(done.structuredContent).toMatchObject({
+        job_id: JOB_ID,
+        status: "done",
+        snapshot: "2026-08-31",
+        snapshot_source: "scan",
+        result: {
+          domains: [{ domain: "cna.com", attributed_to: "CNA Financial Corporation" }],
+          snapshot: "2026-08-31",
+          snapshot_source: "scan",
+          worker_version: "abc1234",
+        },
+      });
+
+      const doneJson = await client.callTool({
+        name: "ctscout_get_job",
+        arguments: { job_id: JOB_ID, response_format: "json" },
+      });
+      expect(doneJson.isError).not.toBe(true);
+      expect(JSON.parse(textOf(doneJson))).toEqual(doneJson.structuredContent);
+      expect(doneJson.structuredContent).toMatchObject({ snapshot: "2026-08-31" });
+
+      const failed = await client.callTool({
+        name: "ctscout_get_job",
+        arguments: { job_id: JOB_ID },
+      });
+      expect(failed.isError).not.toBe(true);
+      expect(textOf(failed)).toContain("- Error: origin\\_timeout: enrichment gave up");
+      expect(textOf(failed)).not.toContain("| Domain |");
+      expect(failed.structuredContent).toMatchObject({
+        status: "failed",
+        error: "origin_timeout: enrichment gave up",
+        snapshot: null,
+        snapshot_source: "unavailable",
+      });
+
+      const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit]>;
+      expect(calls.map(([url]) => url.replace(/^.*\/\/[^/]+/, ""))).toEqual(
+        Array(4).fill(`/jobs/${JOB_ID}`),
+      );
+      for (const [, init] of calls) {
+        expect(init.method).toBe("GET");
+        expect(init.body).toBeUndefined();
+      }
+    } finally {
+      await close();
+    }
+  });
+
+  it("explains a 404 on a job as not-your-job / unknown id", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_pro_contract_test";
+    const fetchMock = vi.fn(
+      async () => new Response(JSON.stringify({ error: "not found" }), { status: 404 }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const { client, close } = await connect();
+
+    try {
+      const result = await client.callTool({
+        name: "ctscout_get_job",
+        arguments: { job_id: "ffffffffffffffffffffffff" },
+      });
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toContain("No job with that id for this API key");
+      expect(result.structuredContent).toBeUndefined();
+      expect(calledUrls(fetchMock)).toHaveLength(1);
+    } finally {
+      await close();
+    }
+  });
+
+  it("keeps a size-truncated done job under the limit with the snapshot intact in both formats", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_pro_contract_test";
+    const big: JobResponse = {
+      ...DONE_JOB,
+      result: {
+        ...DONE_JOB.result,
+        domains: Array.from({ length: 3000 }, (_, i) => ({
+          ...DEEP_DIVE_ROW,
+          domain: `d-${i}.example`,
+        })),
+      } as JobResponse["result"],
+    };
+    mockApi(big);
+
+    const { client, close } = await connect();
+
+    try {
+      for (const response_format of ["markdown", "json"]) {
+        const result = await client.callTool({
+          name: "ctscout_get_job",
+          arguments: { job_id: JOB_ID, response_format },
+        });
+        expect(result.isError).not.toBe(true);
+        expect(textOf(result).length).toBeLessThanOrEqual(25_000);
+        expect(result.structuredContent).toMatchObject({
+          status: "done",
+          snapshot: "2026-08-31",
+          snapshot_source: "scan",
+          result: { truncated: true },
+        });
+      }
     } finally {
       await close();
     }
