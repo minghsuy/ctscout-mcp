@@ -223,6 +223,44 @@ describe("stdio MCP compatibility contract", () => {
     }
   });
 
+  it("every tool's advertised text says /scan carries a daily snapshot (API version 2026-09-05)", async () => {
+    const { client, close } = await connect();
+    try {
+      const { tools } = await client.listTools();
+      const byName = (name: string) => tools.find((tool) => tool.name === name);
+      const search = byName("ctscout_search_company");
+      const batch = byName("ctscout_search_company_batch");
+      const submit = byName("ctscout_submit_deep_dive");
+      // Positive pins on each tool the change touched, so a rollback of any
+      // one description fails here rather than reading as a clean tree.
+      expect(search?.description).toMatch(/daily snapshot/);
+      expect(search?.description).toMatch(/API version 2026-09-05\+/);
+      expect(search?.description).toMatch(/reports it since X-API-Version 2026-09-05/);
+      expect(batch?.description).toMatch(/API version 2026-09-05\+/);
+      expect(submit?.description).toMatch(/a \/scan answer carries its own snapshot from the API/);
+      // The shared output schema's snapshot description states the cadence.
+      for (const name of [
+        "ctscout_search_company",
+        "ctscout_search_company_batch",
+        "ctscout_lookup_domain",
+      ]) {
+        const properties = (byName(name)?.outputSchema?.properties ?? {}) as Record<
+          string,
+          { description?: string } | undefined
+        >;
+        const snapshot = properties.snapshot;
+        expect(snapshot?.description, name).toMatch(/syncs daily/);
+      }
+      for (const tool of tools) {
+        expect(tool.description, tool.name).not.toMatch(
+          /today the API does not|unlike \/scan today|weekly/,
+        );
+      }
+    } finally {
+      await close();
+    }
+  });
+
   it("declares an outputSchema on every tool; every result-bearing tool requires snapshot and snapshot_source", async () => {
     const { client, close } = await connect();
 
