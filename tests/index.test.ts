@@ -41,6 +41,7 @@ import {
   formatBatchAsMarkdown,
   formatScanAsMarkdown,
   getApiKey,
+  resolveSnapshot,
   SERVER_VERSION,
   SearchCompanyBatchInputSchema,
   TimeoutError,
@@ -122,7 +123,7 @@ describe("formatScanAsMarkdown — free tier", () => {
     );
     expect(md).toContain("# ctscout results for: Coalition Inc");
     expect(md).toContain("Source: `warehouse`");
-    expect(md).toContain("| Domain | Organization | Certs | Subdomains |");
+    expect(md).toContain("| Domain | Attributed to | Certs | Subdomains |");
     expect(md).toContain("| `coalition.com` | Coalition Inc | 42 | 15 |");
     // Pro tier marker MUST NOT appear in free-tier output
     expect(md).not.toContain("Pro tier");
@@ -166,9 +167,9 @@ describe("formatScanAsMarkdown — free tier", () => {
       { kind: "company" },
     );
 
-    expect(md).toContain("No authoritative OV/EV warehouse domains");
+    expect(md).toContain("No attributed OV/EV warehouse domains");
     expect(md).toContain("weak signal; corroborate before use");
-    expect(md).toContain("| Organization | Similarity | Top apex domain |");
+    expect(md).toContain("| Candidate organization | Similarity | Top apex domain |");
     expect(md).toContain("| Acme Holdings, Inc. | 0.91 | acme.example |");
     expect(md).toContain("| Acme Regional LLC | 0.73 | — |");
     expect(md).toContain("| Malformed Similarity Co | — | malformed.example |");
@@ -1019,7 +1020,7 @@ describe("formatScanAsMarkdown — Pro tier (real ScoutResult shape)", () => {
   });
 
   it("uses the ScoutResult table header (Domain / Org / Confidence / Sources / Evidence)", () => {
-    expect(md).toContain("| Domain | Org | Confidence | Sources | Evidence |");
+    expect(md).toContain("| Domain | Attributed to | Confidence | Sources | Evidence |");
   });
 
   it("renders the actual domain string from `domain` (not apex_domain)", () => {
@@ -1051,7 +1052,7 @@ describe("formatScanAsMarkdown — Pro tier (real ScoutResult shape)", () => {
   it("handles missing `total` (ScoutResult doesn't carry it) by falling back to domains.length", () => {
     // Pre-fix: would have rendered "of undefined total" because the type
     // required `total` and the fixture/origin doesn't provide it.
-    expect(md).toContain("**2** domain(s) of 2 total");
+    expect(md).toContain("**2** attributed domain(s) of 2 total");
     expect(md).not.toContain("undefined");
   });
 
@@ -2512,5 +2513,89 @@ describe("truncateBatchJsonIfNeeded", () => {
     expect(JSON.parse(text)).toEqual(structured);
     expect(structured.results).toHaveLength(10);
     expect(structured.results.map((item) => item.query.company_name)).toEqual(names);
+  });
+});
+
+describe("resolveSnapshot", () => {
+  it("resolves 'scan' from a non-empty payload string, else 'unavailable' with null", () => {
+    expect(resolveSnapshot({ snapshot: "2026-08-30" })).toEqual({
+      snapshot: "2026-08-30",
+      snapshot_source: "scan",
+    });
+
+    // A non-string or empty payload snapshot is not trusted as a date, and no
+    // other source is consulted: null is the only honest answer.
+    const unavailable = { snapshot: null, snapshot_source: "unavailable" };
+    expect(resolveSnapshot({ snapshot: 20260830 })).toEqual(unavailable);
+    expect(resolveSnapshot({ snapshot: "" })).toEqual(unavailable);
+    expect(resolveSnapshot({ snapshot: null })).toEqual(unavailable);
+    expect(resolveSnapshot({})).toEqual(unavailable);
+  });
+});
+
+describe("snapshot line in markdown", () => {
+  it("is omitted when the response carries no snapshot fields", () => {
+    const md = formatScanAsMarkdown("Acme", freeResponse([]), { kind: "company" });
+    expect(md).not.toContain("Warehouse snapshot");
+  });
+
+  it("names the date and its source on every rendering path", () => {
+    const stamped: ScanResponse = {
+      ...freeResponse([]),
+      snapshot: "2026-09-03",
+      snapshot_source: "scan",
+    };
+    expect(formatScanAsMarkdown("Acme", stamped, { kind: "company" })).toContain(
+      "_Warehouse snapshot: 2026-09-03 (reported by the API response)._",
+    );
+    const semantic: ScanResponse = {
+      ...stamped,
+      match_type: "semantic",
+      candidates: [{ org: "Acme Holdings", similarity: 0.9, top_apex_domain: null }],
+    };
+    const semanticMd = formatScanAsMarkdown("Acme", semantic, { kind: "company" });
+    expect(semanticMd).toContain("_Warehouse snapshot: 2026-09-03");
+    expect(semanticMd).toContain("| Candidate organization | Similarity | Top apex domain |");
+    const unavailable: ScanResponse = {
+      ...stamped,
+      snapshot: null,
+      snapshot_source: "unavailable",
+    };
+    expect(formatScanAsMarkdown("Acme", unavailable)).toContain(
+      "_Warehouse snapshot: unknown — the API did not report a sync date._",
+    );
+  });
+
+  it("survives markdown and JSON truncation of a single scan", () => {
+    const big: ScanResponse = {
+      ...freeResponse(
+        Array.from({ length: 2000 }, (_, i) => ({
+          org: "Big Corp",
+          apex_domain: `big-${i}.example.com`,
+          cert_count: 1,
+          subdomain_count: 0,
+        })),
+      ),
+      snapshot: "2026-09-03",
+      snapshot_source: "scan",
+    };
+    const md = truncateIfNeeded(formatScanAsMarkdown("Big", big), big, "Big");
+    expect(md.text).toContain("_Warehouse snapshot: 2026-09-03");
+    expect(md.structured.snapshot).toBe("2026-09-03");
+
+    const json = truncateJsonIfNeeded(big);
+    expect(JSON.parse(json.text).snapshot_source).toBe("scan");
+
+    // The minimal-envelope path (one row alone over the limit) keeps it too.
+    const pathological: ScanResponse = {
+      ...big,
+      domains: [{ ...big.domains[0], padding: "x".repeat(30_000) }],
+    };
+    const minimal = truncateJsonIfNeeded(pathological);
+    expect(minimal.structured).toMatchObject({
+      domains: [],
+      snapshot: "2026-09-03",
+      snapshot_source: "scan",
+    });
   });
 });

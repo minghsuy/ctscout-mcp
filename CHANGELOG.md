@@ -12,11 +12,27 @@ version heading so the exact package metadata and notes are reviewed together;
 
 ## [Unreleased]
 
+### Added
+
+- `outputSchema` on all three tools, enforced by the SDK against every
+  `structuredContent`; proxied fields stay open so upstream additions widen
+  rather than break the tool (#100)
+- `snapshot` (warehouse/D1 sync date) and `snapshot_source` (`scan` |
+  `unavailable`) on every response, read from the API payload when it carries
+  one; no independent fallback request, so a missing date is reported as
+  unknown rather than guessed. Markdown output carries the same line (#100)
+
 ### Changed
 
 - `ctscout_search_company` description, README and LIMITATIONS no longer carry a
   hand-typed warehouse size (the three disagreed with each other and with the
   live site); all point at https://ctscout.dev/stats instead (#101)
+- Result wording is consistently "attributed" (cert-subject attribution) vs
+  "candidate" (semantic name similarity, not an attribution); every table's
+  organization column is "Attributed to" and the candidate table is labelled
+  as candidates. Tool descriptions document `match_type`, `candidates`,
+  `org_match_strategy`, `empty_reason`, and that `first_seen`/`last_seen` are
+  warehouse observation times, not CT SCT times (#100)
 
 ## [0.3.0] - 2026-07-30
 

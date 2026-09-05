@@ -101,6 +101,19 @@ quota-sensitive annotations against the hosted surface. The remaining
 shared-core/forwarding and automated cross-repository comparison work is tracked
 in [#72](https://github.com/minghsuy/ctscout-mcp/issues/72).
 
+One documented, transport-specific difference: this package advertises an
+`outputSchema` on every tool and, on every successful call, returns `snapshot`
+(warehouse sync date) and `snapshot_source` (`"scan"` | `"unavailable"`) in
+`structuredContent`. A failed call (401, 429, timeout) is an `isError` result
+with no `structuredContent` at all, so do not dereference `snapshot` on it.
+The hosted endpoint does not yet, and no API response carries `snapshot`
+today, so on this package `snapshot_source` is `"unavailable"` and `snapshot`
+is `null` until the API emits it. There is deliberately no client-side fallback
+(a separately fetched date is not tied to the scan's generation). A client must
+treat a missing or null `snapshot` as unknown, never as "current". Closing this
+on the hosted side is tracked in
+[ctscout-worker#343](https://github.com/minghsuy/ctscout-worker/issues/343).
+
 The stdio package accepts both MCP protocol eras: current clients can discover
 the server through the stateless 2026-07-28 `server/discover` flow, while
 existing clients keep the 2025 `initialize` handshake.
