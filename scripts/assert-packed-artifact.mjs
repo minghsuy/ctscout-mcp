@@ -88,12 +88,16 @@ assert.equal(
   "the installed MCP server runtime must match the exact packed manifest pin",
 );
 
+const STATS_LAST_SYNC = "2026-09-03";
+
 const apiRequests = [];
 const api = createHttpServer((request, response) => {
   const chunks = [];
   request.on("data", (chunk) => chunks.push(chunk));
   request.on("end", () => {
-    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    // GET /stats has no body; every scan request carries a JSON one.
+    const body =
+      request.method === "GET" ? undefined : JSON.parse(Buffer.concat(chunks).toString("utf8"));
     apiRequests.push({
       method: request.method,
       url: request.url,
@@ -103,6 +107,11 @@ const api = createHttpServer((request, response) => {
     });
 
     response.writeHead(200, { "content-type": "application/json" });
+    if (request.url === "/stats") {
+      response.end(JSON.stringify({ organizations: 1, last_sync: STATS_LAST_SYNC }));
+      return;
+    }
+
     if (request.url === "/scan/batch") {
       response.end(
         JSON.stringify({
@@ -328,6 +337,16 @@ try {
     modernBatch.result.structuredContent.results.map((item) => item.query.company_name),
     ["Alpha", "Beta"],
   );
+  assert.equal(modernBatch.result.structuredContent.snapshot, STATS_LAST_SYNC);
+  assert.equal(modernBatch.result.structuredContent.snapshot_source, "stats");
+  const modernSearch = modernList.result.tools.find(
+    (tool) => tool.name === "ctscout_search_company",
+  );
+  assert.deepEqual(modernSearch.outputSchema.properties.snapshot_source.enum, [
+    "scan",
+    "stats",
+    "unavailable",
+  ]);
   await modern.close();
 
   const legacy = launchPackedServer();
@@ -413,6 +432,8 @@ try {
     legacySearch.result.structuredContent.domains[0].apex_domain,
     "packed-search.example",
   );
+  assert.equal(legacySearch.result.structuredContent.snapshot, STATS_LAST_SYNC);
+  assert.equal(legacySearch.result.structuredContent.snapshot_source, "stats");
 
   const legacyLookup = await legacy.request({
     jsonrpc: "2.0",
@@ -428,6 +449,15 @@ try {
     legacyLookup.result.structuredContent.domains[0].apex_domain,
     "packed-lookup.example",
   );
+  assert.equal(legacyLookup.result.structuredContent.snapshot, STATS_LAST_SYNC);
+  for (const tool of legacyList.result.tools) {
+    assert.ok(tool.outputSchema, `packed server omitted outputSchema on ${tool.name}`);
+    assert.deepEqual(tool.outputSchema.properties.snapshot_source.enum, [
+      "scan",
+      "stats",
+      "unavailable",
+    ]);
+  }
   await legacy.close();
 } finally {
   await new Promise((resolve) => api.close(resolve));
@@ -440,6 +470,8 @@ assert.deepEqual(
     apiKey,
     userAgent,
   })),
+  // Each server process reads /stats once after its first successful scan
+  // (public endpoint: no API key) and serves later calls from its cache.
   [
     {
       method: "POST",
@@ -448,9 +480,21 @@ assert.deepEqual(
       userAgent: `ctscout-mcp-server/${expectedVersion}`,
     },
     {
+      method: "GET",
+      url: "/stats",
+      apiKey: undefined,
+      userAgent: `ctscout-mcp-server/${expectedVersion}`,
+    },
+    {
       method: "POST",
       url: "/scan",
       apiKey: API_KEY,
+      userAgent: `ctscout-mcp-server/${expectedVersion}`,
+    },
+    {
+      method: "GET",
+      url: "/stats",
+      apiKey: undefined,
       userAgent: `ctscout-mcp-server/${expectedVersion}`,
     },
     {
@@ -464,7 +508,7 @@ assert.deepEqual(
 assert.deepEqual(apiRequests[0].body, {
   queries: [{ company_name: "Alpha" }, { company_name: "Beta" }],
 });
-assert.deepEqual(apiRequests[1].body, { company_name: "Packed Search" });
-assert.deepEqual(apiRequests[2].body, { seed_domain: ["packed-lookup.example"] });
+assert.deepEqual(apiRequests[2].body, { company_name: "Packed Search" });
+assert.deepEqual(apiRequests[4].body, { seed_domain: ["packed-lookup.example"] });
 
 process.stdout.write("packed artifact install + modern/legacy protocol contract passed\n");

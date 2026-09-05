@@ -1,6 +1,75 @@
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createServer, type ScanBatchResponse, type ScanResponse } from "../src/index.ts";
+import {
+  createServer,
+  type DomainResult,
+  resetSnapshotCache,
+  type ScanBatchResponse,
+  type ScanResponse,
+} from "../src/index.ts";
+
+const STATS_SNAPSHOT = "2026-09-03";
+
+// Route fetch by URL the way the real API does: POST /scan and /scan/batch get
+// the scan payload, GET /stats gets the warehouse stats row. A fresh Response
+// per call — a Response body can be consumed only once.
+function mockApi(
+  scanPayload: unknown,
+  stats: { status?: number; body?: unknown } = { body: { last_sync: STATS_SNAPSHOT } },
+): ReturnType<typeof vi.fn> {
+  const fetchMock = vi.fn(async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.endsWith("/stats")) {
+      return new Response(JSON.stringify(stats.body ?? {}), {
+        status: stats.status ?? 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response(JSON.stringify(scanPayload), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  });
+  globalThis.fetch = fetchMock as unknown as typeof fetch;
+  return fetchMock;
+}
+
+function calledUrls(fetchMock: ReturnType<typeof vi.fn>): string[] {
+  return fetchMock.mock.calls.map(([input]) => String(input));
+}
+
+function scanCalls(fetchMock: ReturnType<typeof vi.fn>): string[] {
+  return calledUrls(fetchMock).filter((url) => !url.endsWith("/stats"));
+}
+
+async function connect(): Promise<{ client: Client; close: () => Promise<void> }> {
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const server = createServer();
+  const client = new Client({ name: "ctscout-contract-test", version: "0.0.0" });
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  return {
+    client,
+    close: async () => {
+      await client.close();
+      await server.close();
+    },
+  };
+}
+
+function textOf(result: { content: unknown }): string {
+  const content = result.content as Array<{ type: string; text?: string }>;
+  return content.find((item) => item.type === "text")?.text ?? "";
+}
+
+function warehouseDomains(prefix: string, n: number): DomainResult[] {
+  return Array.from({ length: n }, (_, i) => ({
+    org: `${prefix} Incorporated`,
+    apex_domain: `${prefix}-${i}.example.com`,
+    cert_count: i + 1,
+    subdomain_count: 0,
+  }));
+}
 
 describe("stdio MCP compatibility contract", () => {
   const originalFetch = globalThis.fetch;
@@ -13,21 +82,14 @@ describe("stdio MCP compatibility contract", () => {
     } else {
       process.env.CTSCOUT_API_KEY = originalApiKey;
     }
+    resetSnapshotCache();
     vi.restoreAllMocks();
   });
 
   it("advertises the stable three-tool surface, hosted schemas, and quota-safe annotations", async () => {
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    const server = createServer();
-    const client = new Client({
-      name: "ctscout-contract-test",
-      version: "0.0.0",
-    });
+    const { client, close } = await connect();
 
     try {
-      await server.connect(serverTransport);
-      await client.connect(clientTransport);
-
       const { tools } = await client.listTools();
       expect(tools.map((tool) => tool.name)).toEqual([
         "ctscout_search_company",
@@ -94,8 +156,60 @@ describe("stdio MCP compatibility contract", () => {
       }
       expect(search?.description).toContain("https://ctscout.dev/stats");
     } finally {
-      await client.close();
-      await server.close();
+      await close();
+    }
+  });
+
+  it("declares an outputSchema on every tool that requires snapshot and snapshot_source", async () => {
+    const { client, close } = await connect();
+
+    try {
+      const { tools } = await client.listTools();
+      expect(tools).toHaveLength(3);
+      for (const tool of tools) {
+        expect(tool.outputSchema, tool.name).toMatchObject({
+          type: "object",
+          properties: {
+            snapshot: { anyOf: [{ type: "string" }, { type: "null" }] },
+            snapshot_source: { type: "string", enum: ["scan", "stats", "unavailable"] },
+          },
+        });
+        expect(tool.outputSchema?.required, tool.name).toEqual(
+          expect.arrayContaining(["snapshot", "snapshot_source"]),
+        );
+      }
+
+      // The scan shape is proxied from the origin, so it stays open to fields
+      // this server does not model; the enum-like fields are strings with
+      // documented values, not closed enums, so upstream drift widens rather
+      // than breaks the tool.
+      const search = tools.find((tool) => tool.name === "ctscout_search_company");
+      // zod's looseObject emits `additionalProperties: {}` (accept anything).
+      expect(search?.outputSchema).toMatchObject({
+        additionalProperties: {},
+        required: expect.arrayContaining(["domains"]),
+        properties: {
+          domains: { type: "array", items: { type: "object", additionalProperties: {} } },
+          match_type: { type: "string" },
+          candidates: { type: "array" },
+        },
+      });
+      expect(search?.outputSchema?.additionalProperties).toEqual({});
+      const searchProps = search?.outputSchema?.properties as Record<string, unknown>;
+      expect(searchProps.match_type).not.toHaveProperty("enum");
+      const lookup = tools.find((tool) => tool.name === "ctscout_lookup_domain");
+      expect(lookup?.outputSchema).toEqual(search?.outputSchema);
+
+      const batch = tools.find((tool) => tool.name === "ctscout_search_company_batch");
+      expect(batch?.outputSchema).toMatchObject({
+        required: expect.arrayContaining(["results", "remaining_quota"]),
+        properties: {
+          results: { type: "array", items: { anyOf: expect.any(Array) } },
+          remaining_quota: { anyOf: [{ type: "number" }, { type: "null" }] },
+        },
+      });
+    } finally {
+      await close();
     }
   });
 
@@ -141,24 +255,11 @@ describe("stdio MCP compatibility contract", () => {
       ],
       remaining_quota: 7,
     };
-    globalThis.fetch = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify(response), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }),
-    );
+    const fetchMock = mockApi(response);
 
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    const server = createServer();
-    const client = new Client({
-      name: "ctscout-contract-test",
-      version: "0.0.0",
-    });
+    const { client, close } = await connect();
 
     try {
-      await server.connect(serverTransport);
-      await client.connect(clientTransport);
-
       const result = await client.callTool({
         name: "ctscout_search_company_batch",
         arguments: {
@@ -168,17 +269,22 @@ describe("stdio MCP compatibility contract", () => {
       });
 
       expect(result.isError).not.toBe(true);
-      expect(globalThis.fetch).toHaveBeenCalledOnce();
-      const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0];
+      expect(scanCalls(fetchMock)).toHaveLength(1);
+      const [url, init] = fetchMock.mock.calls[0];
       expect(String(url)).toMatch(/\/scan\/batch$/);
       expect(JSON.parse(String(init?.body))).toEqual({
         queries: [{ company_name: "Alpha" }, { company_name: "Beta" }, { company_name: "Gamma" }],
       });
-      const content = result.content as Array<{ type: string; text?: string }>;
-      const text = content.find((item) => item.type === "text")?.text ?? "";
+      const text = textOf(result);
+      expect(text).toContain(`_Warehouse snapshot: ${STATS_SNAPSHOT} (last_sync from `);
       expect(text.indexOf("alpha.example")).toBeLessThan(text.indexOf("Beta Holdings"));
       expect(text.indexOf("Beta Holdings")).toBeLessThan(text.indexOf("HTTP 503"));
+      expect(text).toContain("| Domain | Attributed to | Certs | Subdomains |");
+      expect(text).toContain("No attributed OV/EV warehouse domains matched.");
+      expect(text).toContain("| Candidate organization | Similarity | Top apex domain |");
       expect(text).toContain("weak signal; corroborate before use");
+      // The snapshot line is envelope-level: once, not once per section.
+      expect(text.match(/_Warehouse snapshot:/g)).toHaveLength(1);
       expect(result.structuredContent).toMatchObject({
         results: [
           { query: { company_name: "Alpha" }, domains: [{ apex_domain: "alpha.example" }] },
@@ -192,10 +298,11 @@ describe("stdio MCP compatibility contract", () => {
           },
         ],
         remaining_quota: 7,
+        snapshot: STATS_SNAPSHOT,
+        snapshot_source: "stats",
       });
     } finally {
-      await client.close();
-      await server.close();
+      await close();
     }
   });
 
@@ -203,17 +310,9 @@ describe("stdio MCP compatibility contract", () => {
     process.env.CTSCOUT_API_KEY = "ds_free_contract_test";
     globalThis.fetch = vi.fn();
 
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    const server = createServer();
-    const client = new Client({
-      name: "ctscout-contract-test",
-      version: "0.0.0",
-    });
+    const { client, close } = await connect();
 
     try {
-      await server.connect(serverTransport);
-      await client.connect(clientTransport);
-
       const result = await client.callTool({
         name: "ctscout_search_company_batch",
         arguments: {
@@ -229,8 +328,7 @@ describe("stdio MCP compatibility contract", () => {
       ]);
       expect(globalThis.fetch).not.toHaveBeenCalled();
     } finally {
-      await client.close();
-      await server.close();
+      await close();
     }
   });
 
@@ -241,24 +339,11 @@ describe("stdio MCP compatibility contract", () => {
       total: 0,
       source: "warehouse",
     };
-    globalThis.fetch = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify(response), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }),
-    );
+    const fetchMock = mockApi(response);
 
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    const server = createServer();
-    const client = new Client({
-      name: "ctscout-contract-test",
-      version: "0.0.0",
-    });
+    const { client, close } = await connect();
 
     try {
-      await server.connect(serverTransport);
-      await client.connect(clientTransport);
-
       const result = await client.callTool({
         name: "ctscout_search_company",
         arguments: {
@@ -272,8 +357,8 @@ describe("stdio MCP compatibility contract", () => {
       });
 
       expect(result.isError).not.toBe(true);
-      expect(globalThis.fetch).toHaveBeenCalledOnce();
-      const [, init] = vi.mocked(globalThis.fetch).mock.calls[0];
+      expect(scanCalls(fetchMock)).toHaveLength(1);
+      const [, init] = fetchMock.mock.calls[0];
       expect(JSON.parse(String(init?.body))).toEqual({
         company_name: "Acme Corporation",
         strict_match_org_only: true,
@@ -289,14 +374,236 @@ describe("stdio MCP compatibility contract", () => {
           response_format: "json",
         },
       });
-      expect(globalThis.fetch).toHaveBeenCalledTimes(2);
-      const [, defaultInit] = vi.mocked(globalThis.fetch).mock.calls[1];
+      expect(scanCalls(fetchMock)).toHaveLength(2);
+      const [, defaultInit] = fetchMock.mock.calls[2];
       expect(JSON.parse(String(defaultInit?.body))).toEqual({
         company_name: "Acme Corporation",
       });
     } finally {
-      await client.close();
-      await server.close();
+      await close();
+    }
+  });
+
+  it("stamps the /stats last_sync on search results and reads /stats once per cache window", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_free_contract_test";
+    const fetchMock = mockApi({
+      domains: warehouseDomains("acme", 2),
+      total: 2,
+      source: "warehouse",
+      match_type: "exact",
+    });
+
+    const { client, close } = await connect();
+
+    try {
+      const markdown = await client.callTool({
+        name: "ctscout_search_company",
+        arguments: { company_name: "Acme" },
+      });
+      expect(markdown.isError).not.toBe(true);
+      const text = textOf(markdown);
+      expect(text).toContain("# ctscout results for: Acme");
+      expect(text).toContain(`_Warehouse snapshot: ${STATS_SNAPSHOT} (last_sync from `);
+      expect(text).toContain("/stats)._");
+      expect(text).toContain("**2** attributed domain(s) of 2 total");
+      expect(text).toContain("| Domain | Attributed to | Certs | Subdomains |");
+      expect(markdown.structuredContent).toMatchObject({
+        domains: [{ apex_domain: "acme-0.example.com" }, { apex_domain: "acme-1.example.com" }],
+        snapshot: STATS_SNAPSHOT,
+        snapshot_source: "stats",
+      });
+
+      const json = await client.callTool({
+        name: "ctscout_search_company",
+        arguments: { company_name: "Acme", response_format: "json" },
+      });
+      expect(json.isError).not.toBe(true);
+      const parsed = JSON.parse(textOf(json)) as ScanResponse;
+      expect(parsed.snapshot).toBe(STATS_SNAPSHOT);
+      expect(parsed.snapshot_source).toBe("stats");
+      expect(json.structuredContent).toEqual(parsed);
+
+      // /scan is called per tool call; /stats is read once and cached.
+      expect(calledUrls(fetchMock).map((url) => url.replace(/^.*\//, "/"))).toEqual([
+        "/scan",
+        "/stats",
+        "/scan",
+      ]);
+      // /stats is public: no API key is sent with it.
+      const [, statsInit] = fetchMock.mock.calls[1];
+      expect(statsInit).toMatchObject({ method: "GET" });
+      expect((statsInit as RequestInit).headers).not.toHaveProperty("X-API-Key");
+    } finally {
+      await close();
+    }
+  });
+
+  it("prefers a snapshot carried by the API payload and skips /stats", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_free_contract_test";
+    const fetchMock = mockApi({
+      domains: warehouseDomains("gs", 1),
+      total: 1,
+      source: "warehouse",
+      snapshot: "2026-08-30",
+    });
+
+    const { client, close } = await connect();
+
+    try {
+      const result = await client.callTool({
+        name: "ctscout_lookup_domain",
+        arguments: { domains: ["gs-0.example.com"] },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(textOf(result)).toContain(
+        "_Warehouse snapshot: 2026-08-30 (reported by the API response)._",
+      );
+      expect(result.structuredContent).toMatchObject({
+        snapshot: "2026-08-30",
+        snapshot_source: "scan",
+      });
+      expect(calledUrls(fetchMock).some((url) => url.endsWith("/stats"))).toBe(false);
+    } finally {
+      await close();
+    }
+  });
+
+  it("reports snapshot null / 'unavailable' when /stats fails, without failing the answer", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_free_contract_test";
+    mockApi({ domains: warehouseDomains("gs", 1), total: 1, source: "warehouse" }, { status: 503 });
+
+    const { client, close } = await connect();
+
+    try {
+      const result = await client.callTool({
+        name: "ctscout_lookup_domain",
+        arguments: { domains: ["gs-0.example.com"], response_format: "json" },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        domains: [{ apex_domain: "gs-0.example.com" }],
+        snapshot: null,
+        snapshot_source: "unavailable",
+      });
+      // The JSON text is the same envelope the structured field carries.
+      expect(JSON.parse(textOf(result))).toEqual(result.structuredContent);
+
+      const markdown = await client.callTool({
+        name: "ctscout_lookup_domain",
+        arguments: { domains: ["gs-0.example.com"] },
+      });
+      expect(textOf(markdown)).toContain("_Warehouse snapshot: unknown (");
+      expect(textOf(markdown)).toContain("/stats unavailable)._");
+    } finally {
+      await close();
+    }
+  });
+
+  it("keeps the snapshot on a size-truncated single-scan envelope so the outputSchema still holds", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_free_contract_test";
+    // One domain whose own row exceeds the character limit forces the
+    // minimal-envelope path in truncateJsonIfNeeded.
+    mockApi({
+      domains: [{ ...warehouseDomains("huge", 1)[0], padding: "x".repeat(30_000) }],
+      total: 1,
+      source: "warehouse",
+      match_type: "exact",
+    });
+
+    const { client, close } = await connect();
+
+    try {
+      const result = await client.callTool({
+        name: "ctscout_search_company",
+        arguments: { company_name: "Huge", response_format: "json" },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        domains: [],
+        truncated: true,
+        snapshot: STATS_SNAPSHOT,
+        snapshot_source: "stats",
+      });
+      expect(textOf(result).length).toBeLessThanOrEqual(25_000);
+    } finally {
+      await close();
+    }
+  });
+
+  it("keeps the snapshot on a size-truncated batch envelope", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_free_contract_test";
+    mockApi({
+      results: [
+        {
+          query: { company_name: "Giant" },
+          domains: warehouseDomains("giant", 5000),
+          total: 5000,
+          source: "warehouse",
+          match_type: "exact",
+        },
+        {
+          query: { company_name: "Tiny" },
+          domains: warehouseDomains("tiny", 1),
+          total: 1,
+          source: "warehouse",
+          match_type: "exact",
+        },
+      ],
+      remaining_quota: null,
+    });
+
+    const { client, close } = await connect();
+
+    try {
+      for (const response_format of ["json", "markdown"]) {
+        const result = await client.callTool({
+          name: "ctscout_search_company_batch",
+          arguments: { company_names: ["Giant", "Tiny"], response_format },
+        });
+        expect(result.isError).not.toBe(true);
+        expect(textOf(result).length).toBeLessThanOrEqual(25_000);
+        expect(result.structuredContent).toMatchObject({
+          remaining_quota: null,
+          snapshot: STATS_SNAPSHOT,
+          snapshot_source: "stats",
+        });
+        const structured = result.structuredContent as ScanBatchResponse;
+        expect(structured.results).toHaveLength(2);
+      }
+      expect(
+        textOf(
+          await client.callTool({
+            name: "ctscout_search_company_batch",
+            arguments: { company_names: ["Giant", "Tiny"] },
+          }),
+        ),
+      ).toContain(`_Warehouse snapshot: ${STATS_SNAPSHOT}`);
+    } finally {
+      await close();
+    }
+  });
+
+  it("returns an isError result with no /stats read when the scan itself fails", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_free_contract_test";
+    const fetchMock = vi.fn(
+      async () => new Response("quota", { status: 429, headers: { "Content-Type": "text/plain" } }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const { client, close } = await connect();
+
+    try {
+      const result = await client.callTool({
+        name: "ctscout_lookup_domain",
+        arguments: { domains: ["gs.com"] },
+      });
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toContain("Daily request quota exceeded");
+      expect(result.structuredContent).toBeUndefined();
+      expect(scanCalls(fetchMock)).toHaveLength(1);
+      expect(calledUrls(fetchMock).some((url) => url.endsWith("/stats"))).toBe(false);
+    } finally {
+      await close();
     }
   });
 });

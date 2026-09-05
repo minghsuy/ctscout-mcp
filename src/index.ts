@@ -33,6 +33,13 @@ import { z } from "zod";
 const API_BASE_URL = process.env.CTSCOUT_API_URL ?? "https://ctscout.dev";
 const SCAN_URL = `${API_BASE_URL}/scan`;
 const SCAN_BATCH_URL = `${API_BASE_URL}/scan/batch`;
+const STATS_URL = `${API_BASE_URL}/stats`;
+// The snapshot date is a footer, not the answer: a slow /stats must not hold a
+// finished /scan hostage for the full REQUEST_TIMEOUT_MS.
+const STATS_TIMEOUT_MS = 5_000;
+// The warehouse syncs weekly; re-reading /stats on every tool call would
+// double the network round-trips for a value that changes once a week.
+const SNAPSHOT_CACHE_TTL_MS = 10 * 60_000;
 // Keep in lockstep with ctscout-worker's hosted MCP MAX_BATCH_QUERIES and REST
 // MAX_BATCH_SIZE. Both public transports accept 1–10 names; validation here is
 // belt-and-suspenders (a clean error before a network round-trip), while the
@@ -143,8 +150,26 @@ export interface ScanResponse {
   match_type?: "exact" | "semantic" | "none";
   org_match_strategy?: "substring" | "word" | "normalized" | "semantic" | "none" | "not_applicable";
   empty_reason?: "semantic_offered" | "name_mismatch" | "dns_hidden" | "dv_or_absent";
+  // Warehouse sync date the answer was read from (see resolveSnapshot). Both
+  // keys are always set on a tool response; they are optional here only
+  // because the raw /scan payload does not carry them.
+  snapshot?: string | null;
+  snapshot_source?: SnapshotSource;
   // ScoutResult also carries `entity` and `run_metadata` at the top level.
   [k: string]: unknown;
+}
+
+// Where a response's `snapshot` date came from:
+//   "scan"        — the API payload itself carried a `snapshot` string.
+//   "stats"       — read from GET /stats `last_sync` (the warehouse/D1 sync date).
+//   "unavailable" — neither; `snapshot` is null, not missing, so a consumer can
+//                   tell "the server could not say" from "an older server that
+//                   never emitted the field".
+export type SnapshotSource = "scan" | "stats" | "unavailable";
+
+export interface SnapshotInfo {
+  snapshot: string | null;
+  snapshot_source: SnapshotSource;
 }
 
 export interface SemanticCandidate {
@@ -175,6 +200,9 @@ export interface ScanBatchResponse {
   results: BatchResultItem[];
   // Remaining daily quota for the calling key; null for unlimited (Pro tier).
   remaining_quota: number | null;
+  // Envelope-level, not per item: one batch reads one warehouse snapshot.
+  snapshot?: string | null;
+  snapshot_source?: SnapshotSource;
 }
 
 function isBatchError(
@@ -291,6 +319,113 @@ export const SearchCompanyBatchInputSchema = z
   .strict();
 
 type SearchCompanyBatchInput = z.infer<typeof SearchCompanyBatchInputSchema>;
+
+// ---------- Output schemas ----------
+//
+// Advertised as `outputSchema` and enforced by the SDK against every
+// structuredContent this server returns. The payload is proxied from the API
+// (warehouse rows on free, ScoutResult objects on Pro), so every proxied field
+// is typed loosely and documented via describe(): an upstream enum growing a
+// value must widen what an agent sees, not turn the tool call into an error.
+// Only the fields this server writes itself (`snapshot`, `snapshot_source`)
+// are required and closed.
+
+const SnapshotFields = {
+  snapshot: z
+    .string()
+    .nullable()
+    .describe(
+      "Warehouse/D1 sync date (YYYY-MM-DD) the answer was read from; the free tier " +
+        "serves a weekly snapshot. null when it could not be determined.",
+    ),
+  snapshot_source: z
+    .enum(["scan", "stats", "unavailable"])
+    .describe(
+      "'scan' = the API response carried the date; 'stats' = read from GET /stats " +
+        "last_sync; 'unavailable' = neither, snapshot is null.",
+    ),
+};
+
+const SemanticCandidateSchema = z.looseObject({
+  org: z.string().describe("Candidate organization name — a semantic match, NOT an attribution."),
+  similarity: z.number().optional().describe("Name-embedding similarity, 0..1."),
+  top_apex_domain: z
+    .string()
+    .nullable()
+    .optional()
+    .describe("The apex domain most often attributed to this candidate, if any."),
+});
+
+const DomainResultSchema = z.looseObject({
+  org: z
+    .string()
+    .optional()
+    .describe("Organization the domain is attributed to: the OV/EV cert subject O field."),
+  apex_domain: z.string().optional(),
+  cert_count: z.number().optional().describe("Distinct certificates observed for this pair."),
+  subdomain_count: z.number().optional(),
+  first_seen: z
+    .string()
+    .nullable()
+    .optional()
+    .describe(
+      "When the warehouse first ingested this pair (observation time, NOT the CT log SCT / issuance time).",
+    ),
+  last_seen: z
+    .string()
+    .nullable()
+    .optional()
+    .describe("When the warehouse last ingested this pair (observation time, not SCT time)."),
+  attributed_to: z.string().optional(),
+  // ScoutResult (Pro) fields — proxied verbatim from the origin.
+  domain: z.string().optional().describe("Pro tier: the apex domain (ScoutResult shape)."),
+  confidence: z.number().nullable().optional().describe("Pro tier: 0..1 attribution confidence."),
+  sources: z.array(z.string()).optional(),
+  cert_org_names: z.array(z.string()).optional(),
+  rdap_org: z.string().nullable().optional(),
+});
+
+const ScanOutputSchema = z.looseObject({
+  domains: z
+    .array(DomainResultSchema)
+    .describe("Attributed (domain, organization) pairs. Empty when nothing is attributed."),
+  total: z.number().optional().describe("Matching pairs in the warehouse before any cap."),
+  truncated: z.boolean().optional(),
+  upgrade_hint: z.string().optional(),
+  source: z.string().optional().describe("'warehouse' on the free tier; 'live*' on Pro."),
+  match_type: z
+    .string()
+    .optional()
+    .describe(
+      "'exact' = domains are warehouse attributions; 'semantic' = domains is empty and " +
+        "candidates holds name-similarity guesses; 'none' = nothing matched.",
+    ),
+  org_match_strategy: z.string().optional(),
+  empty_reason: z.string().optional(),
+  candidates: z
+    .array(SemanticCandidateSchema)
+    .optional()
+    .describe("Present only when match_type is 'semantic'. Candidates are not attributions."),
+  ...SnapshotFields,
+});
+
+const BatchQuerySchema = z.looseObject({ company_name: z.string().optional() });
+
+const BatchResultItemSchema = z.union([
+  z.looseObject({
+    query: BatchQuerySchema,
+    error: z.object({ code: z.number(), message: z.string() }),
+  }),
+  ScanOutputSchema.omit({ snapshot: true, snapshot_source: true }).extend({
+    query: BatchQuerySchema,
+  }),
+]);
+
+const BatchOutputSchema = z.object({
+  results: z.array(BatchResultItemSchema).describe("One item per input name, in input order."),
+  remaining_quota: z.number().nullable().describe("null = unlimited (Pro tier)."),
+  ...SnapshotFields,
+});
 
 // ---------- Shared utilities ----------
 
@@ -416,6 +551,54 @@ export async function callScan(body: ScanRequestBody): Promise<ScanResponse> {
 // batch length.
 export async function callScanBatch(queries: ScanRequestBody[]): Promise<ScanBatchResponse> {
   return postScan<ScanBatchResponse>(SCAN_BATCH_URL, { queries });
+}
+
+// GET /stats is public (no key) and serves a precomputed row; `last_sync` is
+// the warehouse/D1 sync date every free-tier answer was read from. Any
+// failure — network, non-2xx, malformed body — resolves to null: the snapshot
+// is a footer on an answer the caller already paid quota for.
+let snapshotCache: { value: string; expiresAt: number } | undefined;
+
+export function resetSnapshotCache(): void {
+  snapshotCache = undefined;
+}
+
+export async function fetchWarehouseSnapshot(now: number = Date.now()): Promise<string | null> {
+  if (snapshotCache && snapshotCache.expiresAt > now) return snapshotCache.value;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), STATS_TIMEOUT_MS);
+  try {
+    const response = await fetch(STATS_URL, {
+      method: "GET",
+      headers: { Accept: "application/json", "User-Agent": USER_AGENT },
+      signal: controller.signal,
+      redirect: "error",
+    });
+    if (!response.ok) return null;
+    const stats = (await response.json()) as { last_sync?: unknown };
+    if (typeof stats?.last_sync !== "string" || stats.last_sync.length === 0) return null;
+    snapshotCache = { value: stats.last_sync, expiresAt: now + SNAPSHOT_CACHE_TTL_MS };
+    return stats.last_sync;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// Attach the snapshot date to a /scan or /scan/batch payload. A `snapshot`
+// string on the payload itself wins (the worker does not emit one today; when
+// it does, that is the authoritative per-answer date); otherwise /stats
+// `last_sync`; otherwise null with `snapshot_source: "unavailable"`.
+export async function resolveSnapshot(payload: { snapshot?: unknown }): Promise<SnapshotInfo> {
+  if (typeof payload.snapshot === "string" && payload.snapshot.length > 0) {
+    return { snapshot: payload.snapshot, snapshot_source: "scan" };
+  }
+  const fromStats = await fetchWarehouseSnapshot();
+  return fromStats === null
+    ? { snapshot: null, snapshot_source: "unavailable" }
+    : { snapshot: fromStats, snapshot_source: "stats" };
 }
 
 export class ApiError extends Error {
@@ -577,6 +760,10 @@ export function formatScanAsMarkdown(
   // the same way inside buildLegalEntitySuggestions.
   lines.push(`# ctscout results for: ${cellSafe(query, 200)}`);
   lines.push("");
+  if (response.snapshot_source !== undefined) {
+    lines.push(snapshotLine(response));
+    lines.push("");
+  }
 
   if (response.domains.length === 0) {
     if (
@@ -584,11 +771,13 @@ export function formatScanAsMarkdown(
       Array.isArray(response.candidates) &&
       response.candidates.length > 0
     ) {
-      lines.push("No authoritative OV/EV warehouse domains matched.");
+      lines.push("No attributed OV/EV warehouse domains matched.");
       lines.push("");
-      lines.push("Semantic organization candidates (weak signal; corroborate before use):");
+      lines.push(
+        "Candidate organizations — not attributed, semantic name similarity only (weak signal; corroborate before use):",
+      );
       lines.push("");
-      lines.push("| Organization | Similarity | Top apex domain |");
+      lines.push("| Candidate organization | Similarity | Top apex domain |");
       lines.push("|---|---:|---|");
       for (const candidate of response.candidates) {
         const similarity =
@@ -657,7 +846,7 @@ export function formatScanAsMarkdown(
   const sourceDisplay = response.source ?? (isScoutResult ? "scout-result" : "unknown");
 
   lines.push(
-    `Returned **${response.domains.length}** domain(s) of ${totalDisplay} total. ` +
+    `Returned **${response.domains.length}** attributed domain(s) of ${totalDisplay} total. ` +
       `Source: \`${sourceDisplay}\`${isPro ? " _(Pro tier — multi-signal attribution)_" : ""}.`,
   );
   if (response.truncated && response.upgrade_hint) {
@@ -680,14 +869,16 @@ const SOURCES_INLINE_LIMIT = 4;
 function formatTable(domains: DomainResult[], kind: TableKind): string {
   const rows: string[] = [];
 
+  // Every table names the org column "Attributed to": the row is a cert-subject
+  // attribution, never an ownership claim, and never a semantic candidate.
   if (kind === "free") {
-    rows.push("| Domain | Organization | Certs | Subdomains |");
+    rows.push("| Domain | Attributed to | Certs | Subdomains |");
     rows.push("|---|---|---:|---:|");
   } else if (kind === "pro") {
     rows.push("| Domain | Attributed to | Band | Signals | Evidence |");
     rows.push("|---|---|---|---|---|");
   } else if (kind === "scout") {
-    rows.push("| Domain | Org | Confidence | Sources | Evidence |");
+    rows.push("| Domain | Attributed to | Confidence | Sources | Evidence |");
     rows.push("|---|---|---|---|---|");
   }
 
@@ -820,6 +1011,20 @@ function topEvidenceLine(evidence: Record<string, string>): string {
 // (or terminator pair) with a single space.
 function escapeForTable(s: string): string {
   return s.replace(/\|/g, "\\|").replace(/[\r\n]+/g, " ");
+}
+
+// One line naming the warehouse sync date the answer was read from, and where
+// that date came from, so a reader of the markdown gets the same fact as a
+// reader of structuredContent.
+function snapshotLine(info: Partial<SnapshotInfo>): string {
+  switch (info.snapshot_source) {
+    case "scan":
+      return `_Warehouse snapshot: ${cellSafe(info.snapshot, 40)} (reported by the API response)._`;
+    case "stats":
+      return `_Warehouse snapshot: ${cellSafe(info.snapshot, 40)} (last_sync from ${STATS_URL})._`;
+    default:
+      return `_Warehouse snapshot: unknown (${STATS_URL} unavailable)._`;
+  }
 }
 
 // Both output formats are capped at CHARACTER_LIMIT, so the hint must not
@@ -959,6 +1164,10 @@ export function truncateJsonIfNeeded(structured: ScanResponse): {
         empty_reason: structured.empty_reason,
       }),
       ...(Array.isArray(structured.candidates) && { candidates: [] }),
+      ...(structured.snapshot_source !== undefined && {
+        snapshot: structured.snapshot ?? null,
+        snapshot_source: structured.snapshot_source,
+      }),
     };
     return { text: JSON.stringify(minimal), structured: minimal };
   }
@@ -1068,7 +1277,10 @@ function assembleBatchMarkdown(header: string, sections: string[], footer: strin
 export function formatBatchAsMarkdown(companyNames: string[], batch: ScanBatchResponse): string {
   const results = batch.results;
   const n = results.length;
-  const header = `# ctscout batch results (${n} ${n === 1 ? "company" : "companies"})`;
+  const title = `# ctscout batch results (${n} ${n === 1 ? "company" : "companies"})`;
+  // The snapshot line is part of the header so the budget arithmetic below
+  // reserves space for it like any other envelope text.
+  const header = batch.snapshot_source === undefined ? title : `${title}\n\n${snapshotLine(batch)}`;
   const footer = batchQuotaFooter(batch.remaining_quota);
 
   if (n === 0) {
@@ -1168,16 +1380,21 @@ export function truncateBatchJsonIfNeeded(batch: ScanBatchResponse): {
 
   const results = batch.results;
   const n = results.length;
-  const skeleton = JSON.stringify({ results: [], remaining_quota: batch.remaining_quota });
+  // Envelope fields kept verbatim on every truncated shape (quota + snapshot).
+  const envelope = {
+    remaining_quota: batch.remaining_quota,
+    ...(batch.snapshot_source !== undefined && {
+      snapshot: batch.snapshot ?? null,
+      snapshot_source: batch.snapshot_source,
+    }),
+  };
+  const skeleton = JSON.stringify({ results: [], ...envelope });
   const budget = Math.max(0, CHARACTER_LIMIT - skeleton.length - n); // ≈ per-item commas
   const fullLengths = results.map((item) => JSON.stringify(item).length);
   const budgets = fairShareBudgets(fullLengths, budget);
   const truncatedResults = results.map((item, i) => truncateResultJson(item, budgets[i]));
 
-  let structured: ScanBatchResponse = {
-    results: truncatedResults,
-    remaining_quota: batch.remaining_quota,
-  };
+  let structured: ScanBatchResponse = { results: truncatedResults, ...envelope };
   let text = JSON.stringify(structured);
 
   // With at most ten validated 200-character names, the envelope reserve and
@@ -1210,7 +1427,7 @@ export function truncateBatchJsonIfNeeded(batch: ScanBatchResponse): {
               ...(Array.isArray(item.candidates) && { candidates: [] }),
             },
       ),
-      remaining_quota: batch.remaining_quota,
+      ...envelope,
     };
     text = JSON.stringify(structured);
   }
@@ -1247,34 +1464,43 @@ Args:
   - purpose ('underwriting' | 'corporate_family', optional): choose tight operational-attribution defaults or broader corporate-family defaults. Explicit matching controls override the preset.
   - response_format ('markdown' | 'json', default 'markdown'): output format.
 
-Returns:
-  - In markdown: a table of (domain, org, cert count, subdomain count).
+Returns (structuredContent always follows the declared outputSchema):
+  - "Attributed" means the organization is the OV/EV certificate subject for that domain — a cert-subject attribution, not an ownership claim. "Candidate" means a semantic name-similarity guess that is NOT an attribution.
+  - In markdown: a snapshot line, then a table of (domain, attributed to, cert count, subdomain count). When nothing is attributed but match_type is 'semantic', a table of candidate organizations is rendered instead, labelled as candidates.
   - In JSON, structured as:
     {
-      "domains": [
+      "domains": [                        // attributed pairs; empty when nothing is attributed
         {
-          "org": string,                  // legal entity name as recorded in cert
+          "org": string,                  // attributed organization: legal entity name from the cert subject
           "apex_domain": string,          // e.g. "gs.com"
-          "cert_count": number,           // # of certs observed for this domain
+          "cert_count": number,           // # of distinct certs observed for this pair
           "subdomain_count": number,      // # of distinct subdomains
-          "first_seen": string,           // ISO 8601 timestamp
-          "last_seen": string             // ISO 8601 timestamp
+          "first_seen": string | null,    // warehouse observation time — NOT the CT log SCT / issuance time
+          "last_seen": string | null      // warehouse observation time — NOT the CT log SCT / issuance time
         }
       ],
       "total": number,                    // total matching rows in warehouse
       "truncated": boolean,               // true if response is capped
       "upgrade_hint": string,             // present when truncated
-      "source": "warehouse" | "live"     // free tier = warehouse, pro = live
+      "source": "warehouse" | "live",     // free tier = warehouse, pro = live
+      "match_type": "exact" | "semantic" | "none",   // 'semantic' = domains empty, candidates offered
+      "org_match_strategy": string,       // which matching pass produced the answer
+      "empty_reason": string,             // present on empty results: why nothing was attributed
+      "candidates": [                     // only when match_type is 'semantic'; NOT attributions
+        { "org": string, "similarity": number, "top_apex_domain": string | null }
+      ],
+      "snapshot": string | null,          // warehouse/D1 sync date (YYYY-MM-DD) the answer was read from
+      "snapshot_source": "scan" | "stats" | "unavailable"   // where snapshot came from; null snapshot <=> 'unavailable'
     }
 
 Examples:
-  - Use when: "Find all domains owned by Cloudflare" -> { company_name: "Cloudflare" }
-  - Use when: "What domains does Goldman own?" -> { company_name: "Goldman Sachs" }
+  - Use when: "Find all domains attributed to Cloudflare" -> { company_name: "Cloudflare" }
+  - Use when: "Which domains are attributed to Goldman?" -> { company_name: "Goldman Sachs" }
   - Don't use when: You have a specific domain and want to find the organization it's attributed to — use ctscout_lookup_domain instead.
 
 Auth & limits:
   - Requires CTSCOUT_API_KEY env var. Get a free key (no email) at https://ctscout.dev.
-  - Free tier: 10 queries/day, top 5 results from weekly snapshot.
+  - Free tier: 10 queries/day, top 5 results from a weekly snapshot; the response's "snapshot" field names that snapshot's sync date.
   - Pro tier: unlimited queries, full result set, live enrichment.
 
 Error handling:
@@ -1293,11 +1519,12 @@ Coverage caveat:
   - Limited coverage on small private companies, cyber MGAs, and entities using only DV (Let's Encrypt) certs.
   - Warehouse size (organizations, org-domain pairs, last sync) is not stated here because it changes weekly; read the live figures at https://ctscout.dev/stats before treating a miss as meaningful.`,
       inputSchema: SearchCompanyInputSchema,
+      outputSchema: ScanOutputSchema,
       annotations: QUOTA_DEBITING_READ_ONLY_ANNOTATIONS,
     },
     async (params: SearchCompanyInput) => {
       try {
-        const data = await callScan({
+        const raw = await callScan({
           company_name: params.company_name,
           ...(params.strict_match_org_only !== undefined && {
             strict_match_org_only: params.strict_match_org_only,
@@ -1312,6 +1539,7 @@ Coverage caveat:
             purpose: params.purpose,
           }),
         });
+        const data: ScanResponse = { ...raw, ...(await resolveSnapshot(raw)) };
 
         if (params.response_format === ResponseFormat.JSON) {
           const { text, structured } = truncateJsonIfNeeded(data);
@@ -1350,15 +1578,18 @@ Args:
   - company_names (string[], required): 1–${MAX_BATCH_QUERIES} organization names. Partial matches work — 'Goldman' matches 'Goldman Sachs'. Each 2–200 chars.
   - response_format ('markdown' | 'json', default 'markdown'): output format.
 
-Returns:
-  - In markdown: one section per company (heading + the same table as ctscout_search_company), followed by remaining quota. Names that failed render an error line instead of a table.
-  - In JSON, the raw batch envelope:
+Returns (structuredContent always follows the declared outputSchema):
+  - "Attributed" and "candidate" mean exactly what they mean in ctscout_search_company: a cert-subject attribution vs a semantic name-similarity guess that is NOT an attribution.
+  - In markdown: a snapshot line, then one section per company (heading + the same attributed-domains table as ctscout_search_company; a candidate-organizations table when that name's match_type is 'semantic'), followed by remaining quota. Names that failed render an error line instead of a table.
+  - In JSON, the batch envelope:
     {
       "results": [
-        { "query": {...}, "domains": [...], "total": number, "match_type": "exact"|"semantic"|"none", "candidates"?: [...] },
+        { "query": {...}, "domains": [...], "total": number, "match_type": "exact"|"semantic"|"none", "candidates"?: [...] },   // same per-result fields as ctscout_search_company
         { "query": {...}, "error": { "code": number, "message": string } }
       ],
-      "remaining_quota": number | null   // null = unlimited (Pro)
+      "remaining_quota": number | null,  // null = unlimited (Pro)
+      "snapshot": string | null,         // warehouse/D1 sync date shared by every result in the batch
+      "snapshot_source": "scan" | "stats" | "unavailable"
     }
 
 Partial-failure semantics (important):
@@ -1376,6 +1607,7 @@ Auth & limits:
 
 Legal-vs-brand and coverage caveats are identical to ctscout_search_company — brand names may need legal-entity variants ("X Companies", "X Group", "The X"), and coverage is best for established US/EU entities with OV/EV certs.`,
       inputSchema: SearchCompanyBatchInputSchema,
+      outputSchema: BatchOutputSchema,
       annotations: QUOTA_DEBITING_READ_ONLY_ANNOTATIONS,
     },
     async (params: SearchCompanyBatchInput) => {
@@ -1383,7 +1615,8 @@ Legal-vs-brand and coverage caveats are identical to ctscout_search_company — 
         const queries: ScanRequestBody[] = params.company_names.map((company_name) => ({
           company_name,
         }));
-        const data = await callScanBatch(queries);
+        const raw = await callScanBatch(queries);
+        const data: ScanBatchResponse = { ...raw, ...(await resolveSnapshot(raw)) };
 
         if (params.response_format === ResponseFormat.JSON) {
           const { text, structured } = truncateBatchJsonIfNeeded(data);
@@ -1420,13 +1653,13 @@ Args:
   - domains (string[], required): apex domains to look up. Each between 3 and 253 chars. Max 10 per call. Examples: ["gs.com"], ["coalition.com", "at-bay.com"].
   - response_format ('markdown' | 'json', default 'markdown'): output format.
 
-Returns:
-  - In markdown: a table of (domain, org, cert count, subdomain count). Only domains found in the warehouse appear; missing domains indicate no attribution.
-  - In JSON: the same structure as ctscout_search_company. The 'domains' array contains one entry per (domain, org) pair found.
+Returns (structuredContent always follows the declared outputSchema — the same one as ctscout_search_company):
+  - In markdown: a snapshot line, then a table of (domain, attributed to, cert count, subdomain count). Only domains found in the warehouse appear; a missing domain means no attribution in this snapshot, not a negative finding.
+  - In JSON: the same structure as ctscout_search_company, including "snapshot" / "snapshot_source". The 'domains' array contains one entry per attributed (domain, org) pair found. Reverse lookups never return semantic candidates.
 
 Examples:
-  - Use when: "Who owns gs.com?" -> { domains: ["gs.com"] }
-  - Use when: "Are coalition.com and at-bay.com owned by the same parent?" -> { domains: ["coalition.com", "at-bay.com"] }
+  - Use when: "Who is gs.com attributed to?" -> { domains: ["gs.com"] }
+  - Use when: "Are coalition.com and at-bay.com attributed to the same parent?" -> { domains: ["coalition.com", "at-bay.com"] }
   - Don't use when: You have a company name and want to enumerate its domains — use ctscout_search_company instead.
 
 Coverage caveat:
@@ -1435,11 +1668,13 @@ Coverage caveat:
 
 Auth & limits: same as ctscout_search_company.`,
       inputSchema: LookupDomainInputSchema,
+      outputSchema: ScanOutputSchema,
       annotations: QUOTA_DEBITING_READ_ONLY_ANNOTATIONS,
     },
     async (params: LookupDomainInput) => {
       try {
-        const data = await callScan({ seed_domain: params.domains });
+        const raw = await callScan({ seed_domain: params.domains });
+        const data: ScanResponse = { ...raw, ...(await resolveSnapshot(raw)) };
 
         if (params.response_format === ResponseFormat.JSON) {
           const { text, structured } = truncateJsonIfNeeded(data);

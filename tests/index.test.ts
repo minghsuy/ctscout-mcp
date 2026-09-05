@@ -38,9 +38,12 @@ import {
   callScanBatch,
   explainError,
   fairShareBudgets,
+  fetchWarehouseSnapshot,
   formatBatchAsMarkdown,
   formatScanAsMarkdown,
   getApiKey,
+  resetSnapshotCache,
+  resolveSnapshot,
   SERVER_VERSION,
   SearchCompanyBatchInputSchema,
   TimeoutError,
@@ -122,7 +125,7 @@ describe("formatScanAsMarkdown — free tier", () => {
     );
     expect(md).toContain("# ctscout results for: Coalition Inc");
     expect(md).toContain("Source: `warehouse`");
-    expect(md).toContain("| Domain | Organization | Certs | Subdomains |");
+    expect(md).toContain("| Domain | Attributed to | Certs | Subdomains |");
     expect(md).toContain("| `coalition.com` | Coalition Inc | 42 | 15 |");
     // Pro tier marker MUST NOT appear in free-tier output
     expect(md).not.toContain("Pro tier");
@@ -166,9 +169,9 @@ describe("formatScanAsMarkdown — free tier", () => {
       { kind: "company" },
     );
 
-    expect(md).toContain("No authoritative OV/EV warehouse domains");
+    expect(md).toContain("No attributed OV/EV warehouse domains");
     expect(md).toContain("weak signal; corroborate before use");
-    expect(md).toContain("| Organization | Similarity | Top apex domain |");
+    expect(md).toContain("| Candidate organization | Similarity | Top apex domain |");
     expect(md).toContain("| Acme Holdings, Inc. | 0.91 | acme.example |");
     expect(md).toContain("| Acme Regional LLC | 0.73 | — |");
     expect(md).toContain("| Malformed Similarity Co | — | malformed.example |");
@@ -1019,7 +1022,7 @@ describe("formatScanAsMarkdown — Pro tier (real ScoutResult shape)", () => {
   });
 
   it("uses the ScoutResult table header (Domain / Org / Confidence / Sources / Evidence)", () => {
-    expect(md).toContain("| Domain | Org | Confidence | Sources | Evidence |");
+    expect(md).toContain("| Domain | Attributed to | Confidence | Sources | Evidence |");
   });
 
   it("renders the actual domain string from `domain` (not apex_domain)", () => {
@@ -1051,7 +1054,7 @@ describe("formatScanAsMarkdown — Pro tier (real ScoutResult shape)", () => {
   it("handles missing `total` (ScoutResult doesn't carry it) by falling back to domains.length", () => {
     // Pre-fix: would have rendered "of undefined total" because the type
     // required `total` and the fixture/origin doesn't provide it.
-    expect(md).toContain("**2** domain(s) of 2 total");
+    expect(md).toContain("**2** attributed domain(s) of 2 total");
     expect(md).not.toContain("undefined");
   });
 
@@ -2512,5 +2515,152 @@ describe("truncateBatchJsonIfNeeded", () => {
     expect(JSON.parse(text)).toEqual(structured);
     expect(structured.results).toHaveLength(10);
     expect(structured.results.map((item) => item.query.company_name)).toEqual(names);
+  });
+});
+
+describe("fetchWarehouseSnapshot / resolveSnapshot", () => {
+  let originalFetch: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    resetSnapshotCache();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    resetSnapshotCache();
+  });
+
+  function statsFetch(body: unknown, status = 200): ReturnType<typeof vi.fn> {
+    const mock = vi.fn(
+      async () =>
+        new Response(JSON.stringify(body), {
+          status,
+          headers: { "Content-Type": "application/json" },
+        }),
+    );
+    globalThis.fetch = mock as unknown as typeof fetch;
+    return mock;
+  }
+
+  it("reads last_sync from /stats and caches it for the TTL window", async () => {
+    const mock = statsFetch({ last_sync: "2026-09-03", organizations: 1 });
+    expect(await fetchWarehouseSnapshot(1_000)).toBe("2026-09-03");
+    expect(await fetchWarehouseSnapshot(1_000 + 9 * 60_000)).toBe("2026-09-03");
+    expect(mock).toHaveBeenCalledTimes(1);
+    expect(String(mock.mock.calls[0][0])).toMatch(/\/stats$/);
+
+    // Past the TTL the value is re-read, so a new weekly sync becomes visible.
+    statsFetch({ last_sync: "2026-09-10" });
+    expect(await fetchWarehouseSnapshot(1_000 + 11 * 60_000)).toBe("2026-09-10");
+  });
+
+  it("returns null (and caches nothing) on a non-2xx, a malformed body, or a thrown fetch", async () => {
+    statsFetch({ last_sync: "2026-09-03" }, 503);
+    expect(await fetchWarehouseSnapshot()).toBeNull();
+
+    statsFetch({ organizations: 5 });
+    expect(await fetchWarehouseSnapshot()).toBeNull();
+
+    statsFetch({ last_sync: "" });
+    expect(await fetchWarehouseSnapshot()).toBeNull();
+
+    globalThis.fetch = vi
+      .fn()
+      .mockRejectedValue(new Error("ECONNRESET")) as unknown as typeof fetch;
+    expect(await fetchWarehouseSnapshot()).toBeNull();
+
+    // Nothing above was cached: a healthy /stats is read on the next call.
+    const healthy = statsFetch({ last_sync: "2026-09-03" });
+    expect(await fetchWarehouseSnapshot()).toBe("2026-09-03");
+    expect(healthy).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolves 'scan' from the payload, 'stats' from /stats, else 'unavailable' with null", async () => {
+    const mock = statsFetch({ last_sync: "2026-09-03" });
+    expect(await resolveSnapshot({ snapshot: "2026-08-30" })).toEqual({
+      snapshot: "2026-08-30",
+      snapshot_source: "scan",
+    });
+    expect(mock).not.toHaveBeenCalled();
+
+    // A non-string or empty payload snapshot is not trusted as a date.
+    expect(await resolveSnapshot({ snapshot: 20260830 })).toEqual({
+      snapshot: "2026-09-03",
+      snapshot_source: "stats",
+    });
+    expect(await resolveSnapshot({ snapshot: "" })).toEqual({
+      snapshot: "2026-09-03",
+      snapshot_source: "stats",
+    });
+
+    resetSnapshotCache();
+    statsFetch({}, 500);
+    expect(await resolveSnapshot({})).toEqual({ snapshot: null, snapshot_source: "unavailable" });
+  });
+});
+
+describe("snapshot line in markdown", () => {
+  it("is omitted when the response carries no snapshot fields", () => {
+    const md = formatScanAsMarkdown("Acme", freeResponse([]), { kind: "company" });
+    expect(md).not.toContain("Warehouse snapshot");
+  });
+
+  it("names the date and its source on every rendering path", () => {
+    const stamped: ScanResponse = {
+      ...freeResponse([]),
+      snapshot: "2026-09-03",
+      snapshot_source: "stats",
+    };
+    expect(formatScanAsMarkdown("Acme", stamped, { kind: "company" })).toContain(
+      "_Warehouse snapshot: 2026-09-03 (last_sync from ",
+    );
+    const semantic: ScanResponse = {
+      ...stamped,
+      match_type: "semantic",
+      candidates: [{ org: "Acme Holdings", similarity: 0.9, top_apex_domain: null }],
+    };
+    const semanticMd = formatScanAsMarkdown("Acme", semantic, { kind: "company" });
+    expect(semanticMd).toContain("_Warehouse snapshot: 2026-09-03");
+    expect(semanticMd).toContain("| Candidate organization | Similarity | Top apex domain |");
+    const unavailable: ScanResponse = {
+      ...stamped,
+      snapshot: null,
+      snapshot_source: "unavailable",
+    };
+    expect(formatScanAsMarkdown("Acme", unavailable)).toContain("_Warehouse snapshot: unknown (");
+  });
+
+  it("survives markdown and JSON truncation of a single scan", () => {
+    const big: ScanResponse = {
+      ...freeResponse(
+        Array.from({ length: 2000 }, (_, i) => ({
+          org: "Big Corp",
+          apex_domain: `big-${i}.example.com`,
+          cert_count: 1,
+          subdomain_count: 0,
+        })),
+      ),
+      snapshot: "2026-09-03",
+      snapshot_source: "stats",
+    };
+    const md = truncateIfNeeded(formatScanAsMarkdown("Big", big), big, "Big");
+    expect(md.text).toContain("_Warehouse snapshot: 2026-09-03");
+    expect(md.structured.snapshot).toBe("2026-09-03");
+
+    const json = truncateJsonIfNeeded(big);
+    expect(JSON.parse(json.text).snapshot_source).toBe("stats");
+
+    // The minimal-envelope path (one row alone over the limit) keeps it too.
+    const pathological: ScanResponse = {
+      ...big,
+      domains: [{ ...big.domains[0], padding: "x".repeat(30_000) }],
+    };
+    const minimal = truncateJsonIfNeeded(pathological);
+    expect(minimal.structured).toMatchObject({
+      domains: [],
+      snapshot: "2026-09-03",
+      snapshot_source: "stats",
+    });
   });
 });
