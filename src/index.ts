@@ -355,7 +355,11 @@ const DomainResultSchema = z.looseObject({
   org: z
     .string()
     .optional()
-    .describe("Organization the domain is attributed to: the OV/EV cert subject O field."),
+    .describe(
+      "Organization the domain is attributed to. Free tier: the OV/EV cert subject O field. " +
+        "Pro tier (ScoutResult): the strongest evidence available — cert subject when present, " +
+        "else the RDAP registrant; see cert_org_names / rdap_org for which.",
+    ),
   apex_domain: z.string().optional(),
   cert_count: z.number().optional().describe("Distinct certificates observed for this pair."),
   subdomain_count: z.number().optional(),
@@ -1421,13 +1425,13 @@ Args:
   - response_format ('markdown' | 'json', default 'markdown'): output format.
 
 Returns (structuredContent always follows the declared outputSchema):
-  - "Attributed" means the organization is the OV/EV certificate subject for that domain — a cert-subject attribution, not an ownership claim. "Candidate" means a semantic name-similarity guess that is NOT an attribution.
+  - "Attributed" means the organization is what the evidence names for that domain, not an ownership claim. On the free tier that evidence is always the OV/EV certificate subject. On the Pro tier (ScoutResult) it is the strongest available signal: the certificate subject when there is one, otherwise the RDAP registrant — check cert_org_names / rdap_org to see which. "Candidate" means a semantic name-similarity guess that is NOT an attribution.
   - In markdown: a snapshot line, then a table of (domain, attributed to, cert count, subdomain count). When nothing is attributed but match_type is 'semantic', a table of candidate organizations is rendered instead, labelled as candidates.
   - In JSON, structured as:
     {
       "domains": [                        // attributed pairs; empty when nothing is attributed
         {
-          "org": string,                  // attributed organization: legal entity name from the cert subject
+          "org": string,                  // attributed organization: cert subject (free); cert subject else RDAP registrant (Pro)
           "apex_domain": string,          // e.g. "gs.com"
           "cert_count": number,           // # of distinct certs observed for this pair
           "subdomain_count": number,      // # of distinct subdomains
@@ -1445,8 +1449,8 @@ Returns (structuredContent always follows the declared outputSchema):
       "candidates": [                     // only when match_type is 'semantic'; NOT attributions
         { "org": string, "similarity": number, "top_apex_domain": string | null }
       ],
-      "snapshot": string | null,          // warehouse/D1 sync date (YYYY-MM-DD) the answer was read from
-      "snapshot_source": "scan" | "unavailable"   // where snapshot came from; null snapshot <=> 'unavailable'
+      "snapshot": string | null,          // warehouse/D1 sync date (YYYY-MM-DD) ONLY when the API reported it; null otherwise — today the API does not, so expect null
+      "snapshot_source": "scan" | "unavailable"   // 'scan' = API carried the date; 'unavailable' = it did not (snapshot is null). null means unknown freshness, never "current"
     }
 
 Examples:
@@ -1456,7 +1460,7 @@ Examples:
 
 Auth & limits:
   - Requires CTSCOUT_API_KEY env var. Get a free key (no email) at https://ctscout.dev.
-  - Free tier: 10 queries/day, top 5 results from a weekly snapshot; the response's "snapshot" field names that snapshot's sync date.
+  - Free tier: 10 queries/day, top 5 results from a weekly snapshot. The response's "snapshot" field carries that snapshot's sync date only when the API reports it; today it does not, so expect snapshot: null / snapshot_source: "unavailable" and treat freshness as unknown.
   - Pro tier: unlimited queries, full result set, live enrichment.
 
 Error handling:
@@ -1535,7 +1539,7 @@ Args:
   - response_format ('markdown' | 'json', default 'markdown'): output format.
 
 Returns (structuredContent always follows the declared outputSchema):
-  - "Attributed" and "candidate" mean exactly what they mean in ctscout_search_company: a cert-subject attribution vs a semantic name-similarity guess that is NOT an attribution.
+  - "Attributed" and "candidate" mean exactly what they mean in ctscout_search_company: what the evidence names (cert subject on the free tier; cert subject else RDAP registrant on Pro) vs a semantic name-similarity guess that is NOT an attribution.
   - In markdown: a snapshot line, then one section per company (heading + the same attributed-domains table as ctscout_search_company; a candidate-organizations table when that name's match_type is 'semantic'), followed by remaining quota. Names that failed render an error line instead of a table.
   - In JSON, the batch envelope:
     {
@@ -1544,7 +1548,7 @@ Returns (structuredContent always follows the declared outputSchema):
         { "query": {...}, "error": { "code": number, "message": string } }
       ],
       "remaining_quota": number | null,  // null = unlimited (Pro)
-      "snapshot": string | null,         // warehouse/D1 sync date shared by every result in the batch
+      "snapshot": string | null,         // sync date shared by every result in the batch, ONLY when the API reported it; null (unknown freshness) otherwise — today the API does not
       "snapshot_source": "scan" | "unavailable"
     }
 
