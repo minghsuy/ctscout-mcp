@@ -12,7 +12,7 @@ Five tools:
 - **`ctscout_submit_deep_dive`** — Pro only: queue an asynchronous multi-signal deep dive (see [Deep dives](#deep-dives-pro-async))
 - **`ctscout_get_job`** — poll a deep dive and read its result
 
-The first three work over the public ctscout.dev `/scan` API (the batch tool wraps `/scan/batch`); the deep-dive pair wraps `/jobs`. Free tier requires an API key (no email, no signup). A Pro key gets the full result set, a 12-month window and unlimited queries on `/scan`, and can submit deep-dive jobs, which return a `confidence_band` per attribution with the named signals behind it (DNS brand tokens, RDAP, IP/ASN, homepage metadata, favicon). Visual brand verification (VLM) is not part of v1.
+The first three work over the public ctscout.dev `/scan` API (the batch tool wraps `/scan/batch`); the deep-dive pair wraps `/jobs`. Free tier requires an API key (no email, no signup). A Pro key gets up to 25 rows, a 12-month window and unlimited queries on `/scan`, and can submit deep-dive jobs, which return a `confidence_band` per attribution with the named signals behind it (DNS brand tokens, RDAP, IP/ASN, homepage metadata, favicon). Visual brand verification (VLM) is not part of v1.
 
 **Not a cyber-risk-scoring tool.** See [LIMITATIONS.md](LIMITATIONS.md) for what ctscout is and isn't, the DV-cert coverage gap, and the corrections path.
 
@@ -194,13 +194,12 @@ contract v1):
 toward 5 min between polls. The batch worker picks up queued jobs every few
 minutes and a deep dive can take several minutes to run.
 
-**The result** carries the same fields as a Pro `/scan` result — `domains`
-with `attributed_to` and an `enrichment` object per domain, plus `entity`,
-`run_metadata`, `source`, `signals_degraded` — and three fields the batch
-worker adds: `snapshot` (the warehouse date the deep dive read from, present on
+**The result** is the deep-dive shape — `domains` with `attributed_to` and an
+`enrichment` object per domain, plus `entity`, `run_metadata`, `source`,
+`signals_degraded` — and three fields the batch worker adds: `snapshot` (the warehouse date the deep dive read from, present on
 every deep-dive result because the worker sets it), `worker_version` and
-`signals_attempted`. The markdown output renders the same band / signals /
-evidence table as a Pro scan under the job's status lines; `structuredContent`
+`signals_attempted`. The markdown output renders the band / signals / evidence
+table under the job's status lines (a `/scan` never carries one); `structuredContent`
 carries the record with the top-level `snapshot` / `snapshot_source` resolved
 from `result.snapshot` (`null` / `"unavailable"` until the job is done).
 "Attributed" and "candidate" mean what they mean elsewhere in this package: an

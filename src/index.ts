@@ -2343,7 +2343,7 @@ Args:
   - response_format ('markdown' | 'json', default 'markdown'): output format.
 
 Returns (on success, structuredContent follows the declared outputSchema; an error result — 401, 429, timeout — is isError with no structuredContent, so never dereference snapshot on a failed call):
-  - "Attributed" means the organization is what the evidence names for that domain, not an ownership claim. On the free tier that evidence is always the OV/EV certificate subject. On the Pro tier (ScoutResult) it is the strongest available signal: the certificate subject when there is one, otherwise the RDAP registrant — check cert_org_names / rdap_org to see which. "Candidate" means a semantic name-similarity guess that is NOT an attribution.
+  - "Attributed" means the organization is what the evidence names for that domain, not an ownership claim. On /scan that evidence is the OV/EV certificate subject on both tiers; multi-signal attribution (DNS, RDAP, IP/ASN, homepage, favicon) exists only in a deep-dive job result (ctscout_submit_deep_dive, Pro). "Candidate" means a semantic name-similarity guess that is NOT an attribution.
   - In markdown: a snapshot line, then a table of (domain, attributed to, cert count, subdomain count). When nothing is attributed but match_type is 'semantic', a table of candidate organizations is rendered instead, labelled as candidates.
   - In JSON, structured as:
     {
@@ -2360,7 +2360,7 @@ Returns (on success, structuredContent follows the declared outputSchema; an err
       "total": number,                    // total matching rows in warehouse
       "truncated": boolean,               // true if response is capped
       "upgrade_hint": string,             // present when truncated
-      "source": "warehouse" | "live",     // free tier = warehouse, pro = live
+      "source": "warehouse",              // both tiers read the weekly warehouse snapshot
       "match_type": "exact" | "semantic" | "none",   // 'semantic' = domains empty, candidates offered
       "org_match_strategy": string,       // which matching pass produced the answer
       "empty_reason": string,             // present on empty results: why nothing was attributed
@@ -2379,7 +2379,7 @@ Examples:
 Auth & limits:
   - Requires CTSCOUT_API_KEY env var. Get a free key (no email) at https://ctscout.dev.
   - Free tier: 10 queries/day, top 5 results from a weekly snapshot. The response's "snapshot" field carries that snapshot's sync date only when the API reports it; today it does not, so expect snapshot: null / snapshot_source: "unavailable" and treat freshness as unknown.
-  - Pro tier: unlimited queries, full result set, live enrichment.
+  - Pro tier: unlimited queries, up to 25 rows, a 12-month window; deep-dive jobs (20/day) for multi-signal attribution.
 
 Error handling:
   - HTTP 401: API key missing or invalid.
