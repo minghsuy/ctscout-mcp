@@ -531,6 +531,17 @@ try {
   assert.equal(batch.inputSchema.properties.company_names.items.maxLength, 200);
   assert.deepEqual(batch.inputSchema.properties.response_format.enum, ["markdown", "json"]);
 
+  // The either/or target rule must reach discovery, not only the runtime refine.
+  const legacySubmit = legacyList.result.tools.find(
+    (tool) => tool.name === "ctscout_submit_deep_dive",
+  );
+  assert.ok(legacySubmit, "packed server omitted ctscout_submit_deep_dive");
+  assert.equal(legacySubmit.inputSchema.required, undefined);
+  assert.deepEqual(legacySubmit.inputSchema.anyOf, [
+    { required: ["company_name"] },
+    { required: ["seed_domain"] },
+  ]);
+
   // The three scan tools debit quota on every call: read-only, not idempotent.
   // The job tools' annotations are asserted on the modern client above.
   for (const tool of legacyList.result.tools.filter((t) => !t.name.includes("job") && !t.name.includes("deep_dive"))) {

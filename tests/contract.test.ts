@@ -143,8 +143,13 @@ describe("stdio MCP compatibility contract", () => {
           response_format: { type: "string", enum: ["markdown", "json"], default: "markdown" },
         },
       });
-      // Neither input is required on its own; the either/or rule is a refine.
-      expect(submit?.inputSchema.required ?? []).not.toContain("company_name");
+      // Neither input is required on its own; the either/or rule is advertised
+      // as an anyOf so a client planning from tools/list cannot submit {}.
+      expect(submit?.inputSchema.required).toBeUndefined();
+      expect(submit?.inputSchema.anyOf).toEqual([
+        { required: ["company_name"] },
+        { required: ["seed_domain"] },
+      ]);
       const getJob = tools.find((tool) => tool.name === "ctscout_get_job");
       expect(getJob?.inputSchema).toMatchObject({
         type: "object",

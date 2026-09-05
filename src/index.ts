@@ -424,7 +424,11 @@ export const SubmitDeepDiveInputSchema = z
   .strict()
   .refine((spec) => spec.company_name !== undefined || spec.seed_domain !== undefined, {
     message: "Provide company_name, seed_domain, or both",
-  });
+  })
+  // A refine is invisible to tools/list: without this, the advertised schema
+  // shows both fields optional and a client planning from it can submit {}.
+  // The anyOf is what discovery sees; the refine is what runs.
+  .meta({ anyOf: [{ required: ["company_name"] }, { required: ["seed_domain"] }] });
 
 type SubmitDeepDiveInput = z.infer<typeof SubmitDeepDiveInputSchema>;
 
