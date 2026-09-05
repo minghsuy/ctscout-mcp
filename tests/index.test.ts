@@ -3121,15 +3121,18 @@ describe("formatJobAsMarkdown", () => {
     expect(json.structured.result?.upgrade_hint).toContain("omitted to stay under 25000 chars.");
   });
 
-  it("bounds one oversized value inside a domain's embedded base before anything is dropped", () => {
+  it("drops a domain's embedded base before any value in the row is cut", () => {
     const row = proDiscoveredDomain("cna.com");
     const job = doneJob([{ ...row, base: { ...(row.base as object), blob: "b".repeat(30_000) } }]);
     const { text, structured } = formatJobAsMarkdown(job);
     expect(text).toContain("| `cna.com` |");
-    expect(text).toContain("> Response truncated: domains[] oversized values omitted");
+    // Steps are cumulative: the non-rendered fields go first, whole.
+    expect(text).toContain(
+      "> Response truncated: run_metadata, entity, signals_attempted, domains[].base omitted",
+    );
     expect(JSON.stringify(structured).length).toBeLessThanOrEqual(25_000);
     expect(structured.result?.domains).toHaveLength(1);
-    expect((structured.result?.domains[0].base as { blob: string }).blob).toContain("…(truncated");
+    expect(structured.result?.domains[0]).not.toHaveProperty("base");
     expect(structured.result?.domains[0].enrichment?.confidence_band).toBe("verified");
     // The evidence map was not needed and survives into the rendered cell.
     expect(text).toContain("verified via google-site-verification");
@@ -3360,6 +3363,26 @@ describe("truncateJobJsonIfNeeded", () => {
     expect(parsed.result?.truncated).toBe(true);
     expect(parsed.result?.domains.length).toBeGreaterThan(0);
     expect(parsed.snapshot).toBe("2026-08-31");
+  });
+
+  it("keeps a 21-entry matched_via when dropping run_metadata alone makes the record fit", () => {
+    const row = proDiscoveredDomain("cna.com");
+    const job = doneJob([
+      {
+        ...row,
+        enrichment: {
+          ...row.enrichment,
+          matched_via: Array.from({ length: 21 }, (_, i) => `s${i}`),
+        },
+      },
+    ]);
+    job.result = {
+      ...job.result,
+      run_metadata: { blob: "m".repeat(30_000) },
+    } as JobResponse["result"];
+    const { structured } = truncateJobJsonIfNeeded(job);
+    expect(structured.result?.domains[0].enrichment?.matched_via).toHaveLength(21);
+    expect(structured.result?.upgrade_hint).not.toContain("oversized values");
   });
 
   it("drops every domain's embedded base before any domain itself", () => {

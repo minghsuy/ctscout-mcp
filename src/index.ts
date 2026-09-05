@@ -2106,10 +2106,6 @@ const STRIP_STEPS: Array<{
     apply: (job, data) => [job, { ...data, domains: data.domains.map(knownRowFields) }],
   },
   {
-    name: "domains[] oversized values",
-    apply: (job, data) => [job, { ...data, domains: data.domains.map(boundRowValues) }],
-  },
-  {
     name: "run_metadata",
     apply: (job, { run_metadata: _dropped, ...data }) => [job, data],
   },
@@ -2124,6 +2120,12 @@ const STRIP_STEPS: Array<{
       job,
       { ...data, domains: data.domains.map(({ base: _dropped, ...row }) => row) },
     ],
+  },
+  // Lossy for a row only past the caps, but lossy: it runs after every
+  // non-rendered field is gone, when the rows themselves are what is left.
+  {
+    name: "domains[] oversized values",
+    apply: (job, data) => [job, { ...data, domains: data.domains.map(boundRowValues) }],
   },
   {
     name: "domains[].enrichment.evidence / signal_health",
