@@ -3170,6 +3170,25 @@ describe("formatJobAsMarkdown", () => {
     }
   });
 
+  it("reports the original total when both the record and the rendering pass halve", () => {
+    // Tiny rows: the compact record holds far more of them than the
+    // rendered table does, so the markdown pass halves what the record
+    // pass already halved.
+    const rows = Array.from({ length: 2000 }, (_, i) => ({
+      domain: `d${i}.cna.com`,
+      attributed_to: "CNA Financial Corporation",
+      is_seed: false,
+    }));
+    const { text, structured } = formatJobAsMarkdown(doneJob(rows));
+    expect(text.length).toBeLessThanOrEqual(25_000);
+    const kept = structured.result?.domains.length ?? 0;
+    expect(kept).toBeGreaterThan(0);
+    expect(structured.result?.upgrade_hint).toContain(
+      `Response truncated to ${kept} of 2000 domains`,
+    );
+    expect(text).toContain(`of 2000 domains`);
+  });
+
   it("bounds oversized worker_version and result job_id before halving domains", () => {
     const job = doneJob([proDiscoveredDomain("cna.com")]);
     job.result = {

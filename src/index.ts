@@ -1402,6 +1402,10 @@ function truncateWithRender(
   // caller that halves the same record twice passes the original so the
   // second pass does not stack a second halving notice on the first.
   priorHint: string | undefined = structured.upgrade_hint,
+  // The domain count the hint reports against; the same caller passes the
+  // pre-halving count so the second pass does not report the first's output
+  // as the total.
+  originalTotal: number = structured.domains.length,
 ): {
   text: string;
   structured: ScanResponse;
@@ -1421,7 +1425,7 @@ function truncateWithRender(
         ...currentStructured,
         domains: [],
         truncated: true,
-        upgrade_hint: withPrior(truncationHint(0, structured.domains.length)),
+        upgrade_hint: withPrior(truncationHint(0, originalTotal)),
       };
       currentText = render(currentStructured);
       break;
@@ -1432,7 +1436,7 @@ function truncateWithRender(
       ...currentStructured,
       domains: currentStructured.domains.slice(0, halved),
       truncated: true,
-      upgrade_hint: withPrior(truncationHint(halved, structured.domains.length)),
+      upgrade_hint: withPrior(truncationHint(halved, originalTotal)),
     };
     currentText = render(currentStructured);
   }
@@ -1915,7 +1919,15 @@ export function formatJobAsMarkdown(job: JobResponse): {
   // first, then against the rendering, so both carry the same domains.
   const wrap = (s: ScanResponse) => JSON.stringify(wrapJob(stripped.job, s));
   const prior = stripped.data.upgrade_hint;
-  const fit = truncateWithRender(wrap(stripped.data), stripped.data, wrap, CHARACTER_LIMIT, prior);
+  const total = stripped.data.domains.length;
+  const fit = truncateWithRender(
+    wrap(stripped.data),
+    stripped.data,
+    wrap,
+    CHARACTER_LIMIT,
+    prior,
+    total,
+  );
   const label = jobResultLabel(job);
   const render = (s: ScanResponse) => demoteHeading(formatScanAsMarkdown(label, s));
   const { text, structured } = truncateWithRender(
@@ -1924,6 +1936,7 @@ export function formatJobAsMarkdown(job: JobResponse): {
     render,
     Math.max(0, CHARACTER_LIMIT - header.length - 2),
     prior,
+    total,
   );
   return {
     text: clampText(`${header}\n\n${text}`),
