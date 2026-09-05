@@ -12,6 +12,8 @@ version heading so the exact package metadata and notes are reviewed together;
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-05
+
 ### Added
 
 - `ctscout_submit_deep_dive` (`POST /jobs`) and `ctscout_get_job`
