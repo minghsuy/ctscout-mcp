@@ -1911,7 +1911,10 @@ function jobResultData(job: JobResponse): DeepDiveResult | undefined {
 // truncated) result, and the top-level snapshot fields every tool carries.
 function wrapJob(job: JobResponse, result: DeepDiveResult | undefined): JobResponse {
   if (result === undefined) {
-    return { ...job, snapshot: null, snapshot_source: "unavailable" };
+    // A record that is not done carries no result, whatever the API sent:
+    // the markdown reports none, so structuredContent must not expose one.
+    const { result: _dropped, ...rest } = job;
+    return { ...rest, snapshot: null, snapshot_source: "unavailable" };
   }
   return {
     ...job,

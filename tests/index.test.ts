@@ -3380,6 +3380,16 @@ describe("truncateJobJsonIfNeeded", () => {
     for (const row of kept) expect(row).not.toHaveProperty("base");
   });
 
+  it("omits a result the API attached to a record that is not done", () => {
+    const job = doneJob([proDiscoveredDomain("cna.com")], { status: "running", finished_at: null });
+    for (const { structured } of [formatJobAsMarkdown(job), truncateJobJsonIfNeeded(job)]) {
+      expect(structured.status).toBe("running");
+      expect(structured).not.toHaveProperty("result");
+      expect(structured.snapshot).toBeNull();
+      expect(structured.snapshot_source).toBe("unavailable");
+    }
+  });
+
   it("keeps a row whose own values are oversized by bounding them, not by dropping it", () => {
     const row = proDiscoveredDomain("cna.com");
     const huge = {
