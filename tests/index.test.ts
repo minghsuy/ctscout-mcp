@@ -3388,6 +3388,12 @@ function vendorCustomers(overrides: Partial<VendorCustomers> = {}): VendorCustom
 
 describe("LookupLeiInputSchema / VendorCustomersInputSchema — client-side validation", () => {
   it("accepts exactly one of lei / name and rejects both, neither, and a malformed LEI", () => {
+    // The endpoint trims before deciding a name is empty, so discovery must
+    // agree: a whitespace-only name is rejected here, not one round trip later.
+    for (const blank of ["", " ", "   ", "\t\n"]) {
+      expect(LookupLeiInputSchema.safeParse({ name: blank }).success, blank).toBe(false);
+    }
+    expect(LookupLeiInputSchema.safeParse({ name: "  Cloudflare, Inc.  " }).success).toBe(true);
     expect(LookupLeiInputSchema.safeParse({ lei: "549300NDMY0KJK0ZLW17" }).success).toBe(true);
     expect(LookupLeiInputSchema.safeParse({ name: "Cloudflare, Inc." }).success).toBe(true);
     expect(

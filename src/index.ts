@@ -631,6 +631,11 @@ export const LookupLeiInputSchema = z
     name: z
       .string()
       .min(1, "name must not be empty")
+      // The endpoint trims before deciding a name is empty, so a pattern says
+      // so in the advertised schema too: a client validating against
+      // tools/list rejects "   " itself instead of spending a round trip
+      // earning a 400.
+      .regex(/\S/, "name must not be only whitespace")
       .max(NAME_QUERY_MAX_CHARS, `name must be at most ${NAME_QUERY_MAX_CHARS} characters`)
       .optional()
       .describe(
