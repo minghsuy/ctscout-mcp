@@ -1978,11 +1978,21 @@ describe("stdio MCP compatibility contract", () => {
       const structured = json.structuredContent as {
         vendors_confirmed?: string[];
         truncation_note?: string;
+        snapshot_dates?: Record<string, string>;
+        as_of?: string;
       };
       // vendors_confirmed is published complete, with no total beside it: a
       // short one has to carry the length the API actually sent.
       expect(structured.vendors_confirmed).toHaveLength(20);
       expect(structured.truncation_note).toContain("vendors_confirmed lists 20 of 45");
+      // ...and the per-source provenance the tool contract promises on every
+      // product answer is still there. Dropping it in the fallback left the
+      // caller with an export version and no way to tell what produced it.
+      expect(structured.snapshot_dates).toMatchObject({
+        gleif: "2026-08-28",
+        psl: expect.any(String),
+      });
+      expect(structured.as_of).toBe("2026-09-01");
       expect(textOf(json).length).toBeLessThanOrEqual(25_000);
 
       const markdown = await client.callTool({

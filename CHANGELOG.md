@@ -37,9 +37,13 @@ version heading so the exact package metadata and notes are reviewed together;
   record — same rows, same counts, one `truncation_note` — so neither half of a
   response can describe a list the other half does not show, and the API's own
   `counts` / `capped` are left untouched. Every rendered list says how many
-  entries it left out and how many there were in all, and the over-budget
-  fallback names any list it shortened with the length the API sent — a list
-  published complete (`vendors_confirmed`) is never quietly returned short. A
+  entries it left out and how many there were in all. Every product answer
+  collapses through one spec-driven envelope that knows, per field, whether a
+  list is a declared sample or published complete, names any list it shortens
+  with the length the API sent, and preserves the `as_of` / `product_version` /
+  `snapshot_dates` provenance the tool contract promises on every answer — so a
+  fallback cannot silently shorten a complete list or drop the per-source
+  provenance, for any object kind present or future. A
   503 is read from its body: only the Worker's "not yet published" detail gets
   the wait-for-the-refresh guidance, and any other 503 is reported as a
   temporary availability failure rather than a permanent state. The hosted MCP in ctscout-worker does

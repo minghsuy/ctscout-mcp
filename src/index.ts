@@ -3209,7 +3209,9 @@ export function boundVendorCustomers(data: VendorCustomers): {
   // a collapse to the envelope collapses both views together.
   // The envelope's note counts against what the API returned, not against the
   // already-trimmed record, so it is built from `data`.
-  const serialized = serializeBoundedJson(trimmed, () => minimalVendorCustomersEnvelope(data));
+  const serialized = serializeBoundedJson(trimmed, () =>
+    minimalProductEnvelope<VendorCustomers>("vendor_customers", data),
+  );
   return {
     text: clampText(renderVendorCustomers(serialized.structured)),
     json: serialized.text,
@@ -3264,101 +3266,227 @@ function keptProductSnapshot(data: Partial<ProductSnapshotInfo>): ProductSnapsho
     : { snapshot: null, snapshot_source: "unavailable" };
 }
 
-const LEI_ENVELOPE_STRINGS = [
-  "lei",
-  "legal_name",
-  "country",
-  "first_seen",
-  "last_seen",
-  "query",
-  "name_match",
-  "as_of",
-  "product_version",
-];
-const LEI_ENVELOPE_NUMBERS = ["isin_count", "apex_count", "lei_count", "limit"];
-const LEI_ENVELOPE_LISTS = ["sample_domains", "vendors_confirmed", "leis"];
+// ---------- One envelope for every product object ----------
+//
+// Every research-product response that cannot fit under CHARACTER_LIMIT any
+// other way collapses through THIS path. It is spec-driven rather than
+// hand-written per shape because both defects it closes were the same shape of
+// mistake: "the envelope for object X forgot rule Y". The LEI envelope silently
+// shortened a list the product publishes complete; then the vendor summary was
+// found doing the same to three more; and both dropped the per-source
+// provenance the tool contract says every product answer carries. A field added
+// to a shape is a line in the spec below and there is no second place to
+// remember it, so the next object kind cannot miss either rule by construction.
 
-function minimalLeiEnvelope(data: LeiLookupResponse): LeiLookupResponse {
-  const keep: Record<string, unknown> = {
-    ...keptProductSnapshot(data),
-    ...keptStrings(data, LEI_ENVELOPE_STRINGS),
-  };
-  for (const field of LEI_ENVELOPE_NUMBERS) {
-    if (typeof data[field] === "number") keep[field] = data[field];
-  }
-  if (typeof data.truncated === "boolean") keep.truncated = data.truncated;
-  // A cut list must never reach a caller looking complete. `sample_domains` is
-  // declared partial against a total the record carries (`apex_count`), so a
-  // shorter sample is a smaller sample. `vendors_confirmed` is published
-  // complete with no total beside it, and `leis` carries only the ENDPOINT's
-  // cut (`lei_count` / `limit`), which says nothing about this one — shortening
-  // either in silence turns a partial answer into a wrong one. So every cut is
-  // named, with the length the API actually sent.
-  const cuts: string[] = [];
-  for (const field of LEI_ENVELOPE_LISTS) {
-    const original = data[field];
-    if (!Array.isArray(original)) continue;
-    const kept = boundedStrings(original);
-    keep[field] = kept;
-    if (kept.length < original.length) {
-      cuts.push(`${field} lists ${kept.length} of ${original.length}`);
+/** A capped scalar string. */
+const ENV_STRING = { kind: "string" } as const;
+/** A count, kept only when it really is a number. */
+const ENV_COUNT = { kind: "count" } as const;
+const ENV_BOOLEAN = { kind: "boolean" } as const;
+/** The candidate/confirmed split, under either of its two names. */
+const ENV_SPLIT = { kind: "split" } as const;
+
+type EnvelopeField =
+  | typeof ENV_STRING
+  | typeof ENV_COUNT
+  | typeof ENV_BOOLEAN
+  | typeof ENV_SPLIT
+  /** An array. `partial` marks a list the product DECLARES partial against a
+   *  total the record itself carries (a sample): shortening it further is a
+   *  smaller sample of the same claim. Without it the list is published
+   *  complete — or partial only against someone else's cut, as `leis` is — and
+   *  shortening it changes the claim. Either way the cut is reported; the flag
+   *  is what the note says about it, so a reader can tell the two apart. */
+  | {
+      readonly kind: "array";
+      readonly max: number;
+      readonly partial?: string;
+      /** Present for an array of objects: each row is rebuilt from these. */
+      readonly fields?: Readonly<Record<string, EnvelopeField>>;
+    };
+
+const CUSTOMER_ROW_FIELDS = {
+  apex: ENV_STRING,
+  attributed_to: ENV_STRING,
+  lei: ENV_STRING,
+} as const;
+
+/** Every product object kind this package hands back. The walk test in
+ *  tests/index.test.ts iterates this registry, so a kind added without a
+ *  fixture and its assertions fails the build. */
+export const PRODUCT_ENVELOPES = {
+  lei_record: {
+    lei: ENV_STRING,
+    legal_name: ENV_STRING,
+    country: ENV_STRING,
+    first_seen: ENV_STRING,
+    last_seen: ENV_STRING,
+    isin_count: ENV_COUNT,
+    apex_count: ENV_COUNT,
+    sample_domains: { kind: "array", max: ROW_LIST_LIMIT, partial: "apex_count is the total" },
+    vendors_confirmed: { kind: "array", max: ROW_LIST_LIMIT },
+  },
+  lei_name_matches: {
+    query: ENV_STRING,
+    name_match: ENV_STRING,
+    lei_count: ENV_COUNT,
+    limit: ENV_COUNT,
+    truncated: ENV_BOOLEAN,
+    // NOT partial: lei_count/limit describe the ENDPOINT's cut, which says
+    // nothing about this one.
+    leis: { kind: "array", max: ROW_LIST_LIMIT },
+  },
+  vendor_summary: {
+    slug: ENV_STRING,
+    vendor_name: ENV_STRING,
+    vendor_apex: ENV_STRING,
+    customers: ENV_SPLIT,
+    countries_top: {
+      kind: "array",
+      max: ROW_LIST_LIMIT,
+      fields: { country: ENV_STRING, confirmed: ENV_COUNT },
+    },
+    co_use: {
+      kind: "array",
+      max: ROW_LIST_LIMIT,
+      fields: { slug: ENV_STRING, confirmed: ENV_COUNT },
+    },
+    sample_customers: {
+      kind: "array",
+      max: ROW_LIST_LIMIT,
+      partial: "customers.confirmed is the total",
+    },
+  },
+  vendor_customers: {
+    slug: ENV_STRING,
+    counts: ENV_SPLIT,
+    capped: ENV_BOOLEAN,
+    // max 0: this envelope is the last resort AFTER trimCustomerRows has
+    // already halved the rows away, so by the time it runs there is no budget
+    // for a row. Twenty of each would be ~24 KB on their own.
+    confirmed: { kind: "array", max: 0, fields: CUSTOMER_ROW_FIELDS },
+    candidates: { kind: "array", max: 0, fields: CUSTOMER_ROW_FIELDS },
+  },
+} as const satisfies Record<string, Readonly<Record<string, EnvelopeField>>>;
+
+export type ProductEnvelopeKind = keyof typeof PRODUCT_ENVELOPES;
+
+// The provenance every product answer carries. Capped at what
+// productSnapshotLine renders, so nothing a reader could have seen is lost.
+const PROVENANCE_KEY_LIMIT = 40;
+const PROVENANCE_VALUE_LIMIT = 80;
+
+/** `as_of`, `product_version` and `snapshot_dates`. The tool contract promises
+ *  all three on every product answer, so a fallback that drops them leaves the
+ *  caller holding an export version with no way to tell which source snapshots
+ *  produced it. They are bounded here, never omitted. */
+function keptProvenance(data: Record<string, unknown>): {
+  fields: Record<string, unknown>;
+  cut?: string;
+} {
+  const fields: Record<string, unknown> = keptStrings(data, ["as_of", "product_version"]);
+  const dates = data.snapshot_dates;
+  if (dates === null || typeof dates !== "object" || Array.isArray(dates)) return { fields };
+  const entries = Object.entries(dates as Record<string, unknown>).filter(
+    ([, value]) => typeof value === "string",
+  );
+  const kept = entries.slice(0, PRODUCT_SOURCE_LIMIT);
+  fields.snapshot_dates = Object.fromEntries(
+    kept.map(([name, value]) => [
+      truncateBody(name, PROVENANCE_KEY_LIMIT),
+      truncateBody(value as string, PROVENANCE_VALUE_LIMIT),
+    ]),
+  );
+  return kept.length < entries.length
+    ? { fields, cut: `snapshot_dates lists ${kept.length} of ${entries.length}` }
+    : { fields };
+}
+
+function envelopeRow(
+  row: unknown,
+  fields: Readonly<Record<string, EnvelopeField>>,
+): Record<string, unknown> {
+  const source = (row ?? {}) as Record<string, unknown>;
+  const keep: Record<string, unknown> = {};
+  for (const [name, field] of Object.entries(fields)) {
+    if (field.kind === "string" && typeof source[name] === "string") {
+      keep[name] = boundedField(source[name] as string);
+    } else if (field.kind === "count" && isCount(source[name])) {
+      keep[name] = source[name];
     }
   }
+  return keep;
+}
+
+/** The one minimal envelope. Bounded by construction — every string capped,
+ *  every array cut to its spec's max, every count kept only when numeric — and
+ *  serializeBoundedJson never re-measures what this returns, so that has to be
+ *  literally true rather than nearly true. */
+export function minimalProductEnvelope<T>(kind: ProductEnvelopeKind, data: T): T {
+  const source = data as unknown as Record<string, unknown>;
+  const spec: Readonly<Record<string, EnvelopeField>> = PRODUCT_ENVELOPES[kind];
+  const keep: Record<string, unknown> = {};
+  const cuts: string[] = [];
+
+  for (const [name, field] of Object.entries(spec)) {
+    const value = source[name];
+    switch (field.kind) {
+      case "string":
+        if (typeof value === "string") keep[name] = boundedField(value);
+        break;
+      case "count":
+        if (isCount(value)) keep[name] = value;
+        break;
+      case "boolean":
+        if (typeof value === "boolean") keep[name] = value;
+        break;
+      case "split":
+        keep[name] = boundedSplitCounts(value);
+        break;
+      case "array": {
+        if (!Array.isArray(value)) break;
+        const kept =
+          field.fields === undefined
+            ? boundedStrings(value).slice(0, field.max)
+            : value.slice(0, field.max).map((row) => envelopeRow(row, field.fields ?? {}));
+        keep[name] = kept;
+        if (kept.length < value.length) {
+          cuts.push(
+            `${name} lists ${kept.length} of ${value.length}` +
+              (field.partial === undefined
+                ? " (published complete)"
+                : ` (a sample; ${field.partial})`),
+          );
+        }
+        break;
+      }
+    }
+  }
+
+  const provenance = keptProvenance(source);
+  Object.assign(
+    keep,
+    provenance.fields,
+    keptProductSnapshot(source as Partial<ProductSnapshotInfo>),
+  );
+  if (provenance.cut !== undefined) cuts.push(provenance.cut);
+
   if (cuts.length > 0) {
     keep.truncation_note =
-      `This MCP response shortened lists the API sent whole to stay under ${CHARACTER_LIMIT} ` +
-      `chars: ${cuts.join(", ")}. The counts beside them (apex_count, lei_count) describe ` +
-      "the API's answer, not these lists.";
+      `This MCP response shortened lists the API sent whole, to stay under ${CHARACTER_LIMIT} ` +
+      `chars: ${cuts.join(", ")}. Any count beside them describes the API's answer, not these ` +
+      "lists.";
   }
-  return keep as unknown as LeiLookupResponse;
+  return keep as unknown as T;
 }
 
-export function truncateLeiJsonIfNeeded(data: LeiLookupResponse): {
-  text: string;
-  structured: LeiLookupResponse;
-} {
-  return serializeBoundedJson(data, () => minimalLeiEnvelope(data));
-}
-
-const VENDOR_ENVELOPE_STRINGS = ["slug", "vendor_name", "as_of", "product_version"] as const;
-
-function minimalVendorSummaryEnvelope(data: VendorSummary): VendorSummary {
-  const counted = (rows: unknown, key: "country" | "slug") =>
-    (Array.isArray(rows) ? rows : []).slice(0, ROW_LIST_LIMIT).map((row) => {
-      const source = (row ?? {}) as Record<string, unknown>;
-      return {
-        ...keptStrings(source, [key]),
-        ...(isCount(source.confirmed) && { confirmed: source.confirmed }),
-      };
-    });
-  return {
-    ...keptStrings(data, VENDOR_ENVELOPE_STRINGS),
-    vendor_apex: typeof data.vendor_apex === "string" ? boundedField(data.vendor_apex) : null,
-    customers: boundedSplitCounts(data.customers),
-    countries_top: counted(data.countries_top, "country"),
-    co_use: counted(data.co_use, "slug"),
-    sample_customers: boundedStrings(data.sample_customers),
-    ...keptProductSnapshot(data),
-  };
-}
-
-export function truncateVendorSummaryJsonIfNeeded(data: VendorSummary): {
-  text: string;
-  structured: VendorSummary;
-} {
-  return serializeBoundedJson(data, () => minimalVendorSummaryEnvelope(data));
-}
-
-function minimalVendorCustomersEnvelope(data: VendorCustomers): VendorCustomers {
-  const emptied: VendorCustomers = {
-    ...keptStrings(data, VENDOR_ENVELOPE_STRINGS),
-    confirmed: [],
-    candidates: [],
-    counts: boundedSplitCounts(data.counts),
-    capped: data.capped === true,
-    ...keptProductSnapshot(data),
-  };
-  return customersWithNote(emptied, data);
+/** The one JSON bounder for a product answer: pretty when it fits, else
+ *  compact, else the spec-driven envelope above. */
+export function truncateProductJson<T>(
+  kind: ProductEnvelopeKind,
+  data: T,
+): { text: string; structured: T } {
+  return serializeBoundedJson(data, () => minimalProductEnvelope<T>(kind, data));
 }
 
 // ---------- Server + tools ----------
@@ -3827,7 +3955,7 @@ Coverage & freshness:
         if (params.lei !== undefined) {
           const raw = await callLeiRecord(params.lei);
           const data: LeiRecord = { ...raw, ...resolveProductSnapshot(raw) };
-          const { text: json, structured } = truncateLeiJsonIfNeeded(data);
+          const { text: json, structured } = truncateProductJson("lei_record", data);
           return {
             content: [
               {
@@ -3843,7 +3971,7 @@ Coverage & freshness:
         }
         const raw = await callLeiByName(params.name as string);
         const data: LeiNameMatches = { ...raw, ...resolveProductSnapshot(raw) };
-        const { text: json, structured } = truncateLeiJsonIfNeeded(data);
+        const { text: json, structured } = truncateProductJson("lei_name_matches", data);
         return {
           content: [
             {
@@ -3949,7 +4077,7 @@ Coverage & freshness:
         }
         const raw = await callVendorSummary(params.slug);
         const data: VendorSummary = { ...raw, ...resolveProductSnapshot(raw) };
-        const { text: json, structured } = truncateVendorSummaryJsonIfNeeded(data);
+        const { text: json, structured } = truncateProductJson("vendor_summary", data);
         return {
           content: [
             {

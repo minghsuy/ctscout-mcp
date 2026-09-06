@@ -59,6 +59,8 @@ import {
   GetJobInputSchema,
   getApiKey,
   LookupLeiInputSchema,
+  minimalProductEnvelope,
+  PRODUCT_ENVELOPES,
   resolveProductSnapshot,
   resolveSnapshot,
   SERVER_VERSION,
@@ -69,9 +71,8 @@ import {
   truncateIfNeeded,
   truncateJobJsonIfNeeded,
   truncateJsonIfNeeded,
-  truncateLeiJsonIfNeeded,
+  truncateProductJson,
   truncateReceiptJsonIfNeeded,
-  truncateVendorSummaryJsonIfNeeded,
   VendorCustomersInputSchema,
 } from "../src/index.ts";
 
@@ -3764,17 +3765,18 @@ describe("boundVendorCustomers — the markdown half", () => {
   });
 });
 
-describe("truncateLeiJsonIfNeeded / truncateVendorSummaryJsonIfNeeded", () => {
+describe("truncateProductJson — the one envelope path", () => {
   it("pretty-prints a record that fits, unchanged", () => {
     const record = leiRecord();
-    const { text, structured } = truncateLeiJsonIfNeeded(record);
+    const { text, structured } = truncateProductJson("lei_record", record);
     expect(JSON.parse(text)).toEqual(record);
     expect(structured).toEqual(record);
     expect(text).toContain("\n  ");
   });
 
   it("collapses an LEI record to bounded known fields when an unknown field is over budget", () => {
-    const { text, structured } = truncateLeiJsonIfNeeded(
+    const { text, structured } = truncateProductJson(
+      "lei_record",
       leiRecord({ future_field: "x".repeat(CHARACTER_LIMIT + 1) }),
     );
     expect(text.length).toBeLessThanOrEqual(CHARACTER_LIMIT);
@@ -3800,7 +3802,7 @@ describe("truncateLeiJsonIfNeeded / truncateVendorSummaryJsonIfNeeded", () => {
       sample_domains: Array.from({ length: 30 }, (_, i) => `d${i}.example`),
       future_field: "x".repeat(CHARACTER_LIMIT + 1),
     });
-    const { text, structured } = truncateLeiJsonIfNeeded(record);
+    const { text, structured } = truncateProductJson("lei_record", record);
     expect(text.length).toBeLessThanOrEqual(CHARACTER_LIMIT);
 
     // structuredContent: the short list, its real length, and a marker.
@@ -3818,7 +3820,8 @@ describe("truncateLeiJsonIfNeeded / truncateVendorSummaryJsonIfNeeded", () => {
   });
 
   it("writes no truncation note when no list was shortened", () => {
-    const { structured } = truncateLeiJsonIfNeeded(
+    const { structured } = truncateProductJson(
+      "lei_record",
       leiRecord({ future_field: "x".repeat(CHARACTER_LIMIT + 1) }),
     );
     // The envelope still fired (the unknown field is gone), but the two short
@@ -3828,7 +3831,8 @@ describe("truncateLeiJsonIfNeeded / truncateVendorSummaryJsonIfNeeded", () => {
   });
 
   it("bounds every string the minimal LEI envelope keeps", () => {
-    const { text, structured } = truncateLeiJsonIfNeeded(
+    const { text, structured } = truncateProductJson(
+      "lei_record",
       leiRecord({
         legal_name: "L".repeat(5_000),
         sample_domains: Array.from({ length: 500 }, () => "d".repeat(500)),
@@ -3841,7 +3845,8 @@ describe("truncateLeiJsonIfNeeded / truncateVendorSummaryJsonIfNeeded", () => {
   });
 
   it("keeps the vendor summary's counts through a minimal collapse", () => {
-    const { text, structured } = truncateVendorSummaryJsonIfNeeded(
+    const { text, structured } = truncateProductJson(
+      "vendor_summary",
       vendorSummary({ future_field: "x".repeat(CHARACTER_LIMIT + 1) }),
     );
     expect(text.length).toBeLessThanOrEqual(CHARACTER_LIMIT);
@@ -3856,7 +3861,8 @@ describe("truncateLeiJsonIfNeeded / truncateVendorSummaryJsonIfNeeded", () => {
   // minimal envelope, so "bounded by construction" has to be literally true.
   it("drops non-numeric counts rather than letting one escape the minimal envelope", () => {
     const oversized = "y".repeat(CHARACTER_LIMIT);
-    const { text, structured } = truncateVendorSummaryJsonIfNeeded(
+    const { text, structured } = truncateProductJson(
+      "vendor_summary",
       vendorSummary({
         customers: { candidates: 940, confirmed: oversized } as unknown as SplitCounts,
         countries_top: Array.from({ length: 50 }, () => ({
@@ -3886,7 +3892,8 @@ describe("truncateLeiJsonIfNeeded / truncateVendorSummaryJsonIfNeeded", () => {
   it("never keeps a date beside snapshot_source 'unavailable'", () => {
     const oversized = "y".repeat(CHARACTER_LIMIT);
     for (const source of [undefined, "unavailable", "scan"]) {
-      const { structured } = truncateVendorSummaryJsonIfNeeded(
+      const { structured } = truncateProductJson(
+        "vendor_summary",
         vendorSummary({
           snapshot: "2026-09-01",
           snapshot_source: source as VendorSummary["snapshot_source"],
@@ -3897,7 +3904,8 @@ describe("truncateLeiJsonIfNeeded / truncateVendorSummaryJsonIfNeeded", () => {
       expect(structured.snapshot, String(source)).toBeNull();
     }
     // And the pair survives intact when it is the one the server wrote.
-    const { structured } = truncateVendorSummaryJsonIfNeeded(
+    const { structured } = truncateProductJson(
+      "vendor_summary",
       vendorSummary({ future_field: oversized }),
     );
     expect(structured).toMatchObject({ snapshot: "2026-09-01", snapshot_source: "product" });
@@ -3905,7 +3913,8 @@ describe("truncateLeiJsonIfNeeded / truncateVendorSummaryJsonIfNeeded", () => {
 
   it("drops non-string labels rather than carrying or stringifying them", () => {
     const oversized = "y".repeat(CHARACTER_LIMIT);
-    const { text, structured } = truncateVendorSummaryJsonIfNeeded(
+    const { text, structured } = truncateProductJson(
+      "vendor_summary",
       vendorSummary({
         vendor_name: { evil: oversized } as unknown as string,
         vendor_apex: { evil: oversized } as unknown as string,
@@ -3916,12 +3925,180 @@ describe("truncateLeiJsonIfNeeded / truncateVendorSummaryJsonIfNeeded", () => {
     );
     expect(text.length).toBeLessThanOrEqual(CHARACTER_LIMIT);
     expect(structured).not.toHaveProperty("vendor_name");
-    expect(structured.vendor_apex).toBeNull();
+    expect(structured).not.toHaveProperty("vendor_apex");
     expect(structured.countries_top?.[0]).toEqual({ confirmed: 90 });
     expect(structured.sample_customers).toEqual(["kept.example"]);
     const md = formatVendorSummaryAsMarkdown(structured);
     expect(md).not.toContain("undefined");
     expect(md).not.toContain("[object Object]");
+  });
+});
+
+// The point of the spec-driven envelope is that no object kind and no field can
+// miss the two rules by being forgotten. This walks the registry itself, so a
+// kind added to PRODUCT_ENVELOPES without a fixture here fails the build.
+describe("the one product envelope path, walked over every object kind", () => {
+  const OVERSIZED = "x".repeat(CHARACTER_LIMIT + 1);
+  const provenance = {
+    ...PRODUCT_PROVENANCE,
+    ...PRODUCT_SNAPSHOT,
+    // More sources than the line renders, so the provenance cut is exercised
+    // alongside the list cuts.
+    snapshot_dates: {
+      ...PRODUCT_PROVENANCE.snapshot_dates,
+      ...Object.fromEntries(
+        Array.from({ length: 12 }, (_, i) => [`extra-${i}`, `2026-08-0${i % 9}`]),
+      ),
+    },
+  };
+  const rows = (n: number) => Array.from({ length: n }, (_, i) => customerRow(i));
+  const strings = (n: number, prefix: string) =>
+    Array.from({ length: n }, (_, i) => `${prefix}-${i}`);
+
+  // One over-budget fixture per kind, every array longer than its spec's max.
+  const FIXTURES: Record<string, Record<string, unknown>> = {
+    lei_record: {
+      ...leiRecord(),
+      sample_domains: strings(30, "d"),
+      vendors_confirmed: strings(45, "vendor"),
+      ...provenance,
+      future_field: OVERSIZED,
+    },
+    lei_name_matches: {
+      query: "Cloudflare, Inc.",
+      name_match: "exact",
+      leis: strings(50, "5493001KJTIIGC8Y1R"),
+      lei_count: 50,
+      limit: 20,
+      truncated: false,
+      ...provenance,
+      future_field: OVERSIZED,
+    },
+    vendor_summary: {
+      ...vendorSummary(),
+      countries_top: Array.from({ length: 31 }, (_, i) => ({ country: `C${i}`, confirmed: i })),
+      co_use: Array.from({ length: 26 }, (_, i) => ({ slug: `v-${i}`, confirmed: i })),
+      sample_customers: strings(24, "cust"),
+      ...provenance,
+      future_field: OVERSIZED,
+    },
+    vendor_customers: {
+      ...vendorCustomers(),
+      confirmed: rows(7),
+      candidates: rows(9),
+      counts: { candidates: 9, confirmed: 7 },
+      ...provenance,
+      future_field: OVERSIZED,
+    },
+  };
+
+  it("covers every kind in the registry — a new kind without a fixture fails here", () => {
+    expect(Object.keys(FIXTURES).sort()).toEqual(Object.keys(PRODUCT_ENVELOPES).sort());
+  });
+
+  for (const kind of Object.keys(PRODUCT_ENVELOPES) as Array<keyof typeof PRODUCT_ENVELOPES>) {
+    it(`${kind}: names every shortened list and keeps the contract's provenance`, () => {
+      const fixture = FIXTURES[kind];
+      const { text, structured } = truncateProductJson(kind, fixture);
+      const kept = structured as Record<string, unknown>;
+
+      // Bounded by construction: serializeBoundedJson never re-measures this.
+      expect(text.length).toBeLessThanOrEqual(CHARACTER_LIMIT);
+      expect(kept).not.toHaveProperty("future_field");
+      expect(JSON.parse(text)).toEqual(kept);
+
+      // (c) The provenance the tool contract promises on EVERY product answer
+      // survives the fallback — losing it leaves a version with no way to tell
+      // which source snapshots produced it.
+      expect(kept.as_of, kind).toBe("2026-09-01");
+      expect(kept.product_version, kind).toBe("2026-09-01");
+      expect(kept.snapshot, kind).toBe("2026-09-01");
+      expect(kept.snapshot_source, kind).toBe("product");
+      expect(kept.snapshot_dates, kind).toMatchObject({ gleif: "2026-08-28" });
+
+      // (a) + (b) Every array the spec declares was cut, and every cut is named
+      // with the length the API actually sent — and says which kind of list it
+      // was, so a sample and a complete list cannot be read as the same claim.
+      const spec = PRODUCT_ENVELOPES[kind] as Record<
+        string,
+        { kind: string; max?: number; partial?: string }
+      >;
+      const note = kept.truncation_note as string | undefined;
+      let namedAny = false;
+      for (const [field, rule] of Object.entries(spec)) {
+        if (rule.kind !== "array") continue;
+        const sent = fixture[field] as unknown[];
+        const listed = kept[field] as unknown[];
+        expect(listed.length, `${kind}.${field}`).toBe(Math.min(sent.length, rule.max ?? 0));
+        if (listed.length < sent.length) {
+          namedAny = true;
+          expect(note, `${kind}.${field}`).toContain(
+            `${field} lists ${listed.length} of ${sent.length}`,
+          );
+          expect(note, `${kind}.${field}`).toContain(
+            rule.partial === undefined ? "(published complete)" : "(a sample;",
+          );
+        }
+      }
+      // Every fixture oversizes at least one list, so the note must exist.
+      expect(namedAny, kind).toBe(true);
+      expect(note, kind).toBeDefined();
+      // The provenance map was cut too, and says so rather than looking whole.
+      expect(Object.keys(kept.snapshot_dates as object).length, kind).toBe(10);
+      expect(note, kind).toContain("snapshot_dates lists 10 of 17");
+    });
+  }
+
+  it("writes no note when nothing was shortened, for any kind", () => {
+    for (const kind of Object.keys(PRODUCT_ENVELOPES) as Array<keyof typeof PRODUCT_ENVELOPES>) {
+      // Same fixtures with every array emptied: the envelope still fires (the
+      // unknown field is over budget) but has no list to shorten.
+      const spec = PRODUCT_ENVELOPES[kind] as Record<string, { kind: string }>;
+      const emptied: Record<string, unknown> = { ...FIXTURES[kind] };
+      for (const [field, rule] of Object.entries(spec)) {
+        if (rule.kind === "array") emptied[field] = [];
+      }
+      emptied.snapshot_dates = PRODUCT_PROVENANCE.snapshot_dates;
+      const { structured } = truncateProductJson(kind, emptied);
+      expect((structured as Record<string, unknown>).truncation_note, kind).toBeUndefined();
+      expect((structured as Record<string, unknown>).snapshot_dates, kind).toMatchObject({
+        gleif: "2026-08-28",
+      });
+    }
+  });
+
+  it("stays bounded for every kind against a hostile payload", () => {
+    for (const kind of Object.keys(PRODUCT_ENVELOPES) as Array<keyof typeof PRODUCT_ENVELOPES>) {
+      const spec = PRODUCT_ENVELOPES[kind] as Record<string, { kind: string; fields?: object }>;
+      const hostile: Record<string, unknown> = {
+        as_of: OVERSIZED,
+        product_version: OVERSIZED,
+        snapshot: OVERSIZED,
+        snapshot_source: "product",
+        snapshot_dates: Object.fromEntries(
+          Array.from({ length: 60 }, (_, i) => [`${OVERSIZED}-${i}`, OVERSIZED]),
+        ),
+        future_field: OVERSIZED,
+      };
+      for (const [field, rule] of Object.entries(spec)) {
+        hostile[field] =
+          rule.kind === "array"
+            ? Array.from({ length: 60 }, () =>
+                rule.fields === undefined
+                  ? OVERSIZED
+                  : Object.fromEntries(Object.keys(rule.fields).map((k) => [k, OVERSIZED])),
+              )
+            : rule.kind === "count"
+              ? Number.MAX_VALUE
+              : rule.kind === "boolean"
+                ? true
+                : rule.kind === "split"
+                  ? { candidates: Number.MAX_VALUE, confirmed: Number.MAX_VALUE }
+                  : OVERSIZED;
+      }
+      const envelope = JSON.stringify(minimalProductEnvelope(kind, hostile));
+      expect(envelope.length, kind).toBeLessThanOrEqual(CHARACTER_LIMIT);
+    }
   });
 });
 
@@ -3966,7 +4143,8 @@ describe("boundVendorCustomers — the JSON half", () => {
     expect(structured.counts).toEqual({ candidates: 2, confirmed: 1 });
     // The note counts against what the API returned, not against the record
     // the trim had already shortened.
-    expect(structured.truncation_note).toContain("0 of 1 confirmed and 0 of 1 candidate rows");
+    expect(structured.truncation_note).toContain("confirmed lists 0 of 1");
+    expect(structured.truncation_note).toContain("candidates lists 0 of 1");
     // A collapse to the envelope collapses BOTH views: the markdown shows the
     // empty lists too, rather than the rows structuredContent no longer has.
     expect(text).toContain("## Candidates — 0 listed of 2");

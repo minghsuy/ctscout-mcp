@@ -306,6 +306,13 @@ half does not show.
 
 ### Freshness and the 503
 
+When a response is too large, it collapses through one envelope shared by every
+product object kind. That envelope knows for each field whether a list is a
+declared sample (partial against a total the record carries) or published
+complete, names any list it shortens together with the length the API sent, and
+never drops the provenance fields below — so a shortened list cannot read as a
+complete one, and a fallback cannot cost you the per-source provenance.
+
 Both tools carry `snapshot` (the export's `as_of`) and `snapshot_source`
 (`"product"` when the API reported the version, `"unavailable"` when it did not
 — then `snapshot` is `null` and freshness is unknown, never "current"), plus
