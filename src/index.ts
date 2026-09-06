@@ -2,13 +2,15 @@
 /**
  * MCP Server for ctscout.dev — domain discovery via Certificate Transparency.
  *
- * Wraps the public ctscout.dev /scan and /jobs APIs. Five tools:
+ * Wraps the public ctscout.dev /scan, /jobs, /lei and /vendors APIs. Seven tools:
  *
  * - ctscout_search_company:       find domains attributed to an organization by name
  * - ctscout_search_company_batch: same, for up to 10 organization names in one call
  * - ctscout_lookup_domain:        reverse lookup — find the organization for one or more domains
  * - ctscout_submit_deep_dive:     Pro only — queue an async multi-signal deep dive (POST /jobs)
  * - ctscout_get_job:              poll a deep dive and read its result (GET /jobs/{id})
+ * - ctscout_lookup_lei:           one LEI's record, or the LEIs under a legal name (GET /lei)
+ * - ctscout_vendor_customers:     a vendor's customer counts and, with a key, the enumeration
  *
  * Auth: requires an API key via the CTSCOUT_API_KEY environment variable.
  * Get a free key (no email, no signup) at https://ctscout.dev.
@@ -20,6 +22,12 @@
  * https://ctscout.dev/mcp (Streamable HTTP transport). Both transports expose
  * the same public tools while the longer-term shared-core/forwarding
  * migration continues in #72.
+ *
+ * Known, deliberate transport divergence (AGENTS.md "Cross-repository
+ * parity"): ctscout_lookup_lei and ctscout_vendor_customers ship here first.
+ * The hosted MCP in ctscout-worker does not advertise them yet; mirroring them
+ * onto /mcp and /sse is a separate Worker change, so until it lands the two
+ * transports differ by exactly these two tools and nothing else.
  */
 
 import { realpathSync } from "node:fs";
@@ -36,6 +44,21 @@ const API_BASE_URL = process.env.CTSCOUT_API_URL ?? "https://ctscout.dev";
 const SCAN_URL = `${API_BASE_URL}/scan`;
 const SCAN_BATCH_URL = `${API_BASE_URL}/scan/batch`;
 const JOBS_URL = `${API_BASE_URL}/jobs`;
+// Research-product routes (ctscout-worker#336). Every answer is a precomputed
+// object published by the weekly ctscout-research refresh; the Worker reads one
+// object and returns it, classifying nothing.
+const LEI_URL = `${API_BASE_URL}/lei`;
+const VENDORS_URL = `${API_BASE_URL}/vendors`;
+// ISO 17442: 18 uppercase alphanumerics plus two check digits. Mirrors the
+// Worker's LEI_RE (product-contract.ts) so a malformed id gets a clean local
+// error instead of a 400 round-trip.
+const LEI_PATTERN = /^[A-Z0-9]{18}[0-9]{2}$/;
+// Mirrors the Worker's SLUG_RE for /vendors/{slug}: one lowercase segment.
+const VENDOR_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,80}$/;
+// The Worker's LEI_NAME_LIMIT and NAME_QUERY_MAX_CHARS. Stated in the tool
+// description so a caller reads "20 of 37" rather than assuming leis is whole.
+const LEI_NAME_LIMIT = 20;
+const NAME_QUERY_MAX_CHARS = 200;
 // Deep-dive spec limits and quota, per ctscout-worker#344 contract v1. The
 // Worker validates the spec exactly like /scan and re-enforces both; the copy
 // here gives a clean error before a network round-trip and lets the tool
@@ -82,6 +105,16 @@ const SUBMIT_JOB_ANNOTATIONS = {
 // Polling a job reads state and debits nothing (GET /jobs/{id} is outside the
 // scan and jobs quotas), so repeating the call is safe.
 const POLL_JOB_ANNOTATIONS = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: true,
+} as const;
+// The research-product routes read a precomputed object and debit no quota —
+// the Worker's own note on GET /vendors/{slug}/customers ("No quota debit: the
+// object is precomputed"), and the free /lei and /vendors routes are unkeyed
+// public reads. Repeating the call is therefore safe as well as read-only.
+const PRODUCT_READ_ONLY_ANNOTATIONS = {
   readOnlyHint: true,
   destructiveHint: false,
   idempotentHint: true,
@@ -301,6 +334,110 @@ export interface JobResponse {
   [k: string]: unknown;
 }
 
+// ---------- Research product (ctscout-worker#336) ----------
+//
+// Field names and types below are taken from ctscout-worker's
+// `src/product-contract.ts`, which is the source of truth: the Worker refuses
+// to serve an object that disagrees with it, so a field named here either
+// arrives as described or the route answers 500.
+
+// Where a research-product answer's date came from. Deliberately NOT the scan
+// tools' vocabulary: `as_of` is the version of the weekly research export, not
+// the daily warehouse sync, and labelling it "scan" would claim a provenance
+// (and a cadence) the answer does not have.
+export type ProductSnapshotSource = "product" | "unavailable";
+
+export interface ProductSnapshotInfo {
+  snapshot: string | null;
+  snapshot_source: ProductSnapshotSource;
+}
+
+// `as_of` / `snapshot_dates` / `product_version` are attached by the Worker
+// from the product manifest (its `withVersion`), so every product answer
+// carries them and the object's own copy is never read.
+interface ProductProvenance {
+  as_of?: string;
+  snapshot_dates?: Record<string, string>;
+  product_version?: string;
+}
+
+// GET /lei/{lei}: LEI_ENTRY_SPEC.
+export interface LeiRecord extends ProductProvenance, Partial<ProductSnapshotInfo> {
+  lei: string;
+  legal_name: string;
+  country: string;
+  isin_count: number;
+  apex_count: number;
+  first_seen: string;
+  last_seen: string;
+  sample_domains: string[];
+  vendors_confirmed: string[];
+  [k: string]: unknown;
+}
+
+// GET /lei?name=<q>. `leis` is capped at the Worker's LEI_NAME_LIMIT while
+// `lei_count` is the pre-cap total, so the two disagree on a truncated answer
+// by design.
+export interface LeiNameMatches extends ProductProvenance, Partial<ProductSnapshotInfo> {
+  query: string;
+  name_match: "exact" | "normalized" | "none";
+  leis: string[];
+  lei_count: number;
+  limit: number;
+  truncated: boolean;
+  [k: string]: unknown;
+}
+
+export type LeiLookupResponse = LeiRecord | LeiNameMatches;
+
+// GET /vendors/{slug}: VENDOR_SPEC. `customers` is the candidate/confirmed
+// split note 2 keeps apart.
+// Proxied, so every field is optional here and in the output schema: the
+// Worker's contract guarantees them, but this package renders a hole rather
+// than failing a call, exactly as it does for a /scan row.
+export interface VendorSummary extends ProductProvenance, Partial<ProductSnapshotInfo> {
+  slug?: string;
+  vendor_name?: string;
+  vendor_apex?: string | null;
+  customers?: SplitCounts;
+  countries_top?: Array<{ country?: string; confirmed?: number }>;
+  co_use?: Array<{ slug?: string; confirmed?: number }>;
+  sample_customers?: string[];
+  [k: string]: unknown;
+}
+
+// The candidate/confirmed split, under its two names: `customers` on the vendor
+// summary, `counts` on the enumeration.
+export interface SplitCounts {
+  candidates?: number;
+  confirmed?: number;
+}
+
+// One row of customers.json. `attributed_to` is GLEIF's legal name when the
+// apex resolves to one LEI, the single non-vendor certificate organization
+// otherwise, and null when neither holds.
+export interface VendorCustomerRow {
+  apex?: string;
+  attributed_to?: string | null;
+  lei?: string | null;
+  [k: string]: unknown;
+}
+
+// GET /vendors/{slug}/customers (keyed): CUSTOMERS_SPEC. `counts` and `capped`
+// are the completeness metadata — `counts.candidates` can exceed
+// `candidates.length` when the research build capped the object.
+export interface VendorCustomers extends ProductProvenance, Partial<ProductSnapshotInfo> {
+  slug?: string;
+  confirmed?: VendorCustomerRow[];
+  candidates?: VendorCustomerRow[];
+  counts?: SplitCounts;
+  capped?: boolean;
+  // Written by this server, never by the API, when rows were dropped to fit
+  // CHARACTER_LIMIT — see trimCustomerRows.
+  truncation_note?: string;
+  [k: string]: unknown;
+}
+
 // ---------- Zod schemas ----------
 
 const SearchCompanyInputSchema = z
@@ -476,6 +613,81 @@ export const GetJobInputSchema = z
   .strict();
 
 type GetJobInput = z.infer<typeof GetJobInputSchema>;
+
+// Exported so tests can drive the exactly-one-of rule without the registered
+// handler. Unlike the deep-dive spec (which accepts either or both), these are
+// two different lookups against two different routes: with both set there is no
+// answer to return, so the refine rejects rather than silently preferring one.
+export const LookupLeiInputSchema = z
+  .object({
+    lei: z
+      .string()
+      .regex(LEI_PATTERN, "lei must be 20 uppercase alphanumerics (ISO 17442)")
+      .optional()
+      .describe(
+        "A single LEI (ISO 17442: 18 uppercase alphanumerics + 2 check digits), " +
+          "e.g. '549300NDMY0KJK0ZLW17'. Give lei or name, not both.",
+      ),
+    name: z
+      .string()
+      .min(1, "name must not be empty")
+      .max(NAME_QUERY_MAX_CHARS, `name must be at most ${NAME_QUERY_MAX_CHARS} characters`)
+      .optional()
+      .describe(
+        "A legal entity name to look up in the name index, e.g. 'Cloudflare, Inc.'. " +
+          "Give lei or name, not both.",
+      ),
+    response_format: z
+      .nativeEnum(ResponseFormat)
+      .default(ResponseFormat.MARKDOWN)
+      .describe(
+        "Output format: 'markdown' for the record or the name-match list, 'json' for " +
+          "the raw API response.",
+      ),
+  })
+  .strict()
+  .refine((input) => (input.lei !== undefined) !== (input.name !== undefined), {
+    message: "Provide exactly one of lei or name",
+  })
+  // A refine is invisible to tools/list: without this, the advertised schema
+  // shows both fields optional and a client planning from it can submit {}.
+  // The anyOf is what discovery sees; the refine is what runs.
+  .meta({ anyOf: [{ required: ["lei"] }, { required: ["name"] }] });
+
+type LookupLeiInput = z.infer<typeof LookupLeiInputSchema>;
+
+export const VendorCustomersInputSchema = z
+  .object({
+    slug: z
+      .string()
+      .regex(
+        VENDOR_SLUG_PATTERN,
+        "slug must be a lowercase single-segment vendor slug (e.g. 'cloudflare')",
+      )
+      .describe(
+        "The vendor's slug, e.g. 'cloudflare'. The slugs in a LEI record's " +
+          "vendors_confirmed are exactly these values.",
+      ),
+    enumerate: z
+      .boolean()
+      .default(false)
+      .describe(
+        "Optional, default false. false returns the free vendor summary (counts, top " +
+          "countries, co-use, a 5-customer sample). true returns the per-customer " +
+          "enumeration from GET /vendors/{slug}/customers, which requires an active " +
+          "ctscout.dev API key (any tier).",
+      ),
+    response_format: z
+      .nativeEnum(ResponseFormat)
+      .default(ResponseFormat.MARKDOWN)
+      .describe(
+        "Output format: 'markdown' for the counts (or the two customer tables), " +
+          "'json' for the raw API response.",
+      ),
+  })
+  .strict();
+
+type VendorCustomersInput = z.infer<typeof VendorCustomersInputSchema>;
 
 // ---------- Output schemas ----------
 //
@@ -746,6 +958,203 @@ const JobOutputSchema = z.looseObject({
   ...SnapshotFields,
 });
 
+// The research-product answers' provenance. Same two field names as
+// SnapshotFields and the same rule (this server writes them; null means
+// unknown, never "current"), but a different vocabulary for the source: a
+// product answer's date is the weekly export's version, not a warehouse sync,
+// so "scan" would misname both the origin and the cadence.
+const ProductSnapshotFields = {
+  snapshot: z
+    .string()
+    .nullable()
+    .describe(
+      "The research product version (YYYY-MM-DD) this answer was read from — the " +
+        "`as_of` of the export the ctscout-research refresh published. null when the " +
+        "API response carried none.",
+    ),
+  snapshot_source: z
+    .enum(["product", "unavailable"])
+    .describe(
+      "'product' = the API response carried the export's as_of; 'unavailable' = it did " +
+        "not, snapshot is null and must be treated as unknown, never as current.",
+    ),
+};
+
+const SnapshotDatesSchema = z
+  .record(z.string(), z.string())
+  .optional()
+  .describe(
+    "Per-source provenance from the product manifest: elf, gleif, isin, psl, wikidata. " +
+      "Values are the dated snapshot each join read (psl is a bundle identifier, not a date).",
+  );
+
+const ProductProvenanceFields = {
+  as_of: z.string().optional().describe("The product version this answer was read from."),
+  snapshot_dates: SnapshotDatesSchema,
+  product_version: z.string().optional().describe("Same value as as_of; the manifest's version."),
+};
+
+// One tool, two lookups: the by-LEI fields and the by-name fields are disjoint
+// and never both present. `name_match` is the discriminator — required on the
+// by-name answer, absent from the record — so everything proxied is optional
+// here and only the two fields this server writes are required.
+const LeiLookupOutputSchema = z.looseObject({
+  lei: z.string().optional().describe("By-LEI answer: the LEI the record is filed under."),
+  legal_name: z.string().optional().describe("By-LEI answer: GLEIF's legal name for the entity."),
+  country: z.string().optional().describe("By-LEI answer: GLEIF's country for the entity."),
+  isin_count: z
+    .number()
+    .optional()
+    .describe("By-LEI answer: ISINs mapped to this LEI in GLEIF's ISIN-to-LEI file."),
+  apex_count: z
+    .number()
+    .optional()
+    .describe("By-LEI answer: apex domains attributed to this LEI in the research build."),
+  first_seen: z
+    .string()
+    .optional()
+    .describe("By-LEI answer: earliest warehouse observation across this LEI's apexes."),
+  last_seen: z
+    .string()
+    .optional()
+    .describe("By-LEI answer: latest warehouse observation across this LEI's apexes."),
+  sample_domains: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "By-LEI answer: a hash-chosen sample (up to 5) of the attributed apexes — not the " +
+        "top 5, and not a complete list. apex_count is the total.",
+    ),
+  vendors_confirmed: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "By-LEI answer: vendor slugs confirmed on this LEI's domains. Pass one to " +
+        "ctscout_vendor_customers.",
+    ),
+  query: z.string().optional().describe("By-name answer: the name as submitted."),
+  name_match: z
+    .string()
+    .optional()
+    .describe(
+      "By-name answer, and the discriminator between the two shapes: 'exact' | " +
+        "'normalized' | 'none'. 'none' means neither spelling tried hit the index, NOT " +
+        "that the entity has no LEI.",
+    ),
+  leis: z
+    .array(z.string())
+    .optional()
+    .describe("By-name answer: matching LEIs, capped at `limit`. lei_count is the total."),
+  lei_count: z.number().optional().describe("By-name answer: matches before the cap."),
+  limit: z.number().optional().describe("By-name answer: the cap applied to `leis`."),
+  truncated: z.boolean().optional().describe("By-name answer: true when lei_count exceeds limit."),
+  ...ProductProvenanceFields,
+  ...ProductSnapshotFields,
+});
+
+// Proxied like every other API-sourced shape in this file: loose, and every
+// field optional. Only what this server writes itself is required, so a
+// publication the Worker's contract would have refused cannot turn a tool call
+// into a schema error on top of whatever else is wrong with it.
+const VendorCustomerRowSchema = z.looseObject({
+  apex: z.string().optional().describe("The customer apex domain."),
+  attributed_to: z
+    .string()
+    .nullable()
+    .optional()
+    .describe(
+      "GLEIF's legal name when the apex resolves to one LEI, the single non-vendor " +
+        "certificate organization otherwise, null when neither holds. Attributed, not owned.",
+    ),
+  lei: z
+    .string()
+    .nullable()
+    .optional()
+    .describe("The customer's LEI when one resolved, else null."),
+});
+
+const SPLIT_COUNTS_DESCRIPTIONS = {
+  candidates: "Apex domains the vendor certified a hostname for.",
+  confirmed: "Of those, the DNS-confirmed ones.",
+};
+
+const splitCounts = () =>
+  z.looseObject({
+    candidates: z.number().optional().describe(SPLIT_COUNTS_DESCRIPTIONS.candidates),
+    confirmed: z.number().optional().describe(SPLIT_COUNTS_DESCRIPTIONS.confirmed),
+  });
+
+// One tool, two views: the free summary (enumerate: false) and the keyed
+// enumeration (enumerate: true). `customers` vs `counts` names the split in
+// each, exactly as the two product objects do.
+const VendorCustomersOutputSchema = z.looseObject({
+  slug: z.string().optional().describe("The vendor slug the answer is filed under."),
+  vendor_name: z.string().optional().describe("Summary view: the vendor's certificate name."),
+  vendor_apex: z
+    .string()
+    .nullable()
+    .optional()
+    .describe("Summary view: the vendor's own apex, null when its brand token matches none."),
+  customers: splitCounts()
+    .optional()
+    .describe(
+      "Summary view: the candidate/confirmed split. Two different claims about the same " +
+        "vendor — confirmed is the DNS-confirmed subset of candidates, so adding them " +
+        "double-counts.",
+    ),
+  countries_top: z
+    .array(z.looseObject({ country: z.string().optional(), confirmed: z.number().optional() }))
+    .optional()
+    .describe("Summary view: top countries by CONFIRMED customers (candidates are not counted)."),
+  co_use: z
+    .array(z.looseObject({ slug: z.string().optional(), confirmed: z.number().optional() }))
+    .optional()
+    .describe(
+      "Summary view: other vendors certifying this vendor's confirmed customers. The count " +
+        "is this vendor's confirmed customers that the other vendor also certifies — a " +
+        "candidate there, not a mutual confirmation.",
+    ),
+  sample_customers: z
+    .array(z.string())
+    .optional()
+    .describe("Summary view: a hash-chosen sample (up to 5) of the CONFIRMED customers."),
+  confirmed: z
+    .array(VendorCustomerRowSchema)
+    .optional()
+    .describe("Enumeration view: the DNS-confirmed customer rows."),
+  candidates: z
+    .array(VendorCustomerRowSchema)
+    .optional()
+    .describe(
+      "Enumeration view: the candidate customer rows. counts.confirmed is a subset of " +
+        "counts.candidates, but when `capped` is true the LISTED candidates are a " +
+        "hash-chosen subset that may omit rows the confirmed list carries.",
+    ),
+  counts: splitCounts()
+    .optional()
+    .describe(
+      "Enumeration view: the completeness metadata — the rows the research build holds. " +
+        "counts.candidates can exceed candidates.length; see `capped`.",
+    ),
+  capped: z
+    .boolean()
+    .optional()
+    .describe(
+      "Enumeration view: true when the research build kept a subset of the candidates. " +
+        "Says nothing about this server's own truncation — see truncation_note.",
+    ),
+  truncation_note: z
+    .string()
+    .optional()
+    .describe(
+      "Written by this MCP server, never by the API: present only when rows were dropped " +
+        "from the lists above to stay under the response character limit. `counts` and " +
+        "`capped` still describe the API's answer, not this list.",
+    ),
+  ...ProductProvenanceFields,
+  ...ProductSnapshotFields,
+});
+
 // ---------- Shared utilities ----------
 
 export function getApiKey(): string {
@@ -887,6 +1296,29 @@ export async function callGetJob(jobId: string): Promise<JobResponse> {
   return callApi<JobResponse>(`${JOBS_URL}/${encodeURIComponent(jobId)}`, "GET");
 }
 
+// The four research-product reads (ctscout-worker#336). All four answer 503
+// until the weekly refresh has published a manifest, and 404 for a key absent
+// from the published version. The LEI, the name and the slug are all
+// caller-controlled and go into a URL, so each is escaped at the one place it
+// is interpolated (the input schemas already reject the shapes that could
+// matter; this is the belt-and-suspenders half).
+export async function callLeiRecord(lei: string): Promise<LeiRecord> {
+  return callApi<LeiRecord>(`${LEI_URL}/${encodeURIComponent(lei)}`, "GET");
+}
+
+export async function callLeiByName(name: string): Promise<LeiNameMatches> {
+  const query = new URLSearchParams({ name });
+  return callApi<LeiNameMatches>(`${LEI_URL}?${query.toString()}`, "GET");
+}
+
+export async function callVendorSummary(slug: string): Promise<VendorSummary> {
+  return callApi<VendorSummary>(`${VENDORS_URL}/${encodeURIComponent(slug)}`, "GET");
+}
+
+export async function callVendorCustomers(slug: string): Promise<VendorCustomers> {
+  return callApi<VendorCustomers>(`${VENDORS_URL}/${encodeURIComponent(slug)}/customers`, "GET");
+}
+
 // Attach the snapshot date to a /scan or /scan/batch payload. Only a
 // `snapshot` string on the payload itself counts (the worker does not emit one
 // today; when it does, that is the authoritative per-answer date). No separate
@@ -894,6 +1326,17 @@ export async function callGetJob(jobId: string): Promise<JobResponse> {
 export function resolveSnapshot(payload: { snapshot?: unknown }): SnapshotInfo {
   if (typeof payload.snapshot === "string" && payload.snapshot.length > 0) {
     return { snapshot: payload.snapshot, snapshot_source: "scan" };
+  }
+  return { snapshot: null, snapshot_source: "unavailable" };
+}
+
+// The same rule for a research-product answer, reading the manifest's `as_of`
+// (which the Worker attaches to every product response) rather than a
+// warehouse sync date. No client-side fallback, for the same reason: a
+// separately fetched version is not tied to the object that was read.
+export function resolveProductSnapshot(payload: { as_of?: unknown }): ProductSnapshotInfo {
+  if (typeof payload.as_of === "string" && payload.as_of.length > 0) {
+    return { snapshot: payload.as_of, snapshot_source: "product" };
   }
   return { snapshot: null, snapshot_source: "unavailable" };
 }
@@ -941,24 +1384,79 @@ function boundedField<T extends string | null | undefined>(value: T): T {
 // it verbatim (bounded and escaped like any error body) so the reader sees the
 // API's own upgrade text rather than a copy typed here that can drift.
 function upgradeHintFrom(body: string): string | undefined {
+  return jsonStringField(body, "upgrade_hint");
+}
+
+// The research-product routes report every refusal as {"detail": "..."}.
+// Surfacing the API's own sentence (bounded and escaped like any error body)
+// keeps the explanation from drifting away from what the Worker actually said.
+function detailFrom(body: string): string | undefined {
+  return jsonStringField(body, "detail");
+}
+
+function jsonStringField(body: string, field: string): string | undefined {
   try {
     const parsed: unknown = JSON.parse(body);
-    if (parsed && typeof parsed === "object" && "upgrade_hint" in parsed) {
-      const hint = (parsed as { upgrade_hint: unknown }).upgrade_hint;
-      if (typeof hint === "string" && hint.trim().length > 0) return hint;
+    if (parsed && typeof parsed === "object" && field in parsed) {
+      const value = (parsed as Record<string, unknown>)[field];
+      if (typeof value === "string" && value.trim().length > 0) return value;
     }
   } catch {
-    // not JSON — no hint to surface
+    // not JSON — nothing to surface
   }
   return undefined;
+}
+
+// The API's own sentence, on one line, bounded and markdown-escaped, or a
+// bounded excerpt of the raw body when it is not the documented JSON shape.
+function safeDetail(err: ApiError): string {
+  const detail = detailFrom(err.responseBody);
+  return escapeMarkdown(truncateBody((detail ?? err.responseBody).replace(/[\r\n]+/g, " ")));
 }
 
 // Which endpoint family produced an ApiError. 403/404/429 mean different
 // things on /jobs than on /scan (Pro gate, job ownership, jobs quota), so the
 // job tools pass "jobs"; everything else shares the scan mapping.
-export type ErrorSurface = "scan" | "jobs";
+// "product" covers the free /lei and /vendors reads; "vendor_enumeration" is
+// the keyed GET /vendors/{slug}/customers. They differ only on 401/403: only
+// the enumeration has a keyless alternative to point at, and only that tool has
+// an `enumerate` parameter to name.
+export type ErrorSurface = "scan" | "jobs" | "product" | "vendor_enumeration";
 
 export function explainError(err: unknown, surface: ErrorSurface = "scan"): string {
+  const isProduct = surface === "product" || surface === "vendor_enumeration";
+  if (err instanceof ApiError && isProduct) {
+    switch (err.status) {
+      case 400:
+        return `Bad request: ${safeDetail(err)}. Check the lei, name or slug you passed.`;
+      case 401:
+      case 403:
+        return surface === "vendor_enumeration"
+          ? "Enumerating a vendor's customers needs an active ctscout.dev API key (any tier), " +
+              "and the key in CTSCOUT_API_KEY was missing, invalid or revoked. Get a free key " +
+              "at https://ctscout.dev and set it via your MCP client config. The vendor summary " +
+              "(counts, top countries, co-use, sample) does not need the enumeration: call this " +
+              "tool with enumerate: false."
+          : "Invalid or missing CTSCOUT_API_KEY. Get a free key at https://ctscout.dev and set " +
+              "it via your MCP client config.";
+      case 404:
+        return (
+          "Not found in the current research product: no entry is published under that key. " +
+          "The product covers LEIs with at least one attributed apex, and vendors the " +
+          "research build confirmed; absence here is not evidence that the entity or vendor " +
+          "does not exist."
+        );
+      case 503:
+        return (
+          `The research product is not published yet: ${safeDetail(err)}. These LEI and ` +
+          "vendor answers come from the weekly ctscout-research refresh; until its first " +
+          "publish lands, /lei and /vendors answer 503. Nothing is wrong with the query — " +
+          "retry after the next refresh."
+        );
+      default:
+        break;
+    }
+  }
   if (err instanceof ApiError && surface === "jobs") {
     switch (err.status) {
       case 403: {
@@ -2246,6 +2744,506 @@ export function truncateReceiptJsonIfNeeded(receipt: JobSubmitResponse): {
   }));
 }
 
+// ---------- Research-product rendering (ctscout-worker#336) ----------
+
+// Note 2's definition of a confirmed vendor, quoted verbatim in both tool
+// descriptions and in the rendered output (ctscout-mcp#103): an agent quoting
+// the tool then quotes the method rather than a paraphrase of it.
+const VENDOR_CONFIRMED_DEFINITION =
+  "a vendor is confirmed when a hostname it certified resolves onto a domain it " +
+  "certifies and the customer's own www does not";
+// The manifest publishes five source snapshots; the cap bounds the line if the
+// research build ever adds more (or an origin sends something unexpected).
+const PRODUCT_SOURCE_LIMIT = 10;
+
+// The provenance line every product answer opens with: the export version the
+// answer was read from, then the dated snapshot each underlying join used. The
+// per-source map is rendered rather than only carried in structuredContent —
+// `as_of` alone does not say which GLEIF file a legal name came from, and a
+// reader of the markdown must get the same facts as a reader of the JSON.
+function productSnapshotLine(
+  info: Partial<ProductSnapshotInfo>,
+  dates: Record<string, string> | undefined,
+): string {
+  const head =
+    info.snapshot_source === "product"
+      ? `_Research product: ${cellSafe(info.snapshot, 40)} (the published export's as_of)._`
+      : "_Research product: version unknown — the API did not report one._";
+  // An array would enumerate as index keys ("0 2026-08-01"), which reads as a
+  // source named "0"; the manifest's map is the only shape this line can state.
+  if (dates == null || typeof dates !== "object" || Array.isArray(dates)) return head;
+  const entries = Object.entries(dates);
+  const sources = entries
+    .slice(0, PRODUCT_SOURCE_LIMIT)
+    .map(([name, value]) => `${cellSafe(name, 40)} ${cellSafe(value, 80)}`);
+  if (sources.length === 0) return head;
+  // A provenance line short of its sources reads as complete provenance, which
+  // is worse than a long line: say what was left out.
+  const rest =
+    entries.length > sources.length ? `, +${entries.length - sources.length} more not shown` : "";
+  return `${head}\n_Source snapshots: ${sources.join(", ")}${rest}._`;
+}
+
+function isCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+// Proxied numbers are rendered only when they are numbers: a missing count
+// shows as an em dash rather than "undefined" or a silent zero.
+function numberCell(value: unknown): string {
+  return isCount(value) ? String(value) : "—";
+}
+
+function backtickList(values: unknown, empty: string, max = ROW_LIST_LIMIT): string {
+  if (!Array.isArray(values) || values.length === 0) return empty;
+  const shown = values.slice(0, max).map((value) => `\`${cellSafe(String(value), 120)}\``);
+  const rest = values.length > shown.length ? `, +${values.length - shown.length} more` : "";
+  return `${shown.join(", ")}${rest}`;
+}
+
+// Every rendered list is cut at ROW_LIST_LIMIT, and a cut one must say so. The
+// product contract deliberately refuses to pin the exporter's sample sizes and
+// top-N lengths ("The contract refuses wrong answers, not resized ones"), so a
+// list that grows past the cap has to show as a short list plus this marker
+// rather than as a complete-looking one.
+function moreLine(total: number, shown: number, kind: string): string[] {
+  return total > shown ? ["", `_+${total - shown} more ${kind} not shown._`] : [];
+}
+
+export function formatLeiRecordAsMarkdown(record: LeiRecord): string {
+  const sampled = Array.isArray(record.sample_domains) ? record.sample_domains.length : 0;
+  return clampText(
+    [
+      `# ${cellSafe(record.legal_name, 200)}`,
+      "",
+      productSnapshotLine(record, record.snapshot_dates),
+      "",
+      "| Field | Value |",
+      "| --- | --- |",
+      `| LEI | \`${cellSafe(record.lei, 40)}\` |`,
+      `| Legal name (GLEIF) | ${cellSafe(record.legal_name, 120)} |`,
+      `| Country (GLEIF) | ${cellSafe(record.country, 40)} |`,
+      `| ISINs mapped to this LEI | ${numberCell(record.isin_count)} |`,
+      `| Apex domains attributed | ${numberCell(record.apex_count)} |`,
+      `| First seen | ${cellSafe(record.first_seen, 40)} |`,
+      `| Last seen | ${cellSafe(record.last_seen, 40)} |`,
+      "",
+      `**Confirmed vendors on this entity's domains:** ${backtickList(
+        record.vendors_confirmed,
+        "_none confirmed_",
+      )}`,
+      `_These are vendor slugs — pass one to ctscout_vendor_customers. ${VENDOR_CONFIRMED_DEFINITION}._`,
+      "",
+      `**Sample of the attributed apexes** — ${sampled} shown, ${numberCell(
+        record.apex_count,
+      )} attributed in total: ${backtickList(record.sample_domains, "_none_")}`,
+      "_The sample is hash-chosen, not the top N and not a complete list; apex_count is the total._",
+      "",
+      '_"Attributed" means the certificate and DNS evidence names this entity for the domain.' +
+        " It is not an ownership claim._",
+    ].join("\n"),
+  );
+}
+
+// `name_match: "none"` is the one answer an agent will misread. The Worker's
+// own comment on handleLeiByName says what it means: the index is keyed by the
+// research normalizer's form of the GLEIF legal name, and the two spellings the
+// route tries are not that normalizer. Rendering it as "no LEI" would turn a
+// lookup miss into a claim about the entity.
+function nameMatchExplanation(match: unknown): string {
+  switch (match) {
+    case "exact":
+      return "the lowercased, trimmed query is a key in the name index verbatim.";
+    case "normalized":
+      return "the query matched after the API's locale-suffix normalization.";
+    case "none":
+      return (
+        "neither spelling tried hit the index. This does NOT mean this company has no LEI: " +
+        "the index is keyed by the research normalizer's form of the GLEIF legal name, and " +
+        "the two spellings tried here (the lowercased query and its locale-suffix " +
+        "normalization) are not the index's normalizer. Try the exact GLEIF legal name, or " +
+        "look the entity up by LEI."
+      );
+    default:
+      return "the API reported a match type this server does not model.";
+  }
+}
+
+export function formatLeiNameMatchesAsMarkdown(data: LeiNameMatches): string {
+  const leis = Array.isArray(data.leis) ? data.leis : [];
+  const total = typeof data.lei_count === "number" ? data.lei_count : leis.length;
+  const header = [
+    `# LEI lookup by name: "${cellSafe(data.query, 200)}"`,
+    "",
+    productSnapshotLine(data, data.snapshot_dates),
+    "",
+    `**Name match: ${cellSafe(data.name_match, 40)}** — ${nameMatchExplanation(data.name_match)}`,
+    "",
+  ];
+  if (leis.length === 0) {
+    return clampText([...header, "No LEIs returned for this query."].join("\n"));
+  }
+  const countLine =
+    data.truncated === true
+      ? `${total} LEIs carry this name; the endpoint returns the first ${numberCell(data.limit)}.`
+      : `${leis.length} LEI${leis.length === 1 ? "" : "s"} carry this name.`;
+  // The endpoint's own cap (`truncated` / `limit`) and this renderer's cap are
+  // two different cuts: `truncated` says nothing about the second, so a list
+  // longer than ROW_LIST_LIMIT needs its own marker.
+  const shown = leis.slice(0, ROW_LIST_LIMIT);
+  return clampText(
+    [
+      ...header,
+      countLine,
+      "",
+      ...shown.map((lei) => `- \`${cellSafe(lei, 40)}\``),
+      ...moreLine(leis.length, shown.length, "of the LEIs the endpoint returned are"),
+      "",
+      "_Look one up with ctscout_lookup_lei { lei } for the legal name, country and " +
+        "attributed apexes._",
+    ].join("\n"),
+  );
+}
+
+// The candidate/confirmed split, rendered as two labelled rows rather than one
+// number. They are different claims about the same vendor and confirmed is the
+// DNS-confirmed subset of candidates, so a sum would double-count.
+function customerSplitTable(candidates: unknown, confirmed: unknown): string[] {
+  return [
+    "## Customer domains — two claims, kept apart",
+    "",
+    "| Claim | Count | What it means |",
+    "| --- | --- | --- |",
+    `| Candidates | ${numberCell(candidates)} | apex domains this vendor certified a hostname for. ` +
+      "Fan-out alone is not a vendor relationship — an organization certifying hundreds of its " +
+      "own product sites looks the same. |",
+    `| Confirmed | ${numberCell(confirmed)} | of those candidates, the ones DNS confirmed: ` +
+      `${VENDOR_CONFIRMED_DEFINITION} (or another organization certifies the apex). |`,
+    "",
+    "_Confirmed is the DNS-confirmed subset of candidates. Read them as two claims; never add them._",
+  ];
+}
+
+export function formatVendorSummaryAsMarkdown(data: VendorSummary): string {
+  const countries = Array.isArray(data.countries_top) ? data.countries_top : [];
+  const coUse = Array.isArray(data.co_use) ? data.co_use : [];
+  const sample = Array.isArray(data.sample_customers) ? data.sample_customers : [];
+  const lines = [
+    `# Vendor: ${cellSafe(data.vendor_name, 200)} (\`${cellSafe(data.slug, 80)}\`)`,
+    "",
+    productSnapshotLine(data, data.snapshot_dates),
+    "",
+    `**Vendor apex:** ${
+      typeof data.vendor_apex === "string"
+        ? `\`${cellSafe(data.vendor_apex, 120)}\``
+        : "_none — the vendor's brand token matches no registrable label it certifies._"
+    }`,
+    "",
+    ...customerSplitTable(data.customers?.candidates, data.customers?.confirmed),
+    "",
+  ];
+  if (countries.length > 0) {
+    lines.push(
+      "## Top countries, by confirmed customers",
+      "",
+      "| Country | Confirmed |",
+      "| --- | --- |",
+      ...countries
+        .slice(0, ROW_LIST_LIMIT)
+        .map((row) => `| ${cellSafe(row?.country, 40)} | ${numberCell(row?.confirmed)} |`),
+      ...moreLine(countries.length, Math.min(countries.length, ROW_LIST_LIMIT), "countries are"),
+      "",
+      "_Candidates are not counted here, and only customers that resolved to an LEI carry a country._",
+      "",
+    );
+  }
+  if (coUse.length > 0) {
+    lines.push(
+      "## Vendors also certifying these customers",
+      "",
+      "| Vendor | Customers |",
+      "| --- | --- |",
+      ...coUse
+        .slice(0, ROW_LIST_LIMIT)
+        .map((row) => `| \`${cellSafe(row?.slug, 80)}\` | ${numberCell(row?.confirmed)} |`),
+      ...moreLine(coUse.length, Math.min(coUse.length, ROW_LIST_LIMIT), "vendors are"),
+      "",
+      "_The count is this vendor's CONFIRMED customers that the other vendor also certifies — " +
+        "a candidate there, not a mutual confirmation._",
+      "",
+    );
+  }
+  // Two independent facts, not "N of M": the sample size and the confirmed
+  // total come from different exporter constants, so phrasing them as a
+  // fraction would read as nonsense ("30 of 5") the moment the sample grows.
+  lines.push(
+    `**Sample of confirmed customers** — ${sample.length} shown, ${numberCell(
+      data.customers?.confirmed,
+    )} confirmed in total: ${backtickList(sample, "_none_")}`,
+    "_Hash-chosen from the confirmed customers, not the top N. Call this tool with " +
+      "enumerate: true for the full enumeration (needs an API key)._",
+  );
+  return clampText(lines.join("\n"));
+}
+
+function customerRowsTable(rows: VendorCustomerRow[]): string[] {
+  return [
+    "| Apex | Attributed to | LEI |",
+    "| --- | --- | --- |",
+    ...rows.map(
+      (row) =>
+        `| \`${cellSafe(row?.apex, 120)}\` | ${cellSafe(row?.attributed_to, 120)} | ${
+          typeof row?.lei === "string" ? `\`${cellSafe(row.lei, 40)}\`` : "—"
+        } |`,
+    ),
+  ];
+}
+
+function renderVendorCustomers(data: VendorCustomers): string {
+  const confirmed = rowsOf(data.confirmed);
+  const candidates = rowsOf(data.candidates);
+  const lines = [
+    `# Vendor customers: \`${cellSafe(data.slug, 80)}\``,
+    "",
+    productSnapshotLine(data, data.snapshot_dates),
+    "",
+    "_Confirmed and candidates are two different claims and are listed separately below. " +
+      `Confirmed is the DNS-confirmed subset of candidates (${VENDOR_CONFIRMED_DEFINITION}); ` +
+      "adding the two lists double-counts. Every name is what the evidence attributes the " +
+      "domain to, not an ownership claim._",
+    "",
+    `## Confirmed — ${confirmed.length} listed of ${numberCell(data.counts?.confirmed)}`,
+    "",
+  ];
+  lines.push(...(confirmed.length > 0 ? customerRowsTable(confirmed) : ["_No rows listed._"]));
+  lines.push(
+    "",
+    `## Candidates — ${candidates.length} listed of ${numberCell(data.counts?.candidates)}`,
+    "",
+  );
+  lines.push(...(candidates.length > 0 ? customerRowsTable(candidates) : ["_No rows listed._"]));
+  if (data.capped === true) {
+    lines.push(
+      "",
+      "_The research build itself kept a subset of this vendor's candidates (`capped`): " +
+        "counts.candidates is the complete total, the list is not._",
+    );
+  }
+  if (typeof data.truncation_note === "string") {
+    lines.push("", `> ${cellSafe(data.truncation_note, 400)}`);
+  }
+  return lines.join("\n");
+}
+
+function rowsOf(rows: unknown): VendorCustomerRow[] {
+  return Array.isArray(rows) ? (rows as VendorCustomerRow[]) : [];
+}
+
+// What this server dropped, kept separate from what the API said. `counts` and
+// `capped` describe the object the research build published; overwriting them
+// to match a trimmed list would put a complete-looking enumeration in front of
+// a caller (the "well-formed and lying" case the product contract calls out).
+function customersWithNote(current: VendorCustomers, original: VendorCustomers): VendorCustomers {
+  return {
+    ...current,
+    truncation_note:
+      `This MCP response lists ${rowsOf(current.confirmed).length} of ${
+        rowsOf(original.confirmed).length
+      } confirmed and ${rowsOf(current.candidates).length} of ${
+        rowsOf(original.candidates).length
+      } candidate rows the API returned: rows were dropped to stay under ${CHARACTER_LIMIT} ` +
+      "chars. counts and capped describe the API's answer, not this list.",
+  };
+}
+
+// Halve the listed rows until the rendered text fits, candidates first: they
+// are the weaker claim and the longer list. Parameterizing the renderer keeps
+// the Markdown and JSON bounds identical, as truncateWithRender does for /scan.
+function trimCustomerRows(
+  original: VendorCustomers,
+  render: (data: VendorCustomers) => string,
+  limit: number = CHARACTER_LIMIT,
+): { text: string; structured: VendorCustomers } {
+  let structured = original;
+  let text = render(structured);
+  while (
+    text.length > limit &&
+    (rowsOf(structured.candidates).length > 0 || rowsOf(structured.confirmed).length > 0)
+  ) {
+    const candidates = rowsOf(structured.candidates);
+    const confirmed = rowsOf(structured.confirmed);
+    const halved =
+      candidates.length > 0
+        ? { ...structured, candidates: candidates.slice(0, Math.floor(candidates.length / 2)) }
+        : { ...structured, confirmed: confirmed.slice(0, Math.floor(confirmed.length / 2)) };
+    structured = customersWithNote(halved, original);
+    text = render(structured);
+  }
+  return { text, structured };
+}
+
+// The ONE bounder for a customer enumeration, used by both response formats.
+//
+// Trimming the markdown and the JSON independently produces two answers to the
+// same call: a JSON row costs more characters than a rendered table row, so
+// there is a window (measured: ~170-210 candidate rows) where the markdown fits
+// whole while the JSON does not. The reader then holds a `content` listing every
+// row with no truncation note beside a `structuredContent` carrying half of them
+// under a note reading "This MCP response lists 93 of 187" — false about the
+// response it is attached to, and the README's own invariant broken in both
+// directions at once.
+//
+// So one record is trimmed against the LONGER of the two renderings and both
+// views render it. They agree by construction: the same rows, the same
+// "N listed of M" headings, and one truncation_note that is true of whichever
+// half the reader looks at.
+export function boundVendorCustomers(data: VendorCustomers): {
+  text: string;
+  json: string;
+  structured: VendorCustomers;
+} {
+  const { structured: trimmed } = trimCustomerRows(data, (value) => {
+    const json = JSON.stringify(value);
+    const markdown = renderVendorCustomers(value);
+    return json.length >= markdown.length ? json : markdown;
+  });
+  // Pretty-print when the trimmed record still fits it, else compact, else the
+  // minimal envelope — and render the markdown from whatever survived that, so
+  // a collapse to the envelope collapses both views together.
+  // The envelope's note counts against what the API returned, not against the
+  // already-trimmed record, so it is built from `data`.
+  const serialized = serializeBoundedJson(trimmed, () => minimalVendorCustomersEnvelope(data));
+  return {
+    text: clampText(renderVendorCustomers(serialized.structured)),
+    json: serialized.text,
+    structured: serialized.structured,
+  };
+}
+
+// A minimal product envelope's size has to be a constant whatever the API put
+// in the record — the rule minimalJobEnvelope follows — and serializeBoundedJson
+// does not re-measure what `minimal()` returns. `boundedField` alone is not
+// enough: it caps a string and passes anything else through untouched. So every
+// position below is kept only when it already has the type the envelope can
+// bound, and dropped otherwise. Dropped, never coerced: `String(undefined)`
+// would put the literal "undefined" in a table cell, which is worse than the
+// em dash a hole renders as.
+function keptStrings(
+  source: Record<string, unknown>,
+  fields: readonly string[],
+): Record<string, string> {
+  const keep: Record<string, string> = {};
+  for (const field of fields) {
+    const value = source[field];
+    if (typeof value === "string") keep[field] = boundedField(value);
+  }
+  return keep;
+}
+
+function boundedStrings(values: unknown): string[] {
+  if (!Array.isArray(values)) return [];
+  return values
+    .filter((value): value is string => typeof value === "string")
+    .slice(0, ROW_LIST_LIMIT)
+    .map((value) => boundedField(value));
+}
+
+function boundedSplitCounts(split: unknown): SplitCounts {
+  const source = (split ?? {}) as Record<string, unknown>;
+  return {
+    ...(isCount(source.candidates) && { candidates: source.candidates }),
+    ...(isCount(source.confirmed) && { confirmed: source.confirmed }),
+  };
+}
+
+// The two fields this server writes itself. They move together or not at all:
+// a date beside `snapshot_source: "unavailable"` would be a value next to the
+// claim that no value was available, which is the class of contradiction these
+// tools exist to avoid. resolveProductSnapshot already sets them as a pair, but
+// the envelope enforces it rather than resting on its caller.
+function keptProductSnapshot(data: Partial<ProductSnapshotInfo>): ProductSnapshotInfo {
+  return typeof data.snapshot === "string" && data.snapshot_source === "product"
+    ? { snapshot: boundedField(data.snapshot), snapshot_source: "product" }
+    : { snapshot: null, snapshot_source: "unavailable" };
+}
+
+const LEI_ENVELOPE_STRINGS = [
+  "lei",
+  "legal_name",
+  "country",
+  "first_seen",
+  "last_seen",
+  "query",
+  "name_match",
+  "as_of",
+  "product_version",
+];
+const LEI_ENVELOPE_NUMBERS = ["isin_count", "apex_count", "lei_count", "limit"];
+const LEI_ENVELOPE_LISTS = ["sample_domains", "vendors_confirmed", "leis"];
+
+function minimalLeiEnvelope(data: LeiLookupResponse): LeiLookupResponse {
+  const keep: Record<string, unknown> = {
+    ...keptProductSnapshot(data),
+    ...keptStrings(data, LEI_ENVELOPE_STRINGS),
+  };
+  for (const field of LEI_ENVELOPE_NUMBERS) {
+    if (typeof data[field] === "number") keep[field] = data[field];
+  }
+  if (typeof data.truncated === "boolean") keep.truncated = data.truncated;
+  for (const field of LEI_ENVELOPE_LISTS) {
+    if (Array.isArray(data[field])) keep[field] = boundedStrings(data[field]);
+  }
+  return keep as unknown as LeiLookupResponse;
+}
+
+export function truncateLeiJsonIfNeeded(data: LeiLookupResponse): {
+  text: string;
+  structured: LeiLookupResponse;
+} {
+  return serializeBoundedJson(data, () => minimalLeiEnvelope(data));
+}
+
+const VENDOR_ENVELOPE_STRINGS = ["slug", "vendor_name", "as_of", "product_version"] as const;
+
+function minimalVendorSummaryEnvelope(data: VendorSummary): VendorSummary {
+  const counted = (rows: unknown, key: "country" | "slug") =>
+    (Array.isArray(rows) ? rows : []).slice(0, ROW_LIST_LIMIT).map((row) => {
+      const source = (row ?? {}) as Record<string, unknown>;
+      return {
+        ...keptStrings(source, [key]),
+        ...(isCount(source.confirmed) && { confirmed: source.confirmed }),
+      };
+    });
+  return {
+    ...keptStrings(data, VENDOR_ENVELOPE_STRINGS),
+    vendor_apex: typeof data.vendor_apex === "string" ? boundedField(data.vendor_apex) : null,
+    customers: boundedSplitCounts(data.customers),
+    countries_top: counted(data.countries_top, "country"),
+    co_use: counted(data.co_use, "slug"),
+    sample_customers: boundedStrings(data.sample_customers),
+    ...keptProductSnapshot(data),
+  };
+}
+
+export function truncateVendorSummaryJsonIfNeeded(data: VendorSummary): {
+  text: string;
+  structured: VendorSummary;
+} {
+  return serializeBoundedJson(data, () => minimalVendorSummaryEnvelope(data));
+}
+
+function minimalVendorCustomersEnvelope(data: VendorCustomers): VendorCustomers {
+  const emptied: VendorCustomers = {
+    ...keptStrings(data, VENDOR_ENVELOPE_STRINGS),
+    confirmed: [],
+    candidates: [],
+    counts: boundedSplitCounts(data.counts),
+    capped: data.capped === true,
+    ...keptProductSnapshot(data),
+  };
+  return customersWithNote(emptied, data);
+}
+
 // ---------- Server + tools ----------
 
 /**
@@ -2636,6 +3634,218 @@ Examples:
       } catch (err) {
         return {
           content: [{ type: "text", text: explainError(err, "jobs") }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    "ctscout_lookup_lei",
+    {
+      title: "Look up one LEI's record, or the LEIs published under a legal name",
+      description: `Read the ctscout research product's entity index: one LEI's record (GET /lei/{lei}), or the LEIs filed under a legal name (GET /lei?name=). Free, and it debits no quota — every answer is a precomputed object published by the ctscout-research refresh, not a live query.
+
+Args (exactly one of lei / name; passing both is rejected before any network call):
+  - lei (string, optional): an ISO 17442 LEI — 18 uppercase alphanumerics plus 2 check digits, e.g. '549300NDMY0KJK0ZLW17'.
+  - name (string, optional): a legal entity name, 1–${NAME_QUERY_MAX_CHARS} chars, e.g. 'Cloudflare, Inc.'.
+  - response_format ('markdown' | 'json', default 'markdown'): output format.
+
+Returns (on success, structuredContent follows the declared outputSchema; a failed call — 400, 404, 503, timeout — is isError with no structuredContent, so never dereference snapshot on it). One tool, two answer shapes; \`name_match\` is the discriminator, present only on the by-name answer:
+  - By LEI:
+    {
+      "lei": string, "legal_name": string,   // GLEIF's legal name
+      "country": string,                     // GLEIF's country
+      "isin_count": number,                  // ISINs mapped to this LEI in GLEIF's ISIN-to-LEI file
+      "apex_count": number,                  // apex domains attributed to this LEI
+      "first_seen": string, "last_seen": string,   // warehouse observation window over those apexes
+      "sample_domains": [string],            // hash-chosen sample (up to 5) — NOT the top 5, not a complete list
+      "vendors_confirmed": [string]          // vendor SLUGS: pass one to ctscout_vendor_customers
+    }
+  - By name:
+    {
+      "query": string,
+      "name_match": "exact" | "normalized" | "none",
+      "leis": [string],                      // capped at "limit" (${LEI_NAME_LIMIT})
+      "lei_count": number,                   // matches BEFORE the cap — can exceed leis.length
+      "limit": number, "truncated": boolean
+    }
+  - Both also carry "as_of" / "product_version" (the export version), "snapshot_dates" (the dated GLEIF / ISIN / ELF / Wikidata snapshot and the PSL bundle each join read), and this server's "snapshot" / "snapshot_source" ("product" when the API reported the version, "unavailable" when it did not — then snapshot is null and freshness is unknown, never "current").
+
+What name_match: "none" means (important):
+  - It does NOT mean this company has no LEI. The name index is keyed by the research normalizer's form of the GLEIF legal name; the two spellings the route tries (the lowercased, trimmed query and its locale-suffix normalization) are not the index's normalizer, so a real entity can miss on a spelling.
+  - Retry with the exact GLEIF legal name, or look the entity up by LEI. Do not report a "none" as an absent LEI.
+
+Vocabulary: a domain is ATTRIBUTED to an entity — that is what the certificate and DNS evidence names, not an ownership claim. A vendor in vendors_confirmed is CONFIRMED, which has a specific meaning: ${VENDOR_CONFIRMED_DEFINITION}.
+
+Examples:
+  - Use when: "What does ctscout know about LEI 549300NDMY0KJK0ZLW17?" -> { lei: "549300NDMY0KJK0ZLW17" }
+  - Use when: "Which LEIs are filed under 'Cloudflare, Inc.'?" -> { name: "Cloudflare, Inc." }
+  - Don't use when: you want the domains attributed to a company by cert subject — that is ctscout_search_company against the warehouse, a different index with different coverage.
+
+Coverage & freshness:
+  - The product covers LEIs with at least one attributed apex in the research build, so a 404 means "not in this published version", not "no such LEI". An entity has an LEI at all only where a regulator or a counterparty required one, so an absent LEI is not an absent entity either.
+  - The export is republished by the ctscout-research refresh, so these answers move on that cadence — slower than the /scan warehouse, which syncs daily. Read "snapshot" for the version actually answered from.
+  - Before the first publish the route answers HTTP 503 and this tool returns a plain "not published yet" error. That is expected, not a fault in the query.`,
+      inputSchema: LookupLeiInputSchema,
+      outputSchema: LeiLookupOutputSchema,
+      annotations: PRODUCT_READ_ONLY_ANNOTATIONS,
+    },
+    async (params: LookupLeiInput) => {
+      try {
+        // Branch on the query form, never on the payload: the caller asked one
+        // of two questions and the answer shapes must not be sniffed apart.
+        // The markdown renders the record the API sent, not the (possibly
+        // collapsed) envelope structuredContent carries. Safe here in a way it
+        // is NOT for the customer enumeration: an LEI record and a vendor
+        // summary are bounded by construction (every cell capped, every list
+        // cut at ROW_LIST_LIMIT with a marker, clampText last), and the minimal
+        // envelope cuts those same lists to the same 20 while dropping only
+        // forward-compatible fields the markdown never renders — so the two
+        // views cannot disagree about anything either of them shows. Rendering
+        // the envelope instead would make an already-capped list report
+        // "+N more" as none. The enumeration is the opposite case: its payload
+        // IS the rows, so there both views render one reconciled record
+        // (boundVendorCustomers).
+        if (params.lei !== undefined) {
+          const raw = await callLeiRecord(params.lei);
+          const data: LeiRecord = { ...raw, ...resolveProductSnapshot(raw) };
+          const { text: json, structured } = truncateLeiJsonIfNeeded(data);
+          return {
+            content: [
+              {
+                type: "text",
+                text:
+                  params.response_format === ResponseFormat.JSON
+                    ? json
+                    : formatLeiRecordAsMarkdown(data),
+              },
+            ],
+            structuredContent: structured as unknown as Record<string, unknown>,
+          };
+        }
+        const raw = await callLeiByName(params.name as string);
+        const data: LeiNameMatches = { ...raw, ...resolveProductSnapshot(raw) };
+        const { text: json, structured } = truncateLeiJsonIfNeeded(data);
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                params.response_format === ResponseFormat.JSON
+                  ? json
+                  : formatLeiNameMatchesAsMarkdown(data),
+            },
+          ],
+          structuredContent: structured as unknown as Record<string, unknown>,
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: explainError(err, "product") }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    "ctscout_vendor_customers",
+    {
+      title: "A vendor's customer counts, and — with a key — the customer enumeration",
+      description: `Read the ctscout research product's vendor objects: the free summary for a vendor slug (GET /vendors/{slug}), or the per-customer enumeration (GET /vendors/{slug}/customers, which needs an API key). Debits no quota either way — both are precomputed objects published by the ctscout-research refresh.
+
+Args:
+  - slug (string, required): the vendor slug, one lowercase segment, e.g. 'cloudflare'. The values in a LEI record's vendors_confirmed are exactly these slugs.
+  - enumerate (boolean, optional, default false): false = the free summary; true = the per-customer enumeration, which requires an active ctscout.dev API key (any tier) in CTSCOUT_API_KEY. A missing, invalid or revoked key gets HTTP 401 and this tool explains that the summary is still available with enumerate: false.
+  - response_format ('markdown' | 'json', default 'markdown'): output format.
+
+Candidates and confirmed are two different claims and are NEVER summed:
+  - Candidate = an apex domain this vendor certified a hostname for. Fan-out alone is not a vendor relationship: an organization certifying hundreds of its own product sites looks identical.
+  - Confirmed = the DNS-confirmed subset of the candidates. The definition: ${VENDOR_CONFIRMED_DEFINITION} (or another organization certifies the apex).
+  - Confirmed is a SUBSET of candidates, so adding the two double-counts. The markdown keeps them in separate tables and the JSON in separate fields; report them apart.
+
+Returns (on success, structuredContent follows the declared outputSchema; a failed call — 400, 401, 404, 503, timeout — is isError with no structuredContent):
+  - enumerate: false (the summary):
+    {
+      "slug": string, "vendor_name": string,
+      "vendor_apex": string | null,          // null when the vendor's brand token matches no label it certifies
+      "customers": { "candidates": number, "confirmed": number },
+      "countries_top": [ { "country": string, "confirmed": number } ],   // CONFIRMED customers only
+      "co_use": [ { "slug": string, "confirmed": number } ],             // see below
+      "sample_customers": [string]           // hash-chosen sample (up to 5) of the CONFIRMED customers
+    }
+  - enumerate: true (the enumeration):
+    {
+      "slug": string,
+      "confirmed": [ { "apex": string, "attributed_to": string | null, "lei": string | null } ],
+      "candidates": [ same row shape ],
+      "counts": { "candidates": number, "confirmed": number },   // what the research build holds
+      "capped": boolean,                     // true = the build itself kept a subset of the candidates
+      "truncation_note": string              // written by THIS server, only when it dropped rows to fit the character limit; counts and capped still describe the API's answer
+    }
+  - Both also carry "as_of" / "product_version", "snapshot_dates", and this server's "snapshot" / "snapshot_source" ("product" | "unavailable"; null snapshot means unknown freshness, never "current").
+
+Reading the fields honestly:
+  - co_use counts THIS vendor's confirmed customers that the other vendor also certifies — a candidate there, not a mutual confirmation.
+  - countries_top counts confirmed customers that resolved to an LEI; candidates and LEI-less customers are not in it.
+  - attributed_to is GLEIF's legal name when the apex resolves to one LEI, the single non-vendor certificate organization otherwise, and null when neither holds. It is an attribution, not an ownership claim.
+
+Examples:
+  - Use when: "How many customers does Cloudflare have in the index?" -> { slug: "cloudflare" }  (report candidates and confirmed separately)
+  - Use when: "List Cloudflare's confirmed customers" -> { slug: "cloudflare", enumerate: true }
+  - Don't use when: you have a company and want its vendors — read vendors_confirmed from ctscout_lookup_lei instead.
+
+Coverage & freshness:
+  - A 404 means the slug is not in the published version, not that the vendor does not exist. The export is republished by the ctscout-research refresh, so these answers move on that cadence rather than the daily /scan warehouse sync.
+  - Before the first publish the routes answer HTTP 503 and this tool returns a plain "not published yet" error. That is expected, not a fault in the query.`,
+      inputSchema: VendorCustomersInputSchema,
+      outputSchema: VendorCustomersOutputSchema,
+      annotations: PRODUCT_READ_ONLY_ANNOTATIONS,
+    },
+    async (params: VendorCustomersInput) => {
+      try {
+        if (params.enumerate) {
+          const raw = await callVendorCustomers(params.slug);
+          const data: VendorCustomers = { ...raw, ...resolveProductSnapshot(raw) };
+          // One bounded record, two renderings of it — never two independent
+          // trims, which would let the markdown show a complete list beside a
+          // structuredContent whose own note described a shorter one.
+          const bounded = boundVendorCustomers(data);
+          return {
+            content: [
+              {
+                type: "text",
+                text: params.response_format === ResponseFormat.JSON ? bounded.json : bounded.text,
+              },
+            ],
+            structuredContent: bounded.structured as unknown as Record<string, unknown>,
+          };
+        }
+        const raw = await callVendorSummary(params.slug);
+        const data: VendorSummary = { ...raw, ...resolveProductSnapshot(raw) };
+        const { text: json, structured } = truncateVendorSummaryJsonIfNeeded(data);
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                params.response_format === ResponseFormat.JSON
+                  ? json
+                  : formatVendorSummaryAsMarkdown(data),
+            },
+          ],
+          structuredContent: structured as unknown as Record<string, unknown>,
+        };
+      } catch (err) {
+        // Only the enumeration has a key requirement and a keyless alternative
+        // to name, so the 401/403 text follows the call that was actually made.
+        return {
+          content: [
+            {
+              type: "text",
+              text: explainError(err, params.enumerate ? "vendor_enumeration" : "product"),
+            },
+          ],
           isError: true,
         };
       }

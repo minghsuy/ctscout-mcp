@@ -4,15 +4,17 @@ MCP server for [ctscout.dev](https://ctscout.dev) — **named-entity attribution
 
 DV-only infrastructure (Let's Encrypt, ZeroSSL, cloud-native shops) is invisible to ctscout by design. See [LIMITATIONS.md](LIMITATIONS.md) for what that means in practice.
 
-Five tools:
+Seven tools:
 
 - **`ctscout_search_company`** — find apex domains attributed to an organization by name
 - **`ctscout_search_company_batch`** — the same, for up to 10 organization names in one call
 - **`ctscout_lookup_domain`** — reverse-lookup the organization attributed to one or more domains
 - **`ctscout_submit_deep_dive`** — Pro only: queue an asynchronous multi-signal deep dive (see [Deep dives](#deep-dives-pro-async))
 - **`ctscout_get_job`** — poll a deep dive and read its result
+- **`ctscout_lookup_lei`** — one LEI's record, or the LEIs under a legal name (see [Research product](#research-product-lei-and-vendor-tools))
+- **`ctscout_vendor_customers`** — a vendor's customer counts, and with a key the customer enumeration
 
-The first three work over the public ctscout.dev `/scan` API (the batch tool wraps `/scan/batch`); the deep-dive pair wraps `/jobs`. Free tier requires an API key (no email, no signup). A Pro key gets up to 25 rows, a 12-month window and unlimited queries on `/scan`, and can submit deep-dive jobs, which return a `confidence_band` per attribution with the named signals behind it (DNS brand tokens, RDAP, IP/ASN, homepage metadata, favicon). Visual brand verification (VLM) is not part of v1.
+The first three work over the public ctscout.dev `/scan` API (the batch tool wraps `/scan/batch`); the deep-dive pair wraps `/jobs`; the last two read the research product objects at `/lei` and `/vendors`. Free tier requires an API key (no email, no signup). A Pro key gets up to 25 rows, a 12-month window and unlimited queries on `/scan`, and can submit deep-dive jobs, which return a `confidence_band` per attribution with the named signals behind it (DNS brand tokens, RDAP, IP/ASN, homepage metadata, favicon). Visual brand verification (VLM) is not part of v1.
 
 **Not a cyber-risk-scoring tool.** See [LIMITATIONS.md](LIMITATIONS.md) for what ctscout is and isn't, the DV-cert coverage gap, and the corrections path.
 
@@ -105,11 +107,21 @@ the stdio schema and quota-sensitive annotations against the hosted surface.
 The remaining shared-core/forwarding and automated cross-repository comparison
 work is tracked in [#72](https://github.com/minghsuy/ctscout-mcp/issues/72).
 
-One documented, transport-specific difference: this package advertises an
-`outputSchema` on every tool and, on every successful call, returns `snapshot`
-(warehouse sync date) and `snapshot_source` (`"scan"` | `"unavailable"`) in
-`structuredContent`. A failed call (401, 429, timeout) is an `isError` result
-with no `structuredContent` at all, so do not dereference `snapshot` on it.
+Two documented, transport-specific differences. First, this package advertises
+an `outputSchema` on every tool and, on every successful call, returns
+`snapshot` and `snapshot_source` in `structuredContent`. On the scan and job
+tools `snapshot` is the warehouse sync date and `snapshot_source` is
+`"scan"` | `"unavailable"`; on `ctscout_lookup_lei` and
+`ctscout_vendor_customers` it is the research export's version and the source
+vocabulary is `"product"` | `"unavailable"` (see
+[Research product](#research-product-lei-and-vendor-tools)) — the two are
+different origins on different cadences, so they do not share a label. A failed
+call (401, 429, timeout) is an `isError` result with no `structuredContent` at
+all, so do not dereference `snapshot` on it.
+Second, `ctscout_lookup_lei` and `ctscout_vendor_customers` ship here first:
+the hosted MCP at `/mcp` does not advertise them yet, and mirroring them is a
+separate ctscout-worker change. Until it lands the two transports differ by
+exactly those two tools.
 The `ctscout_submit_deep_dive` receipt is the other exception: it is a job
 handle, not a warehouse read, so it carries neither field; both arrive on
 `ctscout_get_job` with the result.
@@ -213,6 +225,98 @@ never bare candidates.
 **Not in v1:** visual brand verification (VLM) — `vlm_status` stays `pending`
 or `skipped` and never vetoes a band; webhooks, cancellation, retries and
 result expiry are follow-ups on the Worker side.
+
+---
+
+## Research product (LEI and vendor tools)
+
+`ctscout_lookup_lei` and `ctscout_vendor_customers` read a different index from
+the `/scan` warehouse: precomputed objects published by the ctscout-research
+refresh and served by ctscout.dev at `/lei` and `/vendors`
+([ctscout-worker#336](https://github.com/minghsuy/ctscout-worker/issues/336)).
+The Worker classifies nothing on these routes — it reads one object and returns
+it — so both tools are free and debit no quota.
+
+### `ctscout_lookup_lei`
+
+Takes **exactly one** of `lei` or `name`; passing both, or neither, is rejected
+before any network call.
+
+- **`{ lei }`** (`GET /lei/{lei}`, ISO 17442: 18 uppercase alphanumerics plus 2
+  check digits) returns the entity record: `legal_name` and `country` from
+  GLEIF, `isin_count` (ISINs mapped to the LEI), `apex_count` (apex domains
+  attributed to it), the `first_seen` / `last_seen` observation window,
+  `sample_domains` (a hash-chosen sample of up to 5 — **not** the top 5 and not
+  a complete list; `apex_count` is the total) and `vendors_confirmed`, which is
+  a list of vendor **slugs** you can pass straight to
+  `ctscout_vendor_customers`.
+- **`{ name }`** (`GET /lei?name=`) returns `{ query, name_match, leis,
+  lei_count, limit, truncated }`. `leis` is capped at `limit` (20) while
+  `lei_count` is the total before the cap, so on a truncated answer the two
+  disagree by design — report `lei_count`, not `leis.length`.
+
+`name_match` is also the discriminator between the two answer shapes: it is
+present on the by-name answer and absent from the record.
+
+**`name_match: "none"` does not mean the company has no LEI.** The name index is
+keyed by the research normalizer's form of the GLEIF legal name; the two
+spellings the route tries (the lowercased, trimmed query and its locale-suffix
+normalization) are not that normalizer, so a real entity can miss on a spelling.
+Retry with the exact GLEIF legal name, or look it up by LEI. The markdown output
+says this in place of the miss.
+
+### `ctscout_vendor_customers`
+
+Takes a vendor `slug` and, optionally, `enumerate`.
+
+- **`enumerate: false`** (the default, `GET /vendors/{slug}`) returns the free
+  summary: `vendor_name`, `vendor_apex` (`null` when the vendor's brand token
+  matches no label it certifies), the `customers` split, `countries_top`,
+  `co_use` and `sample_customers`.
+- **`enumerate: true`** (`GET /vendors/{slug}/customers`) returns the
+  enumeration: `confirmed` and `candidates` rows of
+  `{ apex, attributed_to, lei }`, plus `counts` and `capped`. This route needs
+  an active ctscout.dev API key (any tier); without one the tool returns a clear
+  401 message that also points back at the keyless summary.
+
+**Candidates and confirmed are two different claims and are never summed.** A
+candidate is an apex the vendor certified a hostname for — fan-out alone, which
+looks identical to an organization certifying hundreds of its own product sites.
+Confirmed is the DNS-confirmed subset: *a vendor is confirmed when a hostname it
+certified resolves onto a domain it certifies and the customer's own www does
+not* (or another organization certifies the apex). Because confirmed is a subset
+of candidates, adding the two double-counts; the markdown keeps them in separate
+tables and the JSON in separate fields.
+
+Two more fields that read wrong if taken at face value: `co_use[].confirmed`
+counts *this* vendor's confirmed customers that the other vendor also certifies
+— a candidate there, not a mutual confirmation — and `countries_top` counts
+confirmed customers that resolved to an LEI only.
+
+`counts` and `capped` describe the object the research build published: `capped:
+true` means the build itself kept a subset of the candidates. If this MCP server
+has to drop rows to stay under its own character limit, it writes a separate
+`truncation_note` and leaves `counts` and `capped` untouched, so a trimmed list
+never reads as a complete enumeration. The markdown and the `structuredContent`
+are two renderings of **one** bounded record — same rows, same "N listed of M"
+headings, one note — so the half you read can never describe a list the other
+half does not show.
+
+### Freshness and the 503
+
+Both tools carry `snapshot` (the export's `as_of`) and `snapshot_source`
+(`"product"` when the API reported the version, `"unavailable"` when it did not
+— then `snapshot` is `null` and freshness is unknown, never "current"), plus
+`snapshot_dates`, the per-source provenance from the manifest (the dated GLEIF,
+ISIN, ELF and Wikidata snapshots and the PSL bundle each join read). The markdown
+renders both lines. This is a different clock from the `/scan` warehouse's daily
+sync: the research export is republished by its own refresh, so these answers
+move on that slower cadence.
+
+Until the refresh has published its first product, `/lei` and `/vendors` answer
+HTTP 503 with `{"detail": "Research product not yet published…"}`. Both tools
+surface that as a plain "not published yet" error naming the API's own detail —
+not as a server outage, and not as an empty result.
 
 ---
 
