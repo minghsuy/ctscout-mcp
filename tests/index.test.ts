@@ -4106,6 +4106,47 @@ describe("the one product envelope path, walked over every object kind", () => {
       expect(envelope.length, kind).toBeLessThanOrEqual(CHARACTER_LIMIT);
     }
   });
+
+  // Walks the spec rather than naming fields, so a field that becomes nullable
+  // later is covered the moment it is declared.
+  it("keeps an explicit null on every field the spec declares nullable", () => {
+    let checked = 0;
+    for (const kind of Object.keys(PRODUCT_ENVELOPES) as Array<keyof typeof PRODUCT_ENVELOPES>) {
+      const spec = PRODUCT_ENVELOPES[kind] as Record<
+        string,
+        {
+          kind: string;
+          nullable?: boolean;
+          max?: number;
+          fields?: Record<string, { nullable?: boolean }>;
+        }
+      >;
+      for (const [field, rule] of Object.entries(spec)) {
+        if (rule.nullable === true) {
+          const out = minimalProductEnvelope(kind, { [field]: null }) as Record<string, unknown>;
+          expect(out, `${kind}.${field}`).toHaveProperty(field, null);
+          expect(
+            minimalProductEnvelope(kind, {}) as Record<string, unknown>,
+            `${kind}.${field} absent`,
+          ).not.toHaveProperty(field);
+          checked += 1;
+        }
+        for (const [sub, subRule] of Object.entries(rule.fields ?? {})) {
+          if (subRule.nullable !== true) continue;
+          const out = minimalProductEnvelope(kind, {
+            [field]: [{ [sub]: null }],
+          }) as Record<string, Array<Record<string, unknown>>>;
+          // A row list this envelope caps at zero keeps no row to carry the
+          // null; the marker on the row field is what a non-zero cap would
+          // honour. Assert the cap instead of a row that cannot exist.
+          if (rule.max === 0) expect(out[field], `${kind}.${field}`).toEqual([]);
+          else expect(out[field][0], `${kind}.${field}[].${sub}`).toHaveProperty(sub, null);
+          checked += 1;
+        }
+      }
+    }
+    expect(checked).toBeGreaterThan(0);
+  });
 });
 
 describe("boundVendorCustomers — the JSON half", () => {

@@ -3286,6 +3286,10 @@ function keptProductSnapshot(data: Partial<ProductSnapshotInfo>): ProductSnapsho
 
 /** A capped scalar string. */
 const ENV_STRING = { kind: "string" } as const;
+/** A capped scalar string the product may report as an explicit null. Dropping
+ *  that null would leave a consumer unable to tell "the product says there is
+ *  none" from "this envelope had no room for it". */
+const ENV_NULLABLE_STRING = { kind: "string", nullable: true } as const;
 /** A count, kept only when it really is a number. */
 const ENV_COUNT = { kind: "count" } as const;
 const ENV_BOOLEAN = { kind: "boolean" } as const;
@@ -3294,6 +3298,7 @@ const ENV_SPLIT = { kind: "split" } as const;
 
 type EnvelopeField =
   | typeof ENV_STRING
+  | typeof ENV_NULLABLE_STRING
   | typeof ENV_COUNT
   | typeof ENV_BOOLEAN
   | typeof ENV_SPLIT
@@ -3311,10 +3316,12 @@ type EnvelopeField =
       readonly fields?: Readonly<Record<string, EnvelopeField>>;
     };
 
+// The nullable markers describe the row contract: this envelope caps the row
+// lists at zero, so they bind only if that cap ever grows.
 const CUSTOMER_ROW_FIELDS = {
   apex: ENV_STRING,
-  attributed_to: ENV_STRING,
-  lei: ENV_STRING,
+  attributed_to: ENV_NULLABLE_STRING,
+  lei: ENV_NULLABLE_STRING,
 } as const;
 
 /** Every product object kind this package hands back. The walk test in
@@ -3345,7 +3352,7 @@ export const PRODUCT_ENVELOPES = {
   vendor_summary: {
     slug: ENV_STRING,
     vendor_name: ENV_STRING,
-    vendor_apex: ENV_STRING,
+    vendor_apex: ENV_NULLABLE_STRING,
     customers: ENV_SPLIT,
     countries_top: {
       kind: "array",
@@ -3408,6 +3415,12 @@ function keptProvenance(data: Record<string, unknown>): {
     : { fields };
 }
 
+/** An explicit null the spec declares this field may carry. Only `null` counts:
+ *  an absent field stays absent, so the envelope never invents a claim. */
+function nullableHole(field: EnvelopeField, value: unknown): boolean {
+  return "nullable" in field && field.nullable === true && value === null;
+}
+
 function envelopeRow(
   row: unknown,
   fields: Readonly<Record<string, EnvelopeField>>,
@@ -3417,6 +3430,8 @@ function envelopeRow(
   for (const [name, field] of Object.entries(fields)) {
     if (field.kind === "string" && typeof source[name] === "string") {
       keep[name] = boundedField(source[name] as string);
+    } else if (field.kind === "string" && nullableHole(field, source[name])) {
+      keep[name] = null;
     } else if (field.kind === "count" && isCount(source[name])) {
       keep[name] = source[name];
     }
@@ -3439,6 +3454,7 @@ export function minimalProductEnvelope<T>(kind: ProductEnvelopeKind, data: T): T
     switch (field.kind) {
       case "string":
         if (typeof value === "string") keep[name] = boundedField(value);
+        else if (nullableHole(field, value)) keep[name] = null;
         break;
       case "count":
         if (isCount(value)) keep[name] = value;
