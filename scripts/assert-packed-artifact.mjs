@@ -98,6 +98,21 @@ const PAYLOAD_SNAPSHOT = "2026-09-03";
 // result carries the worker-set `snapshot`.
 const JOB_ID = "0123456789abcdef01234567";
 const JOB_SNAPSHOT = "2026-08-31";
+// The research-product stubs follow ctscout-worker#336: the Worker attaches
+// as_of / snapshot_dates / product_version from the manifest to every answer.
+const PRODUCT_LEI = "549300NDMY0KJK0ZLW17";
+const PRODUCT_VERSION = "2026-09-01";
+const PRODUCT_PROVENANCE = {
+  as_of: PRODUCT_VERSION,
+  product_version: PRODUCT_VERSION,
+  snapshot_dates: {
+    elf: "2026-08-01",
+    gleif: "2026-08-28",
+    isin: "2026-08-28",
+    psl: "psl sha256:abc123 via tldextract==5.1.2",
+    wikidata: "2026-08-20",
+  },
+};
 
 const apiRequests = [];
 const api = createHttpServer((request, response) => {
@@ -165,6 +180,42 @@ const api = createHttpServer((request, response) => {
             worker_version: "abc1234",
             signals_attempted: ["dns", "rdap"],
           },
+        }),
+      );
+      return;
+    }
+
+    if (request.method === "GET" && request.url === `/lei/${PRODUCT_LEI}`) {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({
+          lei: PRODUCT_LEI,
+          legal_name: "Packed Entity, Inc.",
+          country: "US",
+          isin_count: 1,
+          apex_count: 42,
+          first_seen: "2019-04-02T00:00:00Z",
+          last_seen: "2026-08-30T00:00:00Z",
+          sample_domains: ["packed-entity.example"],
+          vendors_confirmed: ["packed-vendor"],
+          ...PRODUCT_PROVENANCE,
+        }),
+      );
+      return;
+    }
+
+    if (request.method === "GET" && request.url === "/vendors/packed-vendor") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({
+          slug: "packed-vendor",
+          vendor_name: "Packed Vendor, Inc.",
+          vendor_apex: "packed-vendor.example",
+          customers: { candidates: 940, confirmed: 128 },
+          countries_top: [{ country: "US", confirmed: 90 }],
+          co_use: [{ slug: "other-vendor", confirmed: 9 }],
+          sample_customers: ["one.example"],
+          ...PRODUCT_PROVENANCE,
         }),
       );
       return;
@@ -380,6 +431,8 @@ try {
       "ctscout_lookup_domain",
       "ctscout_submit_deep_dive",
       "ctscout_get_job",
+      "ctscout_lookup_lei",
+      "ctscout_vendor_customers",
     ],
   );
 
@@ -543,12 +596,27 @@ try {
   ]);
 
   // The three scan tools debit quota on every call: read-only, not idempotent.
-  // The job tools' annotations are asserted on the modern client above.
-  for (const tool of legacyList.result.tools.filter((t) => !t.name.includes("job") && !t.name.includes("deep_dive"))) {
+  // The job tools' annotations are asserted on the modern client above; the
+  // research-product tools debit nothing and are idempotent, asserted below.
+  const scanToolNames = [
+    "ctscout_search_company",
+    "ctscout_search_company_batch",
+    "ctscout_lookup_domain",
+  ];
+  for (const tool of legacyList.result.tools.filter((t) => scanToolNames.includes(t.name))) {
     assert.deepEqual(tool.annotations, {
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: false,
+      openWorldHint: true,
+    });
+  }
+  const productToolNames = ["ctscout_lookup_lei", "ctscout_vendor_customers"];
+  for (const tool of legacyList.result.tools.filter((t) => productToolNames.includes(t.name))) {
+    assert.deepEqual(tool.annotations, {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
       openWorldHint: true,
     });
   }
@@ -586,6 +654,37 @@ try {
   );
   assert.equal(legacyLookup.result.structuredContent.snapshot, null);
   assert.equal(legacyLookup.result.structuredContent.snapshot_source, "unavailable");
+  const legacyLei = await legacy.request({
+    jsonrpc: "2.0",
+    id: "legacy-lei",
+    method: "tools/call",
+    params: {
+      name: "ctscout_lookup_lei",
+      arguments: { lei: PRODUCT_LEI, response_format: "json" },
+    },
+  });
+  assert.equal(legacyLei.error, undefined);
+  assert.equal(legacyLei.result.structuredContent.legal_name, "Packed Entity, Inc.");
+  assert.equal(legacyLei.result.structuredContent.snapshot, PRODUCT_VERSION);
+  assert.equal(legacyLei.result.structuredContent.snapshot_source, "product");
+
+  const legacyVendor = await legacy.request({
+    jsonrpc: "2.0",
+    id: "legacy-vendor",
+    method: "tools/call",
+    params: {
+      name: "ctscout_vendor_customers",
+      arguments: { slug: "packed-vendor", response_format: "json" },
+    },
+  });
+  assert.equal(legacyVendor.error, undefined);
+  // Candidates and confirmed arrive as the two separate claims they are.
+  assert.deepEqual(legacyVendor.result.structuredContent.customers, {
+    candidates: 940,
+    confirmed: 128,
+  });
+  assert.equal(legacyVendor.result.structuredContent.snapshot_source, "product");
+
   for (const tool of legacyList.result.tools) {
     assert.ok(tool.outputSchema, `packed server omitted outputSchema on ${tool.name}`);
     // A submission receipt carries no attribution and so no snapshot.
@@ -593,10 +692,12 @@ try {
       assert.equal(tool.outputSchema.properties.snapshot_source, undefined);
       continue;
     }
-    assert.deepEqual(tool.outputSchema.properties.snapshot_source.enum, [
-      "scan",
-      "unavailable",
-    ]);
+    // A research-product answer's date is the export's version, not a
+    // warehouse sync, so its source vocabulary is its own.
+    assert.deepEqual(
+      tool.outputSchema.properties.snapshot_source.enum,
+      productToolNames.includes(tool.name) ? ["product", "unavailable"] : ["scan", "unavailable"],
+    );
   }
   await legacy.close();
 } finally {
@@ -644,6 +745,18 @@ assert.deepEqual(
       apiKey: API_KEY,
       userAgent: `ctscout-mcp-server/${expectedVersion}`,
     },
+    {
+      method: "GET",
+      url: `/lei/${PRODUCT_LEI}`,
+      apiKey: API_KEY,
+      userAgent: `ctscout-mcp-server/${expectedVersion}`,
+    },
+    {
+      method: "GET",
+      url: "/vendors/packed-vendor",
+      apiKey: API_KEY,
+      userAgent: `ctscout-mcp-server/${expectedVersion}`,
+    },
   ],
 );
 assert.deepEqual(apiRequests[0].body, {
@@ -653,5 +766,7 @@ assert.deepEqual(apiRequests[1].body, { company_name: "Packed Deep Dive" });
 assert.equal(apiRequests[2].body, undefined);
 assert.deepEqual(apiRequests[3].body, { company_name: "Packed Search" });
 assert.deepEqual(apiRequests[4].body, { seed_domain: ["packed-lookup.example"] });
+assert.equal(apiRequests[5].body, undefined);
+assert.equal(apiRequests[6].body, undefined);
 
 process.stdout.write("packed artifact install + modern/legacy protocol contract passed\n");

@@ -12,6 +12,44 @@ version heading so the exact package metadata and notes are reviewed together;
 
 ## [Unreleased]
 
+### Added
+
+- `ctscout_lookup_lei` (`GET /lei/{lei}`, `GET /lei?name=`) and
+  `ctscout_vendor_customers` (`GET /vendors/{slug}`, and the keyed
+  `GET /vendors/{slug}/customers` behind `enumerate: true`): the research
+  product's entity and vendor objects, per ctscout-worker#336. Both are free
+  and debit no quota. A `name_match` of `"none"` is explained as a spelling
+  miss against the index's normalizer, never as "this company has no LEI";
+  candidate and confirmed customer counts are rendered as two separate claims
+  and never summed, since confirmed is the DNS-confirmed subset of candidates.
+  Both carry `snapshot` / `snapshot_source` with their own source vocabulary,
+  `"product" | "unavailable"` — the date is the research export's version, not
+  the daily warehouse sync, so calling it `"scan"` would misname both its
+  origin and its cadence. Before the first publish the routes answer HTTP 503
+  and the tools return a plain "not published yet" error rather than a server
+  outage. The free routes are unauthenticated, so both work with no
+  `CTSCOUT_API_KEY` set — the request omits the `X-API-Key` header rather than
+  sending an empty one, and the server no longer exits at boot when the variable
+  is unset (it warns and names the tools that still work). `enumerate: true`
+  still requires a key and says so without a round-trip. In the customer
+  enumeration, where the payload IS the rows, the
+  markdown and the `structuredContent` are two renderings of one bounded
+  record — same rows, same counts, one `truncation_note` — so neither half of a
+  response can describe a list the other half does not show, and the API's own
+  `counts` / `capped` are left untouched. Every rendered list says how many
+  entries it left out and how many there were in all. Every product answer
+  collapses through one spec-driven envelope that knows, per field, whether a
+  list is a declared sample or published complete, names any list it shortens
+  with the length the API sent, and preserves the `as_of` / `product_version` /
+  `snapshot_dates` provenance the tool contract promises on every answer — so a
+  fallback cannot silently shorten a complete list or drop the per-source
+  provenance, for any object kind present or future. A
+  503 is read from its body: only the Worker's "not yet published" detail gets
+  the wait-for-the-refresh guidance, and any other 503 is reported as a
+  temporary availability failure rather than a permanent state. The hosted MCP in ctscout-worker does
+  not advertise these two tools yet; mirroring them there is a separate Worker
+  change (#103)
+
 ### Changed
 
 - Docs and tool descriptions say the warehouse syncs daily (it has since

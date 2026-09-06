@@ -57,6 +57,82 @@ function warehouseDomains(prefix: string, n: number): DomainResult[] {
   }));
 }
 
+// The five tools that read the /scan warehouse and the /jobs deep dives. Named
+// explicitly rather than matched by substring so a tool added later cannot fall
+// into the wrong family's assertions by an accident of naming.
+const WAREHOUSE_TOOLS = [
+  "ctscout_search_company",
+  "ctscout_search_company_batch",
+  "ctscout_lookup_domain",
+  "ctscout_submit_deep_dive",
+  "ctscout_get_job",
+];
+
+// Research-product fixtures (ctscout-worker#336). The Worker attaches as_of /
+// snapshot_dates / product_version to every product response from the manifest,
+// so every fixture carries them.
+const LEI = "549300NDMY0KJK0ZLW17";
+const PRODUCT_PROVENANCE = {
+  as_of: "2026-09-01",
+  product_version: "2026-09-01",
+  snapshot_dates: {
+    elf: "2026-08-01",
+    gleif: "2026-08-28",
+    isin: "2026-08-28",
+    psl: "psl sha256:abc123 via tldextract==5.1.2",
+    wikidata: "2026-08-20",
+  },
+};
+
+const LEI_RECORD = {
+  lei: LEI,
+  legal_name: "Cloudflare, Inc.",
+  country: "US",
+  isin_count: 1,
+  apex_count: 42,
+  first_seen: "2019-04-02T00:00:00Z",
+  last_seen: "2026-08-30T00:00:00Z",
+  sample_domains: ["cloudflare.com", "cloudflare-dns.com"],
+  vendors_confirmed: ["cloudflare"],
+  ...PRODUCT_PROVENANCE,
+};
+
+const VENDOR_SUMMARY = {
+  slug: "cloudflare",
+  vendor_name: "Cloudflare, Inc.",
+  vendor_apex: "cloudflare.com",
+  customers: { candidates: 940, confirmed: 128 },
+  countries_top: [
+    { country: "US", confirmed: 90 },
+    { country: "GB", confirmed: 12 },
+  ],
+  co_use: [{ slug: "akamai", confirmed: 9 }],
+  sample_customers: ["one.example", "two.example"],
+  ...PRODUCT_PROVENANCE,
+};
+
+const VENDOR_CUSTOMERS = {
+  slug: "cloudflare",
+  confirmed: [
+    {
+      apex: "confirmed-customer.example",
+      attributed_to: "Confirmed Customer Inc",
+      lei: "5493001KJTIIGC8Y1R12",
+    },
+  ],
+  candidates: [
+    {
+      apex: "confirmed-customer.example",
+      attributed_to: "Confirmed Customer Inc",
+      lei: "5493001KJTIIGC8Y1R12",
+    },
+    { apex: "candidate-only.example", attributed_to: null, lei: null },
+  ],
+  counts: { candidates: 900, confirmed: 1 },
+  capped: true,
+  ...PRODUCT_PROVENANCE,
+};
+
 describe("stdio MCP compatibility contract", () => {
   const originalFetch = globalThis.fetch;
   const originalApiKey = process.env.CTSCOUT_API_KEY;
@@ -71,7 +147,7 @@ describe("stdio MCP compatibility contract", () => {
     vi.restoreAllMocks();
   });
 
-  it("advertises the stable five-tool surface, hosted schemas, and quota-safe annotations", async () => {
+  it("advertises the stable seven-tool surface, hosted schemas, and quota-safe annotations", async () => {
     const { client, close } = await connect();
 
     try {
@@ -82,6 +158,8 @@ describe("stdio MCP compatibility contract", () => {
         "ctscout_lookup_domain",
         "ctscout_submit_deep_dive",
         "ctscout_get_job",
+        "ctscout_lookup_lei",
+        "ctscout_vendor_customers",
       ]);
 
       const search = tools.find((tool) => tool.name === "ctscout_search_company");
@@ -160,6 +238,56 @@ describe("stdio MCP compatibility contract", () => {
           response_format: { type: "string", enum: ["markdown", "json"], default: "markdown" },
         },
       });
+      const lookupLei = tools.find((tool) => tool.name === "ctscout_lookup_lei");
+      expect(lookupLei?.inputSchema).toMatchObject({
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          lei: { type: "string", pattern: "^[A-Z0-9]{18}[0-9]{2}$" },
+          name: { type: "string", minLength: 1, maxLength: 200 },
+          response_format: { type: "string", enum: ["markdown", "json"], default: "markdown" },
+        },
+      });
+      // Neither field is required on its own, and the exactly-one rule is
+      // advertised as `oneOf` — NOT `anyOf`, which JSON Schema satisfies when
+      // one or more branches match, so `{lei, name}` would validate against the
+      // advertised schema and be refused only at runtime.
+      expect(lookupLei?.inputSchema.required).toBeUndefined();
+      expect(lookupLei?.inputSchema.anyOf).toBeUndefined();
+      expect(lookupLei?.inputSchema.oneOf).toEqual([{ required: ["lei"] }, { required: ["name"] }]);
+      // The keyword is only half the claim; evaluate its branches to show the
+      // advertised schema really does refuse both-at-once and neither, without
+      // pulling in a JSON Schema validator to say so.
+      const branchesMatched = (input: Record<string, unknown>) =>
+        (lookupLei?.inputSchema.oneOf as Array<{ required: string[] }>).filter((branch) =>
+          branch.required.every((field) => field in input),
+        ).length;
+      expect(branchesMatched({ lei: "549300NDMY0KJK0ZLW17" })).toBe(1);
+      expect(branchesMatched({ name: "Cloudflare, Inc." })).toBe(1);
+      // oneOf requires exactly one match: two is as invalid as zero.
+      expect(branchesMatched({ lei: "549300NDMY0KJK0ZLW17", name: "Cloudflare, Inc." })).toBe(2);
+      expect(branchesMatched({})).toBe(0);
+      // The deep-dive tool's contract is genuinely one-or-more (both fields
+      // together are legal there), so it keeps anyOf. Pinned so this change
+      // cannot be generalised onto it by a later sweep.
+      expect(submit?.inputSchema.oneOf).toBeUndefined();
+      expect(submit?.inputSchema.anyOf).toEqual([
+        { required: ["company_name"] },
+        { required: ["seed_domain"] },
+      ]);
+      const vendorCustomers = tools.find((tool) => tool.name === "ctscout_vendor_customers");
+      expect(vendorCustomers?.inputSchema).toMatchObject({
+        type: "object",
+        required: ["slug"],
+        additionalProperties: false,
+        properties: {
+          slug: { type: "string", pattern: "^[a-z0-9][a-z0-9-]{0,80}$" },
+          // The default is advertised, not only described: a client planning
+          // from tools/list must see that omitting it gives the free summary.
+          enumerate: { type: "boolean", default: false },
+          response_format: { type: "string", enum: ["markdown", "json"], default: "markdown" },
+        },
+      });
 
       // Scan tools debit quota on every call (read-only, not idempotent).
       // Submitting a job creates state and debits the jobs quota (neither).
@@ -181,6 +309,21 @@ describe("stdio MCP compatibility contract", () => {
           openWorldHint: true,
         },
         ctscout_get_job: {
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: true,
+        },
+        // The research-product routes read a precomputed object and debit no
+        // quota, so unlike the scan tools they are idempotent as well as
+        // read-only.
+        ctscout_lookup_lei: {
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: true,
+        },
+        ctscout_vendor_customers: {
           readOnlyHint: true,
           destructiveHint: false,
           idempotentHint: true,
@@ -251,10 +394,22 @@ describe("stdio MCP compatibility contract", () => {
         const snapshot = properties.snapshot;
         expect(snapshot?.description, name).toMatch(/syncs daily/);
       }
+      // Unchanged and still blanket over every tool, the research-product ones
+      // included: no tool description needs the word, since a product tool
+      // names its own source ("the ctscout-research refresh") and the warehouse
+      // sync it is NOT ("syncs daily"). Loosening this to make room for a
+      // description that never used the word would have traded the guard away
+      // for nothing.
       for (const tool of tools) {
         expect(tool.description, tool.name).not.toMatch(
           /today the API does not|unlike \/scan today|weekly/,
         );
+      }
+      // Positive pin: the product tools state their own cadence and say it is
+      // not the warehouse's, so a reader cannot carry the daily sync across.
+      for (const name of ["ctscout_lookup_lei", "ctscout_vendor_customers"]) {
+        expect(byName(name)?.description, name).toMatch(/ctscout-research refresh/);
+        expect(byName(name)?.description, name).toMatch(/syncs daily|daily \/scan warehouse sync/);
       }
     } finally {
       await close();
@@ -266,7 +421,7 @@ describe("stdio MCP compatibility contract", () => {
 
     try {
       const { tools } = await client.listTools();
-      expect(tools).toHaveLength(5);
+      expect(tools).toHaveLength(7);
       // A submission receipt carries no attribution data, so it carries no
       // snapshot either: a date there would be invented.
       const submit = tools.find((tool) => tool.name === "ctscout_submit_deep_dive");
@@ -275,20 +430,50 @@ describe("stdio MCP compatibility contract", () => {
         required: expect.arrayContaining(["job_id", "status", "submitted_at"]),
       });
       expect(submit?.outputSchema?.properties).not.toHaveProperty("snapshot");
+      // Every result-bearing tool declares both fields; the vocabulary of
+      // snapshot_source is per family and pinned positively, because a product
+      // answer's date is the research export's version, not a warehouse sync,
+      // and calling it "scan" would misname both the origin and the cadence.
+      const expectedSource: Record<string, string[]> = {
+        ctscout_search_company: ["scan", "unavailable"],
+        ctscout_search_company_batch: ["scan", "unavailable"],
+        ctscout_lookup_domain: ["scan", "unavailable"],
+        ctscout_get_job: ["scan", "unavailable"],
+        ctscout_lookup_lei: ["product", "unavailable"],
+        ctscout_vendor_customers: ["product", "unavailable"],
+      };
       const resultBearing = tools.filter((tool) => tool.name !== "ctscout_submit_deep_dive");
-      expect(resultBearing).toHaveLength(4);
+      expect(resultBearing).toHaveLength(6);
+      expect(resultBearing.map((tool) => tool.name).sort()).toEqual(
+        Object.keys(expectedSource).sort(),
+      );
       for (const tool of resultBearing) {
         expect(tool.outputSchema, tool.name).toMatchObject({
           type: "object",
           properties: {
             snapshot: { anyOf: [{ type: "string" }, { type: "null" }] },
-            snapshot_source: { type: "string", enum: ["scan", "unavailable"] },
+            snapshot_source: { type: "string", enum: expectedSource[tool.name] },
           },
         });
         expect(tool.outputSchema?.required, tool.name).toEqual(
           expect.arrayContaining(["snapshot", "snapshot_source"]),
         );
       }
+      // The product tools require ONLY what this server writes itself: every
+      // proxied field is optional, so a publication the Worker's contract would
+      // have refused cannot also fail schema validation on the way out. Pinned
+      // exactly, since shrinking `required` is an externally observable change.
+      for (const name of ["ctscout_lookup_lei", "ctscout_vendor_customers"]) {
+        expect(tools.find((tool) => tool.name === name)?.outputSchema?.required, name).toEqual([
+          "snapshot",
+          "snapshot_source",
+        ]);
+      }
+      const rowSchema = (
+        tools.find((tool) => tool.name === "ctscout_vendor_customers")?.outputSchema
+          ?.properties as Record<string, { items?: { required?: string[] } }>
+      ).candidates?.items;
+      expect(rowSchema?.required).toBeUndefined();
 
       // The scan shape is proxied from the origin, so it stays open to fields
       // this server does not model; the enum-like fields are strings with
@@ -683,12 +868,16 @@ describe("stdio MCP compatibility contract", () => {
 
     try {
       const { tools } = await client.listTools();
-      // The submission receipt carries no snapshot (nothing attributed yet).
-      for (const tool of tools.filter((t) => t.name !== "ctscout_submit_deep_dive")) {
+      // The submission receipt carries no snapshot (nothing attributed yet);
+      // the research-product tools carry one with their own source vocabulary
+      // (pinned in the outputSchema test above).
+      const warehouseTools = tools.filter((t) => WAREHOUSE_TOOLS.includes(t.name));
+      for (const tool of warehouseTools.filter((t) => t.name !== "ctscout_submit_deep_dive")) {
         expect(tool.outputSchema?.properties, tool.name).toMatchObject({
           snapshot_source: { enum: ["scan", "unavailable"] },
         });
       }
+      expect(warehouseTools).toHaveLength(5);
 
       const result = await client.callTool({
         name: "ctscout_lookup_domain",
@@ -1346,6 +1535,636 @@ describe("stdio MCP compatibility contract", () => {
           result: { truncated: true },
         });
       }
+    } finally {
+      await close();
+    }
+  });
+
+  // ---------- Research product: ctscout_lookup_lei / ctscout_vendor_customers ----------
+
+  it("reads one LEI record with a single GET /lei/{lei} in both formats", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_free_contract_test";
+    const fetchMock = mockApi(LEI_RECORD);
+
+    const { client, close } = await connect();
+
+    try {
+      const markdown = await client.callTool({
+        name: "ctscout_lookup_lei",
+        arguments: { lei: LEI },
+      });
+      expect(markdown.isError).not.toBe(true);
+      expect(textOf(markdown)).toContain("Cloudflare, Inc.");
+      expect(textOf(markdown)).toContain("Research product: 2026-09-01");
+      expect(textOf(markdown)).toContain("gleif 2026-08-28");
+      // The slugs are the other tool's input, and the definition travels with
+      // them rather than being left to the reader.
+      expect(textOf(markdown)).toContain("`cloudflare`");
+      expect(textOf(markdown)).toContain(
+        "a vendor is confirmed when a hostname it certified resolves onto a domain it certifies and the customer's own www does not",
+      );
+      expect(textOf(markdown)).toContain("not an ownership claim");
+      expect(markdown.structuredContent).toMatchObject({
+        lei: LEI,
+        legal_name: "Cloudflare, Inc.",
+        apex_count: 42,
+        snapshot: "2026-09-01",
+        snapshot_source: "product",
+      });
+
+      const json = await client.callTool({
+        name: "ctscout_lookup_lei",
+        arguments: { lei: LEI, response_format: "json" },
+      });
+      expect(json.isError).not.toBe(true);
+      expect(JSON.parse(textOf(json))).toMatchObject({
+        lei: LEI,
+        snapshot: "2026-09-01",
+        snapshot_source: "product",
+      });
+      expect(calledUrls(fetchMock)).toEqual([
+        `https://ctscout.dev/lei/${LEI}`,
+        `https://ctscout.dev/lei/${LEI}`,
+      ]);
+    } finally {
+      await close();
+    }
+  });
+
+  it("looks an LEI up by name, reporting the pre-cap total and the cap separately", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_free_contract_test";
+    const fetchMock = mockApi({
+      query: "Cloudflare, Inc.",
+      name_match: "normalized",
+      leis: Array.from({ length: 20 }, (_, i) => `54930${String(i).padStart(13, "0")}LW17`),
+      lei_count: 37,
+      limit: 20,
+      truncated: true,
+      ...PRODUCT_PROVENANCE,
+    });
+
+    const { client, close } = await connect();
+
+    try {
+      const markdown = await client.callTool({
+        name: "ctscout_lookup_lei",
+        arguments: { name: "Cloudflare, Inc." },
+      });
+      expect(markdown.isError).not.toBe(true);
+      // leis.length is 20 and lei_count is 37: the line must not report the
+      // capped list as the total.
+      expect(textOf(markdown)).toContain(
+        "37 LEIs carry this name; the endpoint returns the first 20.",
+      );
+      expect(markdown.structuredContent).toMatchObject({
+        name_match: "normalized",
+        lei_count: 37,
+        limit: 20,
+        truncated: true,
+        snapshot_source: "product",
+      });
+
+      const json = await client.callTool({
+        name: "ctscout_lookup_lei",
+        arguments: { name: "Cloudflare, Inc.", response_format: "json" },
+      });
+      expect(json.isError).not.toBe(true);
+      expect(JSON.parse(textOf(json))).toMatchObject({ lei_count: 37, truncated: true });
+      // The name goes on the query string, encoded — never into the path.
+      expect(calledUrls(fetchMock)).toEqual([
+        "https://ctscout.dev/lei?name=Cloudflare%2C+Inc.",
+        "https://ctscout.dev/lei?name=Cloudflare%2C+Inc.",
+      ]);
+    } finally {
+      await close();
+    }
+  });
+
+  it("explains name_match 'none' as a spelling miss, never as an absent LEI", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_free_contract_test";
+    mockApi({
+      query: "Travelers Insurance",
+      name_match: "none",
+      leis: [],
+      lei_count: 0,
+      limit: 20,
+      truncated: false,
+      ...PRODUCT_PROVENANCE,
+    });
+
+    const { client, close } = await connect();
+
+    try {
+      const result = await client.callTool({
+        name: "ctscout_lookup_lei",
+        arguments: { name: "Travelers Insurance" },
+      });
+      expect(result.isError).not.toBe(true);
+      const text = textOf(result);
+      expect(text).toContain("does NOT mean this company has no LEI");
+      expect(text).toContain("are not the index's normalizer");
+      expect(text).not.toMatch(/has no LEI\.|no LEI exists/);
+      expect(result.structuredContent).toMatchObject({ name_match: "none", lei_count: 0 });
+    } finally {
+      await close();
+    }
+  });
+
+  it("returns the free vendor summary with candidates and confirmed kept apart", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_free_contract_test";
+    const fetchMock = mockApi(VENDOR_SUMMARY);
+
+    const { client, close } = await connect();
+
+    try {
+      const markdown = await client.callTool({
+        name: "ctscout_vendor_customers",
+        arguments: { slug: "cloudflare" },
+      });
+      expect(markdown.isError).not.toBe(true);
+      const text = textOf(markdown);
+      expect(text).toContain("| Candidates | 940 |");
+      expect(text).toContain("| Confirmed | 128 |");
+      // 940 + 128 must never appear as one number, and the text must say why.
+      expect(text).not.toContain("1068");
+      expect(text).toContain("never add them");
+      expect(text).toContain(
+        "a vendor is confirmed when a hostname it certified resolves onto a domain it certifies and the customer's own www does not",
+      );
+      // co_use is asymmetric and says so.
+      expect(text).toContain("not a mutual confirmation");
+      expect(markdown.structuredContent).toMatchObject({
+        slug: "cloudflare",
+        customers: { candidates: 940, confirmed: 128 },
+        snapshot: "2026-09-01",
+        snapshot_source: "product",
+      });
+
+      const json = await client.callTool({
+        name: "ctscout_vendor_customers",
+        arguments: { slug: "cloudflare", response_format: "json" },
+      });
+      expect(json.isError).not.toBe(true);
+      expect(JSON.parse(textOf(json))).toMatchObject({
+        customers: { candidates: 940, confirmed: 128 },
+      });
+      expect(calledUrls(fetchMock)).toEqual([
+        "https://ctscout.dev/vendors/cloudflare",
+        "https://ctscout.dev/vendors/cloudflare",
+      ]);
+    } finally {
+      await close();
+    }
+  });
+
+  it("enumerates a vendor's customers only when asked, from the keyed route", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_free_contract_test";
+    const fetchMock = mockApi(VENDOR_CUSTOMERS);
+
+    const { client, close } = await connect();
+
+    try {
+      const markdown = await client.callTool({
+        name: "ctscout_vendor_customers",
+        arguments: { slug: "cloudflare", enumerate: true },
+      });
+      expect(markdown.isError).not.toBe(true);
+      const text = textOf(markdown);
+      expect(text).toContain("## Confirmed — 1 listed of 1");
+      expect(text).toContain("## Candidates — 2 listed of 900");
+      expect(text).toContain("`confirmed-customer.example`");
+      expect(text).toContain("Confirmed Customer Inc");
+      // The research build's own cap is reported as the build's, not as ours.
+      expect(text).toContain("The research build itself kept a subset");
+      expect(markdown.structuredContent).toMatchObject({
+        slug: "cloudflare",
+        counts: { candidates: 900, confirmed: 1 },
+        capped: true,
+        snapshot_source: "product",
+      });
+
+      const json = await client.callTool({
+        name: "ctscout_vendor_customers",
+        arguments: { slug: "cloudflare", enumerate: true, response_format: "json" },
+      });
+      expect(json.isError).not.toBe(true);
+      expect(JSON.parse(textOf(json))).toMatchObject({ capped: true });
+      expect(calledUrls(fetchMock)).toEqual([
+        "https://ctscout.dev/vendors/cloudflare/customers",
+        "https://ctscout.dev/vendors/cloudflare/customers",
+      ]);
+    } finally {
+      await close();
+    }
+  });
+
+  it("keeps a huge customer enumeration under the character limit in both formats, and says what it dropped", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_free_contract_test";
+    const row = (i: number) => ({
+      apex: `customer-${i}.example.com`,
+      attributed_to: `Customer ${i} Holdings Incorporated`,
+      lei: `54930${String(i).padStart(13, "0")}LW17`,
+    });
+    mockApi({
+      slug: "cloudflare",
+      confirmed: Array.from({ length: 400 }, (_, i) => row(i)),
+      candidates: Array.from({ length: 4000 }, (_, i) => row(i)),
+      counts: { candidates: 4000, confirmed: 400 },
+      capped: false,
+      ...PRODUCT_PROVENANCE,
+    });
+
+    const { client, close } = await connect();
+
+    try {
+      const listedPerFormat: number[] = [];
+      for (const response_format of ["markdown", "json"]) {
+        const result = await client.callTool({
+          name: "ctscout_vendor_customers",
+          arguments: { slug: "cloudflare", enumerate: true, response_format },
+        });
+        expect(result.isError, response_format).not.toBe(true);
+        const text = textOf(result);
+        expect(text.length, response_format).toBeLessThanOrEqual(25_000);
+        // counts and capped still describe the API's answer; the note is what
+        // says this response is short of it.
+        expect(result.structuredContent, response_format).toMatchObject({
+          counts: { candidates: 4000, confirmed: 400 },
+          capped: false,
+        });
+        const structured = result.structuredContent as {
+          truncation_note?: string;
+          candidates?: unknown[];
+          confirmed?: unknown[];
+        };
+        expect(structured.truncation_note, response_format).toContain(
+          "counts and capped describe the API's answer, not this list",
+        );
+        // The rows were dropped by the trim, not by the final clamp: a clamped
+        // markdown would be a hard slice through a half-written table, and the
+        // <= 25000 assertion above holds either way.
+        expect(text, response_format).not.toContain("Response clamped to stay under");
+        const listed = structured.candidates?.length ?? 0;
+        const listedConfirmed = structured.confirmed?.length ?? 0;
+        // Candidates are dropped first (the weaker claim), and 400 confirmed
+        // rows alone are over budget, so this fixture keeps a short confirmed
+        // list and no candidates — but never nothing at all.
+        expect(listed, response_format).toBe(0);
+        expect(listedConfirmed, response_format).toBeGreaterThan(0);
+        expect(listedConfirmed, response_format).toBeLessThan(400);
+        // The headings the reader sees name exactly the rows structuredContent
+        // carries — the two halves of one response cannot disagree.
+        if (response_format === "markdown") {
+          expect(text).toContain(`## Candidates — ${listed} listed of 4000`);
+          expect(text).toContain(`## Confirmed — ${listedConfirmed} listed of 400`);
+        } else {
+          expect(JSON.parse(text).candidates).toHaveLength(listed);
+          expect(JSON.parse(text).confirmed).toHaveLength(listedConfirmed);
+        }
+        listedPerFormat.push(listedConfirmed);
+      }
+      // Both entries are read from structuredContent, so this only pins that the
+      // two calls are deterministic. The markdown-vs-structured agreement is
+      // asserted per format above, and at a row count inside the divergence
+      // window by the test below.
+      expect(listedPerFormat[0]).toBe(listedPerFormat[1]);
+    } finally {
+      await close();
+    }
+  });
+
+  // The 400/4000 fixture above lands where trimming markdown and JSON
+  // independently happens to keep the same rows, so it cannot see that defect.
+  // A JSON row is wider than a table row, and at 46 confirmed / 187 candidates
+  // the markdown fits whole while the JSON does not — the window where the two
+  // views used to disagree: markdown listing all 187 with no notice beside a
+  // structuredContent carrying 93 under a note describing rows nobody saw.
+  it("never lets the markdown claim more rows than structuredContent carries", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_free_contract_test";
+    const row = (i: number) => ({
+      apex: `customer-${i}.example.com`,
+      attributed_to: `Customer ${i} Holdings Incorporated`,
+      lei: `54930${String(i).padStart(13, "0")}LW17`,
+    });
+    mockApi({
+      slug: "cloudflare",
+      confirmed: Array.from({ length: 46 }, (_, i) => row(i)),
+      candidates: Array.from({ length: 187 }, (_, i) => row(i)),
+      counts: { candidates: 187, confirmed: 46 },
+      capped: false,
+      ...PRODUCT_PROVENANCE,
+    });
+
+    const { client, close } = await connect();
+
+    try {
+      const markdown = await client.callTool({
+        name: "ctscout_vendor_customers",
+        arguments: { slug: "cloudflare", enumerate: true },
+      });
+      expect(markdown.isError).not.toBe(true);
+      const text = textOf(markdown);
+      const structured = markdown.structuredContent as {
+        candidates?: unknown[];
+        truncation_note?: string;
+      };
+      const listed = structured.candidates?.length ?? 0;
+      // The trim fired, so this fixture really is inside the window.
+      expect(listed).toBeGreaterThan(0);
+      expect(listed).toBeLessThan(187);
+      // The rendered heading, the rendered rows and the record must agree — and
+      // the markdown must NOT read as the complete enumeration.
+      expect(text).toContain(`## Candidates — ${listed} listed of 187`);
+      expect(text).not.toContain("## Candidates — 187 listed of 187");
+      expect(structured.truncation_note).toContain(`${listed} of 187 candidate rows`);
+      expect(text).toContain(structured.truncation_note as string);
+      // Count the rendered candidate rows directly: the heading could be right
+      // while the table below it was not.
+      const candidateSection = text.slice(text.indexOf("## Candidates"));
+      expect((candidateSection.match(/^\| `customer-/gm) ?? []).length).toBe(listed);
+    } finally {
+      await close();
+    }
+  });
+
+  it("surfaces 400, 404, 401 and the unpublished-product 503 as isError with no structuredContent", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_free_contract_test";
+    const responses = [
+      new Response(JSON.stringify({ detail: "Not found in the current research product" }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      }),
+      new Response(
+        JSON.stringify({
+          detail: "Research product not yet published (product/manifest.json is absent)",
+        }),
+        { status: 503, headers: { "Content-Type": "application/json" } },
+      ),
+      new Response(JSON.stringify({ detail: "Missing X-API-Key header" }), {
+        status: 401,
+        headers: { "Content-Type": "application/json" },
+      }),
+      new Response(JSON.stringify({ detail: "name must not be empty" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      }),
+    ];
+    const fetchMock = vi.fn(async () => responses.shift() as Response);
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const { client, close } = await connect();
+
+    try {
+      const missing = await client.callTool({
+        name: "ctscout_lookup_lei",
+        arguments: { lei: LEI },
+      });
+      expect(missing.isError).toBe(true);
+      expect(textOf(missing)).toContain("Not found in the current research product");
+      expect(textOf(missing)).toContain("absence here is not evidence");
+      expect(missing.structuredContent).toBeUndefined();
+
+      const unpublished = await client.callTool({
+        name: "ctscout_vendor_customers",
+        arguments: { slug: "cloudflare" },
+      });
+      expect(unpublished.isError).toBe(true);
+      expect(textOf(unpublished)).toContain("The research product is not published yet");
+      expect(textOf(unpublished)).toContain("product/manifest.json is absent");
+      expect(textOf(unpublished)).toContain("Nothing is wrong with the query");
+      // Not the generic 5xx text: an unpublished product is not an outage.
+      expect(textOf(unpublished)).not.toContain("ctscout server error");
+      expect(unpublished.structuredContent).toBeUndefined();
+
+      const unkeyed = await client.callTool({
+        name: "ctscout_vendor_customers",
+        arguments: { slug: "cloudflare", enumerate: true },
+      });
+      expect(unkeyed.isError).toBe(true);
+      expect(textOf(unkeyed)).toContain("needs an active ctscout.dev API key");
+      expect(textOf(unkeyed)).toContain("enumerate: false");
+      expect(unkeyed.structuredContent).toBeUndefined();
+
+      const bad = await client.callTool({
+        name: "ctscout_lookup_lei",
+        arguments: { name: "Cloudflare" },
+      });
+      expect(bad.isError).toBe(true);
+      expect(textOf(bad)).toContain("Bad request: name must not be empty");
+      expect(bad.structuredContent).toBeUndefined();
+      expect(calledUrls(fetchMock)).toHaveLength(4);
+    } finally {
+      await close();
+    }
+  });
+
+  it("never hands back a shortened complete list without saying so", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_free_contract_test";
+    mockApi({
+      ...LEI_RECORD,
+      apex_count: 4000,
+      vendors_confirmed: Array.from({ length: 45 }, (_, i) => `vendor-${i}`),
+      future_field: "x".repeat(30_000),
+    });
+
+    const { client, close } = await connect();
+
+    try {
+      const json = await client.callTool({
+        name: "ctscout_lookup_lei",
+        arguments: { lei: LEI, response_format: "json" },
+      });
+      expect(json.isError).not.toBe(true);
+      const structured = json.structuredContent as {
+        vendors_confirmed?: string[];
+        truncation_note?: string;
+        snapshot_dates?: Record<string, string>;
+        as_of?: string;
+      };
+      // vendors_confirmed is published complete, with no total beside it: a
+      // short one has to carry the length the API actually sent.
+      expect(structured.vendors_confirmed).toHaveLength(20);
+      expect(structured.truncation_note).toContain("vendors_confirmed lists 20 of 45");
+      // ...and the per-source provenance the tool contract promises on every
+      // product answer is still there. Dropping it in the fallback left the
+      // caller with an export version and no way to tell what produced it.
+      expect(structured.snapshot_dates).toMatchObject({
+        gleif: "2026-08-28",
+        psl: expect.any(String),
+      });
+      expect(structured.as_of).toBe("2026-09-01");
+      expect(textOf(json).length).toBeLessThanOrEqual(25_000);
+
+      const markdown = await client.callTool({
+        name: "ctscout_lookup_lei",
+        arguments: { lei: LEI },
+      });
+      expect(markdown.isError).not.toBe(true);
+      expect(textOf(markdown)).toContain("+25 more (45 in all)");
+    } finally {
+      await close();
+    }
+  });
+
+  it("tells an unpublished product apart from a transient 503", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_free_contract_test";
+    const responses = [
+      new Response(
+        JSON.stringify({
+          detail: "Research product not yet published (product/manifest.json is absent)",
+        }),
+        { status: 503, headers: { "Content-Type": "application/json" } },
+      ),
+      new Response("<html>503 Service Temporarily Unavailable</html>", {
+        status: 503,
+        headers: { "Content-Type": "text/html" },
+      }),
+    ];
+    const fetchMock = vi.fn(async () => responses.shift() as Response);
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const { client, close } = await connect();
+
+    try {
+      const unpublished = await client.callTool({
+        name: "ctscout_lookup_lei",
+        arguments: { lei: LEI },
+      });
+      expect(unpublished.isError).toBe(true);
+      expect(textOf(unpublished)).toContain("not published yet");
+      expect(textOf(unpublished)).toContain("retry after the next refresh");
+
+      // Same status, different body: an outage, and the advice has to change
+      // with it — a proxy's 503 is not a permanent state.
+      const outage = await client.callTool({
+        name: "ctscout_vendor_customers",
+        arguments: { slug: "cloudflare" },
+      });
+      expect(outage.isError).toBe(true);
+      expect(textOf(outage)).toContain("temporary availability failure");
+      expect(textOf(outage)).toContain("retry shortly");
+      expect(textOf(outage)).not.toContain("not published yet");
+      expect(textOf(outage)).not.toContain("refresh");
+      expect(outage.structuredContent).toBeUndefined();
+    } finally {
+      await close();
+    }
+  });
+
+  it("rejects a malformed LEI, a malformed slug, and both-or-neither lookups before any network call", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_free_contract_test";
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const { client, close } = await connect();
+
+    try {
+      for (const args of [
+        { lei: "not-an-lei" },
+        { lei: LEI, name: "Cloudflare, Inc." },
+        {},
+      ] as Record<string, unknown>[]) {
+        const result = await client.callTool({ name: "ctscout_lookup_lei", arguments: args });
+        expect(result.isError, JSON.stringify(args)).toBe(true);
+        expect(result.structuredContent, JSON.stringify(args)).toBeUndefined();
+      }
+      const badSlug = await client.callTool({
+        name: "ctscout_vendor_customers",
+        arguments: { slug: "Cloudflare/../keys" },
+      });
+      expect(badSlug.isError).toBe(true);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      await close();
+    }
+  });
+
+  // The free product routes are unauthenticated on the Worker, and the README
+  // documents keyless use. Before round 1 of #115's review, callApi demanded a
+  // key for every route and the binary exited 1 without one, so the keyless case
+  // could not work at all.
+  it("reads the free product routes with no key configured, sending no key header", async () => {
+    delete process.env.CTSCOUT_API_KEY;
+    const fetchMock = mockApi(LEI_RECORD);
+
+    const { client, close } = await connect();
+
+    try {
+      const record = await client.callTool({
+        name: "ctscout_lookup_lei",
+        arguments: { lei: LEI, response_format: "json" },
+      });
+      expect(record.isError).not.toBe(true);
+      expect(record.structuredContent).toMatchObject({ lei: LEI, snapshot_source: "product" });
+
+      mockApi(VENDOR_SUMMARY);
+      const summary = await client.callTool({
+        name: "ctscout_vendor_customers",
+        arguments: { slug: "cloudflare", response_format: "json" },
+      });
+      expect(summary.isError).not.toBe(true);
+      expect(summary.structuredContent).toMatchObject({ slug: "cloudflare" });
+
+      // No header at all rather than an empty one: an empty X-API-Key reads as
+      // a malformed key, not as no key.
+      const headers = (fetchMock.mock.calls[0]?.[1] as { headers: Record<string, string> }).headers;
+      expect(headers).not.toHaveProperty("X-API-Key");
+      expect(headers).toMatchObject({ Accept: "application/json" });
+    } finally {
+      await close();
+    }
+  });
+
+  it("refuses the keyed enumeration with the same guidance when no key is configured", async () => {
+    delete process.env.CTSCOUT_API_KEY;
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const { client, close } = await connect();
+
+    try {
+      const result = await client.callTool({
+        name: "ctscout_vendor_customers",
+        arguments: { slug: "cloudflare", enumerate: true },
+      });
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toContain("needs an active ctscout.dev API key");
+      expect(textOf(result)).toContain("enumerate: false");
+      expect(result.structuredContent).toBeUndefined();
+      // Answered locally: the origin was never asked a question we already know
+      // the answer to.
+      expect(fetchMock).not.toHaveBeenCalled();
+      // And the five keyed tools still say what they always said.
+      const scan = await client.callTool({
+        name: "ctscout_search_company",
+        arguments: { company_name: "Cloudflare" },
+      });
+      expect(scan.isError).toBe(true);
+      expect(textOf(scan)).toContain("CTSCOUT_API_KEY environment variable is not set");
+    } finally {
+      await close();
+    }
+  });
+
+  it("never says a vendor or an entity owns a domain", async () => {
+    const { client, close } = await connect();
+    try {
+      const { tools } = await client.listTools();
+      for (const tool of tools) {
+        // "ownership claim" (which every tool disclaims) and "own www" (note
+        // 2's definition) are the vocabulary; the bare verb is what is banned.
+        expect(tool.description, tool.name).not.toMatch(/\bowns\b/);
+      }
+      for (const name of ["ctscout_lookup_lei", "ctscout_vendor_customers"]) {
+        const description = tools.find((tool) => tool.name === name)?.description ?? "";
+        expect(description, name).toContain(
+          "a vendor is confirmed when a hostname it certified resolves onto a domain it certifies and the customer's own www does not",
+        );
+        expect(description, name).toMatch(/attributed|ATTRIBUTED/);
+      }
+      const vendor = tools.find((tool) => tool.name === "ctscout_vendor_customers")?.description;
+      expect(vendor).toContain("NEVER summed");
+      expect(vendor).toContain("SUBSET of candidates");
     } finally {
       await close();
     }
