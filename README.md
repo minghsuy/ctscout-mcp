@@ -328,7 +328,10 @@ without a network round-trip.
 Until the refresh has published its first product, `/lei` and `/vendors` answer
 HTTP 503 with `{"detail": "Research product not yet published…"}`. Both tools
 surface that as a plain "not published yet" error naming the API's own detail —
-not as a server outage, and not as an empty result.
+not as a server outage, and not as an empty result. A 503 carrying any other
+body is a different thing entirely (a Worker, proxy or upstream failure) and is
+reported as a temporary availability failure to retry shortly, never as an
+unpublished product.
 
 ---
 

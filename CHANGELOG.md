@@ -37,7 +37,12 @@ version heading so the exact package metadata and notes are reviewed together;
   record — same rows, same counts, one `truncation_note` — so neither half of a
   response can describe a list the other half does not show, and the API's own
   `counts` / `capped` are left untouched. Every rendered list says how many
-  entries it left out. The hosted MCP in ctscout-worker does
+  entries it left out and how many there were in all, and the over-budget
+  fallback names any list it shortened with the length the API sent — a list
+  published complete (`vendors_confirmed`) is never quietly returned short. A
+  503 is read from its body: only the Worker's "not yet published" detail gets
+  the wait-for-the-refresh guidance, and any other 503 is reported as a
+  temporary availability failure rather than a permanent state. The hosted MCP in ctscout-worker does
   not advertise these two tools yet; mirroring them there is a separate Worker
   change (#103)
 

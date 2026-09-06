@@ -1958,6 +1958,89 @@ describe("stdio MCP compatibility contract", () => {
     }
   });
 
+  it("never hands back a shortened complete list without saying so", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_free_contract_test";
+    mockApi({
+      ...LEI_RECORD,
+      apex_count: 4000,
+      vendors_confirmed: Array.from({ length: 45 }, (_, i) => `vendor-${i}`),
+      future_field: "x".repeat(30_000),
+    });
+
+    const { client, close } = await connect();
+
+    try {
+      const json = await client.callTool({
+        name: "ctscout_lookup_lei",
+        arguments: { lei: LEI, response_format: "json" },
+      });
+      expect(json.isError).not.toBe(true);
+      const structured = json.structuredContent as {
+        vendors_confirmed?: string[];
+        truncation_note?: string;
+      };
+      // vendors_confirmed is published complete, with no total beside it: a
+      // short one has to carry the length the API actually sent.
+      expect(structured.vendors_confirmed).toHaveLength(20);
+      expect(structured.truncation_note).toContain("vendors_confirmed lists 20 of 45");
+      expect(textOf(json).length).toBeLessThanOrEqual(25_000);
+
+      const markdown = await client.callTool({
+        name: "ctscout_lookup_lei",
+        arguments: { lei: LEI },
+      });
+      expect(markdown.isError).not.toBe(true);
+      expect(textOf(markdown)).toContain("+25 more (45 in all)");
+    } finally {
+      await close();
+    }
+  });
+
+  it("tells an unpublished product apart from a transient 503", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_free_contract_test";
+    const responses = [
+      new Response(
+        JSON.stringify({
+          detail: "Research product not yet published (product/manifest.json is absent)",
+        }),
+        { status: 503, headers: { "Content-Type": "application/json" } },
+      ),
+      new Response("<html>503 Service Temporarily Unavailable</html>", {
+        status: 503,
+        headers: { "Content-Type": "text/html" },
+      }),
+    ];
+    const fetchMock = vi.fn(async () => responses.shift() as Response);
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const { client, close } = await connect();
+
+    try {
+      const unpublished = await client.callTool({
+        name: "ctscout_lookup_lei",
+        arguments: { lei: LEI },
+      });
+      expect(unpublished.isError).toBe(true);
+      expect(textOf(unpublished)).toContain("not published yet");
+      expect(textOf(unpublished)).toContain("retry after the next refresh");
+
+      // Same status, different body: an outage, and the advice has to change
+      // with it — a proxy's 503 is not a permanent state.
+      const outage = await client.callTool({
+        name: "ctscout_vendor_customers",
+        arguments: { slug: "cloudflare" },
+      });
+      expect(outage.isError).toBe(true);
+      expect(textOf(outage)).toContain("temporary availability failure");
+      expect(textOf(outage)).toContain("retry shortly");
+      expect(textOf(outage)).not.toContain("not published yet");
+      expect(textOf(outage)).not.toContain("refresh");
+      expect(outage.structuredContent).toBeUndefined();
+    } finally {
+      await close();
+    }
+  });
+
   it("rejects a malformed LEI, a malformed slug, and both-or-neither lookups before any network call", async () => {
     process.env.CTSCOUT_API_KEY = "ds_free_contract_test";
     const fetchMock = vi.fn();

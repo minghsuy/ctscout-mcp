@@ -3446,6 +3446,32 @@ describe("explainError — product surface", () => {
     expect(explainError(new ApiError(503, "boom"), "scan")).toContain("ctscout server error (503)");
   });
 
+  // A transient Worker / proxy / upstream failure returns 503 too. Reporting
+  // one as "wait for the weekly refresh" turns a retry-in-seconds into a
+  // retry-in-days, so only the Worker's own unpublished body earns that advice.
+  it("calls an unrelated or empty 503 a transient failure, never an unpublished product", () => {
+    for (const body of [
+      "",
+      "{}",
+      "<html>502 Bad Gateway</html>",
+      JSON.stringify({ detail: "upstream connect error" }),
+    ]) {
+      const message = explainError(new ApiError(503, body), "product");
+      expect(message, JSON.stringify(body)).toContain("temporary availability failure");
+      expect(message, JSON.stringify(body)).toContain("retry shortly");
+      expect(message, JSON.stringify(body)).not.toContain("not published yet");
+      expect(message, JSON.stringify(body)).not.toContain("refresh");
+    }
+    // The body is surfaced when there is one, and nothing is invented when not.
+    expect(
+      explainError(
+        new ApiError(503, JSON.stringify({ detail: "upstream connect error" })),
+        "product",
+      ),
+    ).toContain("The service said: upstream connect error");
+    expect(explainError(new ApiError(503, ""), "product")).not.toContain("The service said");
+  });
+
   it("explains a 404 as absence from this published version, not absence of the entity", () => {
     const message = explainError(new ApiError(404, "{}"), "product");
     expect(message).toContain("Not found in the current research product");
@@ -3760,6 +3786,45 @@ describe("truncateLeiJsonIfNeeded / truncateVendorSummaryJsonIfNeeded", () => {
       snapshot_source: "product",
     });
     expect(JSON.parse(text)).toEqual(structured);
+  });
+
+  // The over-budget fallback cuts every array to ROW_LIST_LIMIT. `sample_domains`
+  // is declared partial against apex_count, but `vendors_confirmed` is published
+  // complete with no total beside it — a silently shortened one reads to a JSON
+  // caller as the whole truth.
+  it("never shortens a complete list in silence: the cut is named with the real length", () => {
+    const vendors = Array.from({ length: 45 }, (_, i) => `vendor-${i}`);
+    const record = leiRecord({
+      apex_count: 4000,
+      vendors_confirmed: vendors,
+      sample_domains: Array.from({ length: 30 }, (_, i) => `d${i}.example`),
+      future_field: "x".repeat(CHARACTER_LIMIT + 1),
+    });
+    const { text, structured } = truncateLeiJsonIfNeeded(record);
+    expect(text.length).toBeLessThanOrEqual(CHARACTER_LIMIT);
+
+    // structuredContent: the short list, its real length, and a marker.
+    const kept = structured as LeiRecord;
+    expect(kept.vendors_confirmed).toHaveLength(20);
+    expect(kept.truncation_note).toContain("vendors_confirmed lists 20 of 45");
+    expect(kept.truncation_note).toContain("sample_domains lists 20 of 30");
+    expect(JSON.parse(text).truncation_note).toBe(kept.truncation_note);
+
+    // markdown: the same two facts, from its own cut.
+    const md = formatLeiRecordAsMarkdown(record);
+    expect(md).toContain("+25 more (45 in all)");
+    expect(md).toContain("+10 more (30 in all)");
+    expect((md.match(/`vendor-\d+`/g) ?? []).length).toBe(20);
+  });
+
+  it("writes no truncation note when no list was shortened", () => {
+    const { structured } = truncateLeiJsonIfNeeded(
+      leiRecord({ future_field: "x".repeat(CHARACTER_LIMIT + 1) }),
+    );
+    // The envelope still fired (the unknown field is gone), but the two short
+    // lists survived whole, so there is no list cut to report.
+    expect(structured).not.toHaveProperty("future_field");
+    expect((structured as LeiRecord).truncation_note).toBeUndefined();
   });
 
   it("bounds every string the minimal LEI envelope keeps", () => {

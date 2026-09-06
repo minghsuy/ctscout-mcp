@@ -1054,6 +1054,14 @@ const LeiLookupOutputSchema = z.looseObject({
   lei_count: z.number().optional().describe("By-name answer: matches before the cap."),
   limit: z.number().optional().describe("By-name answer: the cap applied to `leis`."),
   truncated: z.boolean().optional().describe("By-name answer: true when lei_count exceeds limit."),
+  truncation_note: z
+    .string()
+    .optional()
+    .describe(
+      "Written by this MCP server, never by the API: present only when a list above was " +
+        "shortened to stay under the response character limit, naming each shortened list " +
+        "and the length the API actually sent. Absent means no list was cut here.",
+    ),
   ...ProductProvenanceFields,
   ...ProductSnapshotFields,
 });
@@ -1463,6 +1471,11 @@ export type ErrorSurface = "scan" | "jobs" | "product" | "vendor_enumeration";
 // One copy, reached two ways: the 401/403 the origin returns, and the
 // pre-flight guard that answers without a round-trip when no key is configured
 // at all. Both are the same fact for the caller.
+// The Worker's own sentence for "no product has ever been published" — the one
+//503 body on these routes that is a state rather than an outage. Matched as a
+// prefix so the parenthetical it carries today can change without this drifting.
+export const PRODUCT_UNPUBLISHED_DETAIL = "Research product not yet published";
+
 export const ENUMERATION_KEY_GUIDANCE =
   "Enumerating a vendor's customers needs an active ctscout.dev API key (any tier), and the " +
   "key in CTSCOUT_API_KEY was missing, invalid or revoked. Get a free key at " +
@@ -1489,13 +1502,35 @@ export function explainError(err: unknown, surface: ErrorSurface = "scan"): stri
           "research build confirmed; absence here is not evidence that the entity or vendor " +
           "does not exist."
         );
-      case 503:
+      case 503: {
+        // 503 on these routes has two very different causes, and only the body
+        // tells them apart: the Worker returns it with this specific `detail`
+        // when the product has never been published, and every transient
+        // failure in front of or under the Worker returns it with something
+        // else (or nothing). Reporting an outage as "wait for the weekly
+        // refresh" would turn a retry-in-seconds into a retry-in-days.
+        const detail = detailFrom(err.responseBody);
+        if (detail !== undefined && detail.includes(PRODUCT_UNPUBLISHED_DETAIL)) {
+          return (
+            `The research product is not published yet: ${safeDetail(err)}. These LEI and ` +
+            "vendor answers come from the weekly ctscout-research refresh; until its first " +
+            "publish lands, /lei and /vendors answer 503. Nothing is wrong with the query — " +
+            "retry after the next refresh."
+          );
+        }
+        // Nothing is claimed about which layer failed or how long it will last:
+        // the body did not say, so neither does this.
+        const said =
+          detail !== undefined
+            ? ` The service said: ${escapeMarkdown(truncateBody(detail.replace(/[\r\n]+/g, " ")))}.`
+            : "";
         return (
-          `The research product is not published yet: ${safeDetail(err)}. These LEI and ` +
-          "vendor answers come from the weekly ctscout-research refresh; until its first " +
-          "publish lands, /lei and /vendors answer 503. Nothing is wrong with the query — " +
-          "retry after the next refresh."
+          `ctscout.dev answered 503 (service unavailable) for this research-product read.${said}` +
+          " This response did NOT say the research product is unpublished, so treat it as a" +
+          " temporary availability failure rather than a permanent state: retry shortly, and" +
+          " check https://ctscout.dev/health if it persists."
         );
+      }
       default:
         break;
     }
@@ -2847,7 +2882,10 @@ function backtickList(
 ): { text: string; shown: number } {
   if (!Array.isArray(values) || values.length === 0) return { text: empty, shown: 0 };
   const shown = values.slice(0, max).map((value) => `\`${cellSafe(String(value), 120)}\``);
-  const rest = values.length > shown.length ? `, +${values.length - shown.length} more` : "";
+  const rest =
+    values.length > shown.length
+      ? `, +${values.length - shown.length} more (${values.length} in all)`
+      : "";
   return { text: `${shown.join(", ")}${rest}`, shown: shown.length };
 }
 
@@ -2857,7 +2895,7 @@ function backtickList(
 // list that grows past the cap has to show as a short list plus this marker
 // rather than as a complete-looking one.
 function moreLine(total: number, shown: number): string[] {
-  return total > shown ? ["", `_+${total - shown} more not shown._`] : [];
+  return total > shown ? ["", `_+${total - shown} more not shown (${total} in all)._`] : [];
 }
 
 export function formatLeiRecordAsMarkdown(record: LeiRecord): string {
@@ -3249,8 +3287,28 @@ function minimalLeiEnvelope(data: LeiLookupResponse): LeiLookupResponse {
     if (typeof data[field] === "number") keep[field] = data[field];
   }
   if (typeof data.truncated === "boolean") keep.truncated = data.truncated;
+  // A cut list must never reach a caller looking complete. `sample_domains` is
+  // declared partial against a total the record carries (`apex_count`), so a
+  // shorter sample is a smaller sample. `vendors_confirmed` is published
+  // complete with no total beside it, and `leis` carries only the ENDPOINT's
+  // cut (`lei_count` / `limit`), which says nothing about this one — shortening
+  // either in silence turns a partial answer into a wrong one. So every cut is
+  // named, with the length the API actually sent.
+  const cuts: string[] = [];
   for (const field of LEI_ENVELOPE_LISTS) {
-    if (Array.isArray(data[field])) keep[field] = boundedStrings(data[field]);
+    const original = data[field];
+    if (!Array.isArray(original)) continue;
+    const kept = boundedStrings(original);
+    keep[field] = kept;
+    if (kept.length < original.length) {
+      cuts.push(`${field} lists ${kept.length} of ${original.length}`);
+    }
+  }
+  if (cuts.length > 0) {
+    keep.truncation_note =
+      `This MCP response shortened lists the API sent whole to stay under ${CHARACTER_LIMIT} ` +
+      `chars: ${cuts.join(", ")}. The counts beside them (apex_count, lei_count) describe ` +
+      "the API's answer, not these lists.";
   }
   return keep as unknown as LeiLookupResponse;
 }
