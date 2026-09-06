@@ -2794,11 +2794,18 @@ function numberCell(value: unknown): string {
   return isCount(value) ? String(value) : "—";
 }
 
-function backtickList(values: unknown, empty: string, max = ROW_LIST_LIMIT): string {
-  if (!Array.isArray(values) || values.length === 0) return empty;
+// Returns the rendered list AND how many entries it actually rendered. A caller
+// that counted the array instead would print "25 shown" over 20 items: the cut
+// happens here, so the count has to come from here too.
+function backtickList(
+  values: unknown,
+  empty: string,
+  max = ROW_LIST_LIMIT,
+): { text: string; shown: number } {
+  if (!Array.isArray(values) || values.length === 0) return { text: empty, shown: 0 };
   const shown = values.slice(0, max).map((value) => `\`${cellSafe(String(value), 120)}\``);
   const rest = values.length > shown.length ? `, +${values.length - shown.length} more` : "";
-  return `${shown.join(", ")}${rest}`;
+  return { text: `${shown.join(", ")}${rest}`, shown: shown.length };
 }
 
 // Every rendered list is cut at ROW_LIST_LIMIT, and a cut one must say so. The
@@ -2806,12 +2813,13 @@ function backtickList(values: unknown, empty: string, max = ROW_LIST_LIMIT): str
 // top-N lengths ("The contract refuses wrong answers, not resized ones"), so a
 // list that grows past the cap has to show as a short list plus this marker
 // rather than as a complete-looking one.
-function moreLine(total: number, shown: number, kind: string): string[] {
-  return total > shown ? ["", `_+${total - shown} more ${kind} not shown._`] : [];
+function moreLine(total: number, shown: number): string[] {
+  return total > shown ? ["", `_+${total - shown} more not shown._`] : [];
 }
 
 export function formatLeiRecordAsMarkdown(record: LeiRecord): string {
-  const sampled = Array.isArray(record.sample_domains) ? record.sample_domains.length : 0;
+  const sample = backtickList(record.sample_domains, "_none_");
+  const vendors = backtickList(record.vendors_confirmed, "_none confirmed_");
   return clampText(
     [
       `# ${cellSafe(record.legal_name, 200)}`,
@@ -2828,15 +2836,12 @@ export function formatLeiRecordAsMarkdown(record: LeiRecord): string {
       `| First seen | ${cellSafe(record.first_seen, 40)} |`,
       `| Last seen | ${cellSafe(record.last_seen, 40)} |`,
       "",
-      `**Confirmed vendors on this entity's domains:** ${backtickList(
-        record.vendors_confirmed,
-        "_none confirmed_",
-      )}`,
+      `**Confirmed vendors on this entity's domains:** ${vendors.text}`,
       `_These are vendor slugs — pass one to ctscout_vendor_customers. ${VENDOR_CONFIRMED_DEFINITION}._`,
       "",
-      `**Sample of the attributed apexes** — ${sampled} shown, ${numberCell(
+      `**Sample of the attributed apexes** — ${sample.shown} listed, ${numberCell(
         record.apex_count,
-      )} attributed in total: ${backtickList(record.sample_domains, "_none_")}`,
+      )} attributed in total: ${sample.text}`,
       "_The sample is hash-chosen, not the top N and not a complete list; apex_count is the total._",
       "",
       '_"Attributed" means the certificate and DNS evidence names this entity for the domain.' +
@@ -2897,7 +2902,7 @@ export function formatLeiNameMatchesAsMarkdown(data: LeiNameMatches): string {
       countLine,
       "",
       ...shown.map((lei) => `- \`${cellSafe(lei, 40)}\``),
-      ...moreLine(leis.length, shown.length, "of the LEIs the endpoint returned are"),
+      ...moreLine(leis.length, shown.length),
       "",
       "_Look one up with ctscout_lookup_lei { lei } for the legal name, country and " +
         "attributed apexes._",
@@ -2927,7 +2932,7 @@ function customerSplitTable(candidates: unknown, confirmed: unknown): string[] {
 export function formatVendorSummaryAsMarkdown(data: VendorSummary): string {
   const countries = Array.isArray(data.countries_top) ? data.countries_top : [];
   const coUse = Array.isArray(data.co_use) ? data.co_use : [];
-  const sample = Array.isArray(data.sample_customers) ? data.sample_customers : [];
+  const sample = backtickList(data.sample_customers, "_none_");
   const lines = [
     `# Vendor: ${cellSafe(data.vendor_name, 200)} (\`${cellSafe(data.slug, 80)}\`)`,
     "",
@@ -2951,7 +2956,7 @@ export function formatVendorSummaryAsMarkdown(data: VendorSummary): string {
       ...countries
         .slice(0, ROW_LIST_LIMIT)
         .map((row) => `| ${cellSafe(row?.country, 40)} | ${numberCell(row?.confirmed)} |`),
-      ...moreLine(countries.length, Math.min(countries.length, ROW_LIST_LIMIT), "countries are"),
+      ...moreLine(countries.length, Math.min(countries.length, ROW_LIST_LIMIT)),
       "",
       "_Candidates are not counted here, and only customers that resolved to an LEI carry a country._",
       "",
@@ -2966,7 +2971,7 @@ export function formatVendorSummaryAsMarkdown(data: VendorSummary): string {
       ...coUse
         .slice(0, ROW_LIST_LIMIT)
         .map((row) => `| \`${cellSafe(row?.slug, 80)}\` | ${numberCell(row?.confirmed)} |`),
-      ...moreLine(coUse.length, Math.min(coUse.length, ROW_LIST_LIMIT), "vendors are"),
+      ...moreLine(coUse.length, Math.min(coUse.length, ROW_LIST_LIMIT)),
       "",
       "_The count is this vendor's CONFIRMED customers that the other vendor also certifies — " +
         "a candidate there, not a mutual confirmation._",
@@ -2977,9 +2982,9 @@ export function formatVendorSummaryAsMarkdown(data: VendorSummary): string {
   // total come from different exporter constants, so phrasing them as a
   // fraction would read as nonsense ("30 of 5") the moment the sample grows.
   lines.push(
-    `**Sample of confirmed customers** — ${sample.length} shown, ${numberCell(
+    `**Sample of confirmed customers** — ${sample.shown} listed, ${numberCell(
       data.customers?.confirmed,
-    )} confirmed in total: ${backtickList(sample, "_none_")}`,
+    )} confirmed in total: ${sample.text}`,
     "_Hash-chosen from the confirmed customers, not the top N. Call this tool with " +
       "enumerate: true for the full enumeration (needs an API key)._",
   );
@@ -3044,6 +3049,17 @@ function rowsOf(rows: unknown): VendorCustomerRow[] {
 // to match a trimmed list would put a complete-looking enumeration in front of
 // a caller (the "well-formed and lying" case the product contract calls out).
 function customersWithNote(current: VendorCustomers, original: VendorCustomers): VendorCustomers {
+  // The note is a claim about rows, so it is written only when rows actually
+  // went missing. The minimal envelope also reaches here for a record whose
+  // lists were already empty and whose bulk was an unrecognized field: saying
+  // "rows were dropped" there names the wrong thing, and since the collapse now
+  // renders to the markdown too, the reader would see it.
+  if (
+    rowsOf(current.confirmed).length >= rowsOf(original.confirmed).length &&
+    rowsOf(current.candidates).length >= rowsOf(original.candidates).length
+  ) {
+    return current;
+  }
   return {
     ...current,
     truncation_note:

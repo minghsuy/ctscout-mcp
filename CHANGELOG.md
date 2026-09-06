@@ -27,11 +27,12 @@ version heading so the exact package metadata and notes are reviewed together;
   the daily warehouse sync, so calling it `"scan"` would misname both its
   origin and its cadence. Before the first publish the routes answer HTTP 503
   and the tools return a plain "not published yet" error rather than a server
-  outage. Where a list has to be trimmed to fit the character limit, the
+  outage. In the customer enumeration, where the payload IS the rows, the
   markdown and the `structuredContent` are two renderings of one bounded
   record — same rows, same counts, one `truncation_note` — so neither half of a
   response can describe a list the other half does not show, and the API's own
-  `counts` / `capped` are left untouched. The hosted MCP in ctscout-worker does
+  `counts` / `capped` are left untouched. Every rendered list says how many
+  entries it left out. The hosted MCP in ctscout-worker does
   not advertise these two tools yet; mirroring them there is a separate Worker
   change (#103)
 

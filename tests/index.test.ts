@@ -3503,10 +3503,28 @@ describe("formatLeiRecordAsMarkdown", () => {
     expect(md).toContain("| Apex domains attributed | 42 |");
     expect(md).toContain("`akamai`, `cloudflare`");
     // 2 sampled of 42 attributed — the sample must never read as the total.
-    expect(md).toContain("**Sample of the attributed apexes** — 2 shown, 42 attributed in total");
+    expect(md).toContain("**Sample of the attributed apexes** — 2 listed, 42 attributed in total");
     expect(md).toContain("not a complete list");
     expect(md).toContain("not an ownership claim");
     expect(md).not.toMatch(/\bowns\b/);
+  });
+
+  // The count beside a list has to be the number the list actually printed.
+  // Reporting the array length puts "25 listed" over 20 items — the exact
+  // failure the exporter's unpinned sample size makes reachable.
+  it("counts what it printed, not what the API sent, when a sample exceeds the cap", () => {
+    const md = formatLeiRecordAsMarkdown(
+      leiRecord({
+        apex_count: 4000,
+        sample_domains: Array.from({ length: 25 }, (_, i) => `d${i}.example`),
+      }),
+    );
+    expect(md).toContain(
+      "**Sample of the attributed apexes** — 20 listed, 4000 attributed in total",
+    );
+    expect(md).not.toContain("25 listed");
+    expect(md).toContain("+5 more");
+    expect((md.match(/`d\d+\.example`/g) ?? []).length).toBe(20);
   });
 
   it("says when the provenance line itself was cut", () => {
@@ -3605,7 +3623,7 @@ describe("formatVendorSummaryAsMarkdown", () => {
     );
     expect(md).toContain("Fan-out alone is not a vendor relationship");
     expect(md).toContain("not a mutual confirmation");
-    expect(md).toContain("**Sample of confirmed customers** — 2 shown, 128 confirmed in total");
+    expect(md).toContain("**Sample of confirmed customers** — 2 listed, 128 confirmed in total");
     expect(md).not.toMatch(/\bowns\b/);
   });
 
@@ -3622,7 +3640,7 @@ describe("formatVendorSummaryAsMarkdown", () => {
     expect(md).not.toContain("## Top countries");
     expect(md).not.toContain("## Vendors also certifying");
     expect(md).toContain(
-      "**Sample of confirmed customers** — 0 shown, 128 confirmed in total: _none_",
+      "**Sample of confirmed customers** — 0 listed, 128 confirmed in total: _none_",
     );
   });
 });
@@ -3887,6 +3905,28 @@ describe("boundVendorCustomers — the JSON half", () => {
     // A collapse to the envelope collapses BOTH views: the markdown shows the
     // empty lists too, rather than the rows structuredContent no longer has.
     expect(text).toContain("## Candidates — 0 listed of 2");
+  });
+
+  // The note is a claim about rows. A record whose lists were already empty and
+  // whose bulk was an unrecognized field drops no rows at all, so saying "rows
+  // were dropped" names the wrong thing — and the markdown now shows it.
+  it("writes no truncation note when the collapse dropped no rows", () => {
+    const { text, json, structured } = boundVendorCustomers({
+      slug: "cloudflare",
+      confirmed: [],
+      candidates: [],
+      counts: { candidates: 0, confirmed: 0 },
+      capped: false,
+      as_of: "2026-09-01",
+      snapshot: "2026-09-01",
+      snapshot_source: "product",
+      future_field: "y".repeat(30_000),
+    } as unknown as VendorCustomers);
+    expect(json.length).toBeLessThanOrEqual(CHARACTER_LIMIT);
+    expect(structured).not.toHaveProperty("future_field");
+    expect(structured.truncation_note).toBeUndefined();
+    expect(text).not.toContain("rows were dropped");
+    expect(text).toContain("## Candidates — 0 listed of 0");
   });
 
   it("drops a non-numeric enumeration count rather than letting one escape the envelope", () => {

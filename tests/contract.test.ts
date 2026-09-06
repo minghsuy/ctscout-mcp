@@ -437,6 +437,21 @@ describe("stdio MCP compatibility contract", () => {
           expect.arrayContaining(["snapshot", "snapshot_source"]),
         );
       }
+      // The product tools require ONLY what this server writes itself: every
+      // proxied field is optional, so a publication the Worker's contract would
+      // have refused cannot also fail schema validation on the way out. Pinned
+      // exactly, since shrinking `required` is an externally observable change.
+      for (const name of ["ctscout_lookup_lei", "ctscout_vendor_customers"]) {
+        expect(tools.find((tool) => tool.name === name)?.outputSchema?.required, name).toEqual([
+          "snapshot",
+          "snapshot_source",
+        ]);
+      }
+      const rowSchema = (
+        tools.find((tool) => tool.name === "ctscout_vendor_customers")?.outputSchema
+          ?.properties as Record<string, { items?: { required?: string[] } }>
+      ).candidates?.items;
+      expect(rowSchema?.required).toBeUndefined();
 
       // The scan shape is proxied from the origin, so it stays open to fields
       // this server does not model; the enum-like fields are strings with
@@ -1786,8 +1801,65 @@ describe("stdio MCP compatibility contract", () => {
         }
         listedPerFormat.push(listedConfirmed);
       }
-      // And the same record answers both formats, so the two calls agree too.
+      // Both entries are read from structuredContent, so this only pins that the
+      // two calls are deterministic. The markdown-vs-structured agreement is
+      // asserted per format above, and at a row count inside the divergence
+      // window by the test below.
       expect(listedPerFormat[0]).toBe(listedPerFormat[1]);
+    } finally {
+      await close();
+    }
+  });
+
+  // The 400/4000 fixture above lands where trimming markdown and JSON
+  // independently happens to keep the same rows, so it cannot see that defect.
+  // A JSON row is wider than a table row, and at 46 confirmed / 187 candidates
+  // the markdown fits whole while the JSON does not — the window where the two
+  // views used to disagree: markdown listing all 187 with no notice beside a
+  // structuredContent carrying 93 under a note describing rows nobody saw.
+  it("never lets the markdown claim more rows than structuredContent carries", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_free_contract_test";
+    const row = (i: number) => ({
+      apex: `customer-${i}.example.com`,
+      attributed_to: `Customer ${i} Holdings Incorporated`,
+      lei: `54930${String(i).padStart(13, "0")}LW17`,
+    });
+    mockApi({
+      slug: "cloudflare",
+      confirmed: Array.from({ length: 46 }, (_, i) => row(i)),
+      candidates: Array.from({ length: 187 }, (_, i) => row(i)),
+      counts: { candidates: 187, confirmed: 46 },
+      capped: false,
+      ...PRODUCT_PROVENANCE,
+    });
+
+    const { client, close } = await connect();
+
+    try {
+      const markdown = await client.callTool({
+        name: "ctscout_vendor_customers",
+        arguments: { slug: "cloudflare", enumerate: true },
+      });
+      expect(markdown.isError).not.toBe(true);
+      const text = textOf(markdown);
+      const structured = markdown.structuredContent as {
+        candidates?: unknown[];
+        truncation_note?: string;
+      };
+      const listed = structured.candidates?.length ?? 0;
+      // The trim fired, so this fixture really is inside the window.
+      expect(listed).toBeGreaterThan(0);
+      expect(listed).toBeLessThan(187);
+      // The rendered heading, the rendered rows and the record must agree — and
+      // the markdown must NOT read as the complete enumeration.
+      expect(text).toContain(`## Candidates — ${listed} listed of 187`);
+      expect(text).not.toContain("## Candidates — 187 listed of 187");
+      expect(structured.truncation_note).toContain(`${listed} of 187 candidate rows`);
+      expect(text).toContain(structured.truncation_note as string);
+      // Count the rendered candidate rows directly: the heading could be right
+      // while the table below it was not.
+      const candidateSection = text.slice(text.indexOf("## Candidates"));
+      expect((candidateSection.match(/^\| `customer-/gm) ?? []).length).toBe(listed);
     } finally {
       await close();
     }
