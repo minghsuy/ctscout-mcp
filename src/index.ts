@@ -2834,7 +2834,8 @@ export function truncateReceiptJsonIfNeeded(receipt: JobSubmitResponse): {
 // the tool then quotes the method rather than a paraphrase of it.
 const VENDOR_CONFIRMED_DEFINITION =
   "a vendor is confirmed when a hostname it certified resolves onto a domain it " +
-  "certifies and the customer's own www does not";
+  "certifies and the customer's own www does not, or another organization " +
+  "certifies the apex";
 // The manifest publishes five source snapshots; the cap bounds the line if the
 // research build ever adds more (or an origin sends something unexpected).
 const PRODUCT_SOURCE_LIMIT = 10;
@@ -3009,7 +3010,7 @@ function customerSplitTable(candidates: unknown, confirmed: unknown): string[] {
       "Fan-out alone is not a vendor relationship — an organization certifying hundreds of its " +
       "own product sites looks the same. |",
     `| Confirmed | ${numberCell(confirmed)} | of those candidates, the ones DNS confirmed: ` +
-      `${VENDOR_CONFIRMED_DEFINITION} (or another organization certifies the apex). |`,
+      `${VENDOR_CONFIRMED_DEFINITION}. |`,
     "",
     "_Confirmed is the DNS-confirmed subset of candidates. Read them as two claims; never add them._",
   ];
@@ -4011,7 +4012,7 @@ Args:
 
 Candidates and confirmed are two different claims and are NEVER summed:
   - Candidate = an apex domain this vendor certified a hostname for. Fan-out alone is not a vendor relationship: an organization certifying hundreds of its own product sites looks identical.
-  - Confirmed = the DNS-confirmed subset of the candidates. The definition: ${VENDOR_CONFIRMED_DEFINITION} (or another organization certifies the apex).
+  - Confirmed = the DNS-confirmed subset of the candidates. The definition: ${VENDOR_CONFIRMED_DEFINITION}.
   - Confirmed is a SUBSET of candidates, so adding the two double-counts. The markdown keeps them in separate tables and the JSON in separate fields; report them apart.
 
 Returns (on success, structuredContent follows the declared outputSchema; a failed call — 400, 401, 404, 503, timeout — is isError with no structuredContent):

@@ -32,7 +32,7 @@ Visit [ctscout.dev](https://ctscout.dev) and click "Get a free API key". Solve t
 
 ### 2a. Hosted endpoint (recommended — zero install)
 
-The same tools are hosted at `https://ctscout.dev/mcp`. Nothing to install — just point your MCP client at the URL with your API key as the `X-API-Key` header.
+Most of these tools are hosted at `https://ctscout.dev/mcp`. Nothing to install — just point your MCP client at the URL with your API key as the `X-API-Key` header. The two product tools, `ctscout_lookup_lei` and `ctscout_vendor_customers`, ship here first and are not advertised by the hosted endpoint yet (see below).
 
 **Claude Code (CLI)**:
 
@@ -98,7 +98,8 @@ The hosted endpoint is the authoritative MCP contract and is the recommended
 path. The stdio package is a compatibility adapter over the same ctscout.dev
 API for clients that cannot connect to remote MCP servers yet.
 
-Hosted and stdio both expose the same public tool names, including the
+Hosted and stdio expose the same public tool names apart from the two product
+tools noted below, including the
 names-only `ctscout_search_company_batch` contract (1–10 organization names,
 ordered partial-failure results) and the deep-dive pair specified in
 [ctscout-worker#344](https://github.com/minghsuy/ctscout-worker/issues/344)
