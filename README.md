@@ -246,8 +246,10 @@ before any network call.
   check digits) returns the entity record: `legal_name` and `country` from
   GLEIF, `isin_count` (ISINs mapped to the LEI), `apex_count` (apex domains
   attributed to it), the `first_seen` / `last_seen` observation window,
-  `sample_domains` (a hash-chosen sample of up to 5 — **not** the top 5 and not
-  a complete list; `apex_count` is the total) and `vendors_confirmed`, which is
+  `sample_domains` (a hash-chosen sample — **not** a ranking and not a complete
+  list; `apex_count` is the total. The size is whatever the research export
+  published: the product contract deliberately does not pin it, so read the
+  array rather than assuming a number, and the markdown says how many it listed) and `vendors_confirmed`, which is
   a list of vendor **slugs** you can pass straight to
   `ctscout_vendor_customers`.
 - **`{ name }`** (`GET /lei?name=`) returns `{ query, name_match, leis,
@@ -272,7 +274,7 @@ Takes a vendor `slug` and, optionally, `enumerate`.
 - **`enumerate: false`** (the default, `GET /vendors/{slug}`) returns the free
   summary: `vendor_name`, `vendor_apex` (`null` when the vendor's brand token
   matches no label it certifies), the `customers` split, `countries_top`,
-  `co_use` and `sample_customers`.
+  `co_use` and `sample_customers` (a hash-chosen sample of the confirmed customers, sized by the export).
 - **`enumerate: true`** (`GET /vendors/{slug}/customers`) returns the
   enumeration: `confirmed` and `candidates` rows of
   `{ apex, attributed_to, lei }`, plus `counts` and `capped`. This route needs
@@ -313,6 +315,16 @@ renders both lines. This is a different clock from the `/scan` warehouse's daily
 sync: the research export is republished by its own refresh, so these answers
 move on that slower cadence.
 
+### No API key needed for the free routes
+
+`/lei` and `/vendors/{slug}` are unauthenticated on ctscout.dev, so
+`ctscout_lookup_lei` and `ctscout_vendor_customers` without `enumerate` work
+with no `CTSCOUT_API_KEY` set at all — the request carries no `X-API-Key` header
+rather than an empty one. The server boots without a key and says on stderr
+which tools still work; the other five return the usual key error per call, and
+`enumerate: true` returns the same guidance it returns for an invalid key,
+without a network round-trip.
+
 Until the refresh has published its first product, `/lei` and `/vendors` answer
 HTTP 503 with `{"detail": "Research product not yet published…"}`. Both tools
 surface that as a plain "not published yet" error naming the API's own detail —
@@ -352,7 +364,8 @@ npm test
 # Maintainer-only, non-publishing 0.4.0 release preflight
 npm run release:check
 
-# Run the server (will fail without CTSCOUT_API_KEY)
+# Run the server with no key: it boots and warns, and the free /lei and
+# /vendors tools work; every other tool errors until a key is configured
 node dist/index.js
 
 # With a real key

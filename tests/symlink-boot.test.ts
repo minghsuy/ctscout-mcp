@@ -119,4 +119,64 @@ describe("isDirectlyExecuted (symlink boot)", () => {
       }
     },
   );
+
+  // The free research-product routes (/lei, /vendors/{slug}) are
+  // unauthenticated, so a keyless install is a valid configuration for those
+  // tools. Booting used to exit 1 on a missing key, which made the keyless case
+  // impossible before a single tool call — ctscout-mcp#115 review round 1.
+  it.skipIf(!existsSync(DIST_INDEX))(
+    "boots without CTSCOUT_API_KEY, naming the tools that still work",
+    async () => {
+      const { CTSCOUT_API_KEY: _dropped, ...envWithoutKey } = process.env;
+      const proc = spawn("node", [DIST_INDEX], {
+        env: envWithoutKey,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+
+      let stderr = "";
+      let exitCode: number | null = null;
+
+      proc.stdin.write(
+        `${JSON.stringify({
+          jsonrpc: "2.0",
+          method: "initialize",
+          params: {
+            protocolVersion: "2024-11-05",
+            capabilities: {},
+            clientInfo: { name: "vitest-keyless-boot", version: "0.0.1" },
+          },
+          id: 1,
+        })}\n`,
+      );
+
+      await new Promise<void>((finish) => {
+        const timer = setTimeout(() => {
+          proc.kill();
+          finish();
+        }, 3000);
+        const done = () => {
+          clearTimeout(timer);
+          finish();
+        };
+        proc.stderr.on("data", (chunk: Buffer) => {
+          stderr += chunk.toString();
+          if (stderr.includes("running via stdio")) {
+            proc.kill();
+            done();
+          }
+        });
+        proc.on("close", (code) => {
+          exitCode = code;
+          done();
+        });
+      });
+
+      // It booted (banner present) rather than exiting 1 on the missing key...
+      expect(stderr).toContain("running via stdio");
+      expect(exitCode).not.toBe(1);
+      // ...and it still says the key is missing, naming what works without one.
+      expect(stderr).toContain("CTSCOUT_API_KEY is not set");
+      expect(stderr).toContain("ctscout_lookup_lei");
+    },
+  );
 });

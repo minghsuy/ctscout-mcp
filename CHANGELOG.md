@@ -27,7 +27,12 @@ version heading so the exact package metadata and notes are reviewed together;
   the daily warehouse sync, so calling it `"scan"` would misname both its
   origin and its cadence. Before the first publish the routes answer HTTP 503
   and the tools return a plain "not published yet" error rather than a server
-  outage. In the customer enumeration, where the payload IS the rows, the
+  outage. The free routes are unauthenticated, so both work with no
+  `CTSCOUT_API_KEY` set — the request omits the `X-API-Key` header rather than
+  sending an empty one, and the server no longer exits at boot when the variable
+  is unset (it warns and names the tools that still work). `enumerate: true`
+  still requires a key and says so without a round-trip. In the customer
+  enumeration, where the payload IS the rows, the
   markdown and the `structuredContent` are two renderings of one bounded
   record — same rows, same counts, one `truncation_note` — so neither half of a
   response can describe a list the other half does not show, and the API's own

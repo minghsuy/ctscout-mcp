@@ -248,11 +248,33 @@ describe("stdio MCP compatibility contract", () => {
           response_format: { type: "string", enum: ["markdown", "json"], default: "markdown" },
         },
       });
-      // Same shape as the deep-dive spec's either/or: neither field is required
-      // on its own, and the anyOf is what a client planning from tools/list
-      // sees. The exactly-one rule itself is a refine, tested in index.test.ts.
+      // Neither field is required on its own, and the exactly-one rule is
+      // advertised as `oneOf` — NOT `anyOf`, which JSON Schema satisfies when
+      // one or more branches match, so `{lei, name}` would validate against the
+      // advertised schema and be refused only at runtime.
       expect(lookupLei?.inputSchema.required).toBeUndefined();
-      expect(lookupLei?.inputSchema.anyOf).toEqual([{ required: ["lei"] }, { required: ["name"] }]);
+      expect(lookupLei?.inputSchema.anyOf).toBeUndefined();
+      expect(lookupLei?.inputSchema.oneOf).toEqual([{ required: ["lei"] }, { required: ["name"] }]);
+      // The keyword is only half the claim; evaluate its branches to show the
+      // advertised schema really does refuse both-at-once and neither, without
+      // pulling in a JSON Schema validator to say so.
+      const branchesMatched = (input: Record<string, unknown>) =>
+        (lookupLei?.inputSchema.oneOf as Array<{ required: string[] }>).filter((branch) =>
+          branch.required.every((field) => field in input),
+        ).length;
+      expect(branchesMatched({ lei: "549300NDMY0KJK0ZLW17" })).toBe(1);
+      expect(branchesMatched({ name: "Cloudflare, Inc." })).toBe(1);
+      // oneOf requires exactly one match: two is as invalid as zero.
+      expect(branchesMatched({ lei: "549300NDMY0KJK0ZLW17", name: "Cloudflare, Inc." })).toBe(2);
+      expect(branchesMatched({})).toBe(0);
+      // The deep-dive tool's contract is genuinely one-or-more (both fields
+      // together are legal there), so it keeps anyOf. Pinned so this change
+      // cannot be generalised onto it by a later sweep.
+      expect(submit?.inputSchema.oneOf).toBeUndefined();
+      expect(submit?.inputSchema.anyOf).toEqual([
+        { required: ["company_name"] },
+        { required: ["seed_domain"] },
+      ]);
       const vendorCustomers = tools.find((tool) => tool.name === "ctscout_vendor_customers");
       expect(vendorCustomers?.inputSchema).toMatchObject({
         type: "object",
@@ -1959,6 +1981,73 @@ describe("stdio MCP compatibility contract", () => {
       });
       expect(badSlug.isError).toBe(true);
       expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      await close();
+    }
+  });
+
+  // The free product routes are unauthenticated on the Worker, and the README
+  // documents keyless use. Before round 1 of #115's review, callApi demanded a
+  // key for every route and the binary exited 1 without one, so the keyless case
+  // could not work at all.
+  it("reads the free product routes with no key configured, sending no key header", async () => {
+    delete process.env.CTSCOUT_API_KEY;
+    const fetchMock = mockApi(LEI_RECORD);
+
+    const { client, close } = await connect();
+
+    try {
+      const record = await client.callTool({
+        name: "ctscout_lookup_lei",
+        arguments: { lei: LEI, response_format: "json" },
+      });
+      expect(record.isError).not.toBe(true);
+      expect(record.structuredContent).toMatchObject({ lei: LEI, snapshot_source: "product" });
+
+      mockApi(VENDOR_SUMMARY);
+      const summary = await client.callTool({
+        name: "ctscout_vendor_customers",
+        arguments: { slug: "cloudflare", response_format: "json" },
+      });
+      expect(summary.isError).not.toBe(true);
+      expect(summary.structuredContent).toMatchObject({ slug: "cloudflare" });
+
+      // No header at all rather than an empty one: an empty X-API-Key reads as
+      // a malformed key, not as no key.
+      const headers = (fetchMock.mock.calls[0]?.[1] as { headers: Record<string, string> }).headers;
+      expect(headers).not.toHaveProperty("X-API-Key");
+      expect(headers).toMatchObject({ Accept: "application/json" });
+    } finally {
+      await close();
+    }
+  });
+
+  it("refuses the keyed enumeration with the same guidance when no key is configured", async () => {
+    delete process.env.CTSCOUT_API_KEY;
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const { client, close } = await connect();
+
+    try {
+      const result = await client.callTool({
+        name: "ctscout_vendor_customers",
+        arguments: { slug: "cloudflare", enumerate: true },
+      });
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toContain("needs an active ctscout.dev API key");
+      expect(textOf(result)).toContain("enumerate: false");
+      expect(result.structuredContent).toBeUndefined();
+      // Answered locally: the origin was never asked a question we already know
+      // the answer to.
+      expect(fetchMock).not.toHaveBeenCalled();
+      // And the five keyed tools still say what they always said.
+      const scan = await client.callTool({
+        name: "ctscout_search_company",
+        arguments: { company_name: "Cloudflare" },
+      });
+      expect(scan.isError).toBe(true);
+      expect(textOf(scan)).toContain("CTSCOUT_API_KEY environment variable is not set");
     } finally {
       await close();
     }

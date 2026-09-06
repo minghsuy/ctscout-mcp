@@ -651,8 +651,13 @@ export const LookupLeiInputSchema = z
   })
   // A refine is invisible to tools/list: without this, the advertised schema
   // shows both fields optional and a client planning from it can submit {}.
-  // The anyOf is what discovery sees; the refine is what runs.
-  .meta({ anyOf: [{ required: ["lei"] }, { required: ["name"] }] });
+  // `oneOf`, not `anyOf`: JSON Schema's anyOf is satisfied when one OR MORE
+  // branches match, so `{lei, name}` would validate against the advertised
+  // schema and only be refused at runtime. oneOf means exactly one, which is
+  // this tool's actual rule — two different routes, no single answer to return.
+  // (ctscout_submit_deep_dive keeps anyOf: both of its fields together are
+  // legal there, so one-or-more is the correct keyword for that contract.)
+  .meta({ oneOf: [{ required: ["lei"] }, { required: ["name"] }] });
 
 type LookupLeiInput = z.infer<typeof LookupLeiInputSchema>;
 
@@ -673,7 +678,7 @@ export const VendorCustomersInputSchema = z
       .default(false)
       .describe(
         "Optional, default false. false returns the free vendor summary (counts, top " +
-          "countries, co-use, a 5-customer sample). true returns the per-customer " +
+          "countries, co-use, a customer sample). true returns the per-customer " +
           "enumeration from GET /vendors/{slug}/customers, which requires an active " +
           "ctscout.dev API key (any tier).",
       ),
@@ -1022,8 +1027,9 @@ const LeiLookupOutputSchema = z.looseObject({
     .array(z.string())
     .optional()
     .describe(
-      "By-LEI answer: a hash-chosen sample (up to 5) of the attributed apexes — not the " +
-        "top 5, and not a complete list. apex_count is the total.",
+      "By-LEI answer: a hash-chosen sample of the attributed apexes — whatever size the " +
+        "research export published, not a ranking and not a complete list. apex_count is " +
+        "the total; the markdown says so if it lists fewer than the sample carries.",
     ),
   vendors_confirmed: z
     .array(z.string())
@@ -1117,7 +1123,10 @@ const VendorCustomersOutputSchema = z.looseObject({
   sample_customers: z
     .array(z.string())
     .optional()
-    .describe("Summary view: a hash-chosen sample (up to 5) of the CONFIRMED customers."),
+    .describe(
+      "Summary view: a hash-chosen sample of the CONFIRMED customers — whatever size the " +
+        "research export published, not a ranking and not a complete list.",
+    ),
   confirmed: z
     .array(VendorCustomerRowSchema)
     .optional()
@@ -1157,9 +1166,18 @@ const VendorCustomersOutputSchema = z.looseObject({
 
 // ---------- Shared utilities ----------
 
-export function getApiKey(): string {
+/** The configured key, or undefined when none is set. The free research-product
+ *  routes (`/lei`, `/vendors/{slug}`) are unauthenticated, so those reads send
+ *  no `X-API-Key` header at all rather than inventing one and letting the
+ *  origin decide — everything else still requires a key. */
+export function configuredApiKey(): string | undefined {
   const key = process.env.CTSCOUT_API_KEY;
-  if (!key || key.trim().length === 0) {
+  return key !== undefined && key.trim().length > 0 ? key : undefined;
+}
+
+export function getApiKey(): string {
+  const key = configuredApiKey();
+  if (key === undefined) {
     throw new Error(
       "CTSCOUT_API_KEY environment variable is not set. " +
         "Get a free key at https://ctscout.dev (no email, no signup) and " +
@@ -1227,13 +1245,25 @@ async function readBoundedText(response: Response, maxBytes: number): Promise<st
   return new TextDecoder().decode(capped);
 }
 
-// Shared request core for /scan, /scan/batch and /jobs: identical auth,
-// headers, timeout, and bounded-error-body handling (readBoundedText, #57).
-// The endpoints differ only in URL, method and request/response shape, so
-// every tool inherits the same error-capture bound rather than duplicating it.
-// `body` undefined means a body-less request (GET).
-async function callApi<T>(url: string, method: "GET" | "POST", body?: unknown): Promise<T> {
-  const apiKey = getApiKey();
+// Whether a route needs a key. "required" fails locally before any network
+// round-trip when none is configured (every /scan and /jobs route, and the
+// keyed customer enumeration). "optional" sends the header when a key exists
+// and omits it otherwise: the free product routes are unauthenticated, so a
+// keyless install must be able to read them.
+type AuthMode = "required" | "optional";
+
+// Shared request core for /scan, /scan/batch, /jobs and the product routes:
+// identical headers, timeout, and bounded-error-body handling (readBoundedText,
+// #57). The endpoints differ only in URL, method, auth mode and request/response
+// shape, so every tool inherits the same error-capture bound rather than
+// duplicating it. `body` undefined means a body-less request (GET).
+async function callApi<T>(
+  url: string,
+  method: "GET" | "POST",
+  body?: unknown,
+  auth: AuthMode = "required",
+): Promise<T> {
+  const apiKey = auth === "required" ? getApiKey() : configuredApiKey();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
@@ -1243,7 +1273,9 @@ async function callApi<T>(url: string, method: "GET" | "POST", body?: unknown): 
       headers: {
         ...(body !== undefined && { "Content-Type": "application/json" }),
         Accept: "application/json",
-        "X-API-Key": apiKey,
+        // Omitted entirely when unset: an empty header value would read as a
+        // malformed key rather than as no key at all.
+        ...(apiKey !== undefined && { "X-API-Key": apiKey }),
         "User-Agent": USER_AGENT,
       },
       ...(body !== undefined && { body: JSON.stringify(body) }),
@@ -1303,16 +1335,21 @@ export async function callGetJob(jobId: string): Promise<JobResponse> {
 // is interpolated (the input schemas already reject the shapes that could
 // matter; this is the belt-and-suspenders half).
 export async function callLeiRecord(lei: string): Promise<LeiRecord> {
-  return callApi<LeiRecord>(`${LEI_URL}/${encodeURIComponent(lei)}`, "GET");
+  return callApi<LeiRecord>(`${LEI_URL}/${encodeURIComponent(lei)}`, "GET", undefined, "optional");
 }
 
 export async function callLeiByName(name: string): Promise<LeiNameMatches> {
   const query = new URLSearchParams({ name });
-  return callApi<LeiNameMatches>(`${LEI_URL}?${query.toString()}`, "GET");
+  return callApi<LeiNameMatches>(`${LEI_URL}?${query.toString()}`, "GET", undefined, "optional");
 }
 
 export async function callVendorSummary(slug: string): Promise<VendorSummary> {
-  return callApi<VendorSummary>(`${VENDORS_URL}/${encodeURIComponent(slug)}`, "GET");
+  return callApi<VendorSummary>(
+    `${VENDORS_URL}/${encodeURIComponent(slug)}`,
+    "GET",
+    undefined,
+    "optional",
+  );
 }
 
 export async function callVendorCustomers(slug: string): Promise<VendorCustomers> {
@@ -1423,6 +1460,16 @@ function safeDetail(err: ApiError): string {
 // an `enumerate` parameter to name.
 export type ErrorSurface = "scan" | "jobs" | "product" | "vendor_enumeration";
 
+// One copy, reached two ways: the 401/403 the origin returns, and the
+// pre-flight guard that answers without a round-trip when no key is configured
+// at all. Both are the same fact for the caller.
+export const ENUMERATION_KEY_GUIDANCE =
+  "Enumerating a vendor's customers needs an active ctscout.dev API key (any tier), and the " +
+  "key in CTSCOUT_API_KEY was missing, invalid or revoked. Get a free key at " +
+  "https://ctscout.dev and set it via your MCP client config. The vendor summary (counts, top " +
+  "countries, co-use, sample) does not need the enumeration: call this tool with " +
+  "enumerate: false.";
+
 export function explainError(err: unknown, surface: ErrorSurface = "scan"): string {
   const isProduct = surface === "product" || surface === "vendor_enumeration";
   if (err instanceof ApiError && isProduct) {
@@ -1432,11 +1479,7 @@ export function explainError(err: unknown, surface: ErrorSurface = "scan"): stri
       case 401:
       case 403:
         return surface === "vendor_enumeration"
-          ? "Enumerating a vendor's customers needs an active ctscout.dev API key (any tier), " +
-              "and the key in CTSCOUT_API_KEY was missing, invalid or revoked. Get a free key " +
-              "at https://ctscout.dev and set it via your MCP client config. The vendor summary " +
-              "(counts, top countries, co-use, sample) does not need the enumeration: call this " +
-              "tool with enumerate: false."
+          ? ENUMERATION_KEY_GUIDANCE
           : "Invalid or missing CTSCOUT_API_KEY. Get a free key at https://ctscout.dev and set " +
               "it via your MCP client config.";
       case 404:
@@ -3675,7 +3718,7 @@ Returns (on success, structuredContent follows the declared outputSchema; a fail
       "isin_count": number,                  // ISINs mapped to this LEI in GLEIF's ISIN-to-LEI file
       "apex_count": number,                  // apex domains attributed to this LEI
       "first_seen": string, "last_seen": string,   // warehouse observation window over those apexes
-      "sample_domains": [string],            // hash-chosen sample (up to 5) — NOT the top 5, not a complete list
+      "sample_domains": [string],            // hash-chosen sample, whatever size the export published — NOT a ranking, not a complete list
       "vendors_confirmed": [string]          // vendor SLUGS: pass one to ctscout_vendor_customers
     }
   - By name:
@@ -3788,7 +3831,7 @@ Returns (on success, structuredContent follows the declared outputSchema; a fail
       "customers": { "candidates": number, "confirmed": number },
       "countries_top": [ { "country": string, "confirmed": number } ],   // CONFIRMED customers only
       "co_use": [ { "slug": string, "confirmed": number } ],             // see below
-      "sample_customers": [string]           // hash-chosen sample (up to 5) of the CONFIRMED customers
+      "sample_customers": [string]           // hash-chosen sample of the CONFIRMED customers, whatever size the export published
     }
   - enumerate: true (the enumeration):
     {
@@ -3821,6 +3864,15 @@ Coverage & freshness:
     async (params: VendorCustomersInput) => {
       try {
         if (params.enumerate) {
+          // The enumeration is the one keyed route here. Answering before the
+          // round-trip keeps a keyless install's error identical to the origin's
+          // 401 rather than surfacing the generic getApiKey message.
+          if (configuredApiKey() === undefined) {
+            return {
+              content: [{ type: "text", text: ENUMERATION_KEY_GUIDANCE }],
+              isError: true,
+            };
+          }
           const raw = await callVendorCustomers(params.slug);
           const data: VendorCustomers = { ...raw, ...resolveProductSnapshot(raw) };
           // One bounded record, two renderings of it — never two independent
@@ -3874,13 +3926,19 @@ Coverage & freshness:
 // ---------- Main ----------
 
 async function main(): Promise<void> {
-  // Validate API key early — fail with a clear error before connecting transport
-  // so MCP clients surface the config issue cleanly rather than on first tool call.
-  try {
-    getApiKey();
-  } catch (err) {
-    console.error(err instanceof Error ? err.message : `Startup error: ${String(err)}`);
-    process.exit(1);
+  // Report a missing key early, on stderr, so an MCP client surfaces the config
+  // issue at boot rather than on the first tool call — but do NOT exit. The free
+  // research-product routes (ctscout_lookup_lei, ctscout_vendor_customers
+  // without `enumerate`) are unauthenticated, so a keyless install is a valid
+  // configuration for those two tools; the five that need a key fail per call
+  // with the same message.
+  if (configuredApiKey() === undefined) {
+    console.error(
+      `${SERVER_NAME}: CTSCOUT_API_KEY is not set. The free /lei and /vendors tools ` +
+        "(ctscout_lookup_lei, and ctscout_vendor_customers without enumerate) still work; " +
+        "every other tool will return an error until a key is configured. Get a free key at " +
+        "https://ctscout.dev (no email, no signup).",
+    );
   }
 
   // serveStdio selects the MCP era from the opening exchange. Modern clients
