@@ -873,7 +873,8 @@ describe("explainError", () => {
   it("maps 429 to a quota-exceeded message", () => {
     const msg = explainError(new ApiError(429, "Quota"));
     expect(msg).toContain("Daily request quota exceeded");
-    expect(msg).toContain("Upgrade to pro");
+    expect(msg).toContain("3,000 lookups a month");
+    expect(msg).not.toMatch(/unlimited/i);
   });
 
   it("maps 400 to a bad-request message including the body", () => {
@@ -1959,7 +1960,7 @@ describe("formatBatchAsMarkdown", () => {
     const md = formatBatchAsMarkdown([], batchEnvelope([], null));
     expect(md).toContain("# ctscout batch results (0 companies)");
     expect(md).toContain("_No results returned._");
-    expect(md).toContain("unlimited (Pro tier)");
+    expect(md).toContain("no daily counter for this key (Pro tier)");
   });
 
   it("truncates a single huge company's section under the shared limit", () => {
@@ -2386,13 +2387,13 @@ describe("explainError — jobs surface", () => {
     expect(msg).not.toContain("revoked");
   });
 
-  it("falls back to the concierge text when the 403 body carries no upgrade_hint", () => {
+  it("falls back to the subscription text when the 403 body carries no upgrade_hint", () => {
     expect(explainError(new ApiError(403, "Forbidden"), "jobs")).toContain(
-      "Pro is concierge-only: email pro@ctscout.dev",
+      "Pro is $49/month, subscribed from https://ctscout.dev/#tiers",
     );
     expect(
       explainError(new ApiError(403, JSON.stringify({ upgrade_hint: "  " })), "jobs"),
-    ).toContain("Pro is concierge-only");
+    ).toContain("Pro is $49/month");
   });
 
   it("bounds an oversized upgrade_hint", () => {
