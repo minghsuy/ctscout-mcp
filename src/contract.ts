@@ -430,9 +430,16 @@ const SearchCompanyInputSchema = z
       .enum(["verbatim", "normalized"])
       .optional()
       .describe(
-        "Optional, default 'verbatim'. Leave unset to try the raw cert subject " +
-          "first and automatically retry its locale-normalized form after an empty result. " +
-          "Set 'normalized' only to skip the verbatim attempt.",
+        "Optional, default 'verbatim'. 'verbatim' substring-matches the raw cert subject. " +
+          "'normalized' compares the research normalizer's key of the query against the " +
+          "normalized column: GLEIF legal forms stripped at the edges, spelled out or " +
+          "abbreviated ('Aktiengesellschaft' and 'AG', 'Incorporated' and 'Inc.'), " +
+          "diacritics folded, lowercased; '&' and 'and' unify; a hyphen and a space no " +
+          "longer split ('Coca-Cola' and 'Coca Cola'), nor does a leading 'The'; a generic " +
+          "tail like 'Holdings' or 'Group' is part of the name and stays. A query that " +
+          "normalizes to nothing (a bare legal form) matches nothing. Leave unset to try " +
+          "verbatim first and retry normalized after an empty result; set 'normalized' " +
+          "only to skip the verbatim attempt.",
       ),
     org_match_mode: z
       .enum(["substring", "word"])
@@ -3494,7 +3501,7 @@ export function registerCtscoutTools(
 Args:
   - company_name (string, required): organization name. Partial matches work — 'Goldman' matches 'Goldman Sachs'. Min 2 chars, max 200.
   - strict_match_org_only (boolean, optional): suppress semantic candidates and return only authoritative warehouse org matches.
-  - org_match_field ('verbatim' | 'normalized', optional): choose raw cert-subject matching or normalized legal-form matching. Leave unset for automatic verbatim-then-normalized fallback.
+  - org_match_field ('verbatim' | 'normalized', optional): raw cert-subject substring matching, or the research normalizer's key of the query against the normalized column (legal forms stripped at the edges, '&'/'and' and hyphen/space unified, a leading 'The' dropped, a generic tail like 'Holdings' kept). Leave unset for automatic verbatim-then-normalized fallback.
   - org_match_mode ('substring' | 'word', optional): use word-boundary matching to reduce noise from short/common names.
   - purpose ('underwriting' | 'corporate_family', optional): choose tight operational-attribution defaults or broader corporate-family defaults. Explicit matching controls override the preset.
   - response_format ('markdown' | 'json', default 'markdown'): output format.

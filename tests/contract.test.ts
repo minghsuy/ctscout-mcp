@@ -183,6 +183,19 @@ describe("stdio MCP compatibility contract", () => {
           },
         },
       });
+      // The description is what a client plans from: 'normalized' is the
+      // research normalizer's key, not the locale normalizer's, and the
+      // wording that distinguishes the two is pinned here.
+      const orgMatchField = (
+        search?.inputSchema.properties as Record<string, { description?: string }>
+      ).org_match_field;
+      expect(orgMatchField.description).toContain("research normalizer's key of the query");
+      expect(orgMatchField.description).toContain("'&' and 'and' unify");
+      expect(orgMatchField.description).toContain("a leading 'The'");
+      expect(orgMatchField.description).toContain("'Holdings' or 'Group' is part of the name");
+      expect(orgMatchField.description).not.toContain("locale");
+      expect(search?.description).toContain("research normalizer's key of the query");
+      expect(search?.description).not.toContain("locale-normalized");
       const batch = tools.find((tool) => tool.name === "ctscout_search_company_batch");
       expect(batch?.inputSchema).toMatchObject({
         type: "object",
