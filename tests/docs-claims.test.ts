@@ -17,6 +17,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   ApiError,
+  CORRECTIONS_GUIDANCE,
   type ConfidenceBand,
   createServer,
   type DomainResult,
@@ -31,6 +32,7 @@ const LIMITATIONS = readFileSync(resolve(ROOT, "LIMITATIONS.md"), "utf8");
 const PACKAGE = JSON.parse(readFileSync(resolve(ROOT, "package.json"), "utf8")) as {
   scripts: Record<string, string>;
   engines: { node: string };
+  bugs: { url: string };
 };
 const DIST_INDEX = resolve(ROOT, "dist", "index.js");
 
@@ -376,6 +378,23 @@ describe("README and LIMITATIONS claims are pinned to the code", () => {
         source: "live-enriched",
       }),
     ).toContain(" 🚫VLM-veto");
+  });
+
+  it("routes corrections the way LIMITATIONS does: wrong to the tracker, missing to the inbox", () => {
+    const wrong = paragraphContaining(LIMITATIONS, "attribution you believe is wrong");
+    expect(wrong).toContain(PACKAGE.bugs.url);
+    expect(wrong).not.toContain("pro@ctscout.dev");
+    const missing = paragraphContaining(LIMITATIONS, "coverage requests");
+    expect(missing).toContain("pro@ctscout.dev");
+    expect(missing).not.toContain(PACKAGE.bugs.url);
+    // Two sentences, one destination each: the question is part of its sentence.
+    const [wrongSentence, missingSentence] = CORRECTIONS_GUIDANCE.split(/(?<=\.)\s+/);
+    expect(wrongSentence).toContain("Wrong attribution?");
+    expect(wrongSentence).toContain(PACKAGE.bugs.url);
+    expect(wrongSentence).not.toContain("pro@ctscout.dev");
+    expect(missingSentence).toContain("Missing entity?");
+    expect(missingSentence).toContain("pro@ctscout.dev");
+    expect(missingSentence).not.toContain(PACKAGE.bugs.url);
   });
 
   it("documents npm scripts that exist and the Node floor package.json enforces", () => {

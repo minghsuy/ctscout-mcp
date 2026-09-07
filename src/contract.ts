@@ -47,6 +47,16 @@ const ENVELOPE_STRING_LIMIT = 200;
 // total clamped to what was actually read — ctscout-mcp#57.
 export const ERROR_BODY_CAPTURE_LIMIT = 4096;
 export const SERVER_NAME = "ctscout-mcp-server";
+// The two destinations LIMITATIONS.md "Corrections and contact" keeps apart: a
+// wrong attribution is an issue, a missing entity is a coverage request. At
+// most 124 characters: it rides on a 400 text whose escaped body excerpt can
+// reach 2 x ERROR_BODY_LIMIT plus the marker, and the whole must stay under
+// the 1,200 the tests bound it to.
+export const CORRECTIONS_GUIDANCE =
+  "Wrong attribution? Open an issue at https://github.com/minghsuy/ctscout-mcp/issues. " +
+  "Missing entity? Email pro@ctscout.dev.";
+// Key and quota refusals carry no answer to correct; every other 4xx does.
+const KEY_OR_QUOTA_STATUSES = new Set([401, 403, 429]);
 const QUOTA_DEBITING_READ_ONLY_ANNOTATIONS = {
   readOnlyHint: true,
   destructiveHint: false,
@@ -1383,11 +1393,25 @@ export function enumerationKeyGuidance(auth: AuthWording = STDIO_AUTH_WORDING): 
 }
 export const ENUMERATION_KEY_GUIDANCE = enumerationKeyGuidance();
 
+// A 4xx about the answer (400, 404, an unmapped status) is the origin's final
+// word on the call, so it is where the agent stops and reports. A key or quota
+// refusal already says what to do instead, and a 5xx or a timeout says retry:
+// a corrections hint there would send a transient failure to the inbox.
 export function explainError(
   err: unknown,
   surface: ErrorSurface = "scan",
   auth: AuthWording = STDIO_AUTH_WORDING,
 ): string {
+  const explanation = describeError(err, surface, auth);
+  const aboutTheAnswer =
+    err instanceof ApiError &&
+    err.status >= 400 &&
+    err.status < 500 &&
+    !KEY_OR_QUOTA_STATUSES.has(err.status);
+  return aboutTheAnswer ? `${explanation} ${CORRECTIONS_GUIDANCE}` : explanation;
+}
+
+function describeError(err: unknown, surface: ErrorSurface, auth: AuthWording): string {
   const isProduct = surface === "product" || surface === "vendor_enumeration";
   if (err instanceof ApiError && isProduct) {
     switch (err.status) {
@@ -3560,7 +3584,10 @@ Legal-vs-brand caveat (important):
 Coverage caveat:
   - Best for established US/EU tech companies with OV/EV certs.
   - Limited coverage on small private companies, cyber MGAs, and entities using only DV (Let's Encrypt) certs.
-  - Warehouse size (organizations, org-domain pairs, last sync) is not stated here because it changes daily; read the live figures at https://ctscout.dev/stats before treating a miss as meaningful.`,
+  - Warehouse size (organizations, org-domain pairs, last sync) is not stated here because it changes daily; read the live figures at https://ctscout.dev/stats before treating a miss as meaningful.
+
+Corrections:
+  - ${CORRECTIONS_GUIDANCE} Include the name queried, the result returned and why it is wrong.`,
       inputSchema: SearchCompanyInputSchema,
       outputSchema: ScanOutputSchema,
       annotations: QUOTA_DEBITING_READ_ONLY_ANNOTATIONS,
@@ -3648,7 +3675,10 @@ Auth & limits:
   - Oversized batches (>${MAX_BATCH_QUERIES} names) are rejected with a validation error before any network call and without a partial quota debit.
   - This MCP batch tool intentionally accepts names only. For matching modifiers such as strict_match_org_only, purpose, or org_match_mode, use individual ctscout_search_company calls or the REST /scan/batch endpoint.
 
-Legal-vs-brand and coverage caveats are identical to ctscout_search_company — brand names may need legal-entity variants ("X Companies", "X Group", "The X"), and coverage is best for established US/EU entities with OV/EV certs.`,
+Legal-vs-brand and coverage caveats are identical to ctscout_search_company — brand names may need legal-entity variants ("X Companies", "X Group", "The X"), and coverage is best for established US/EU entities with OV/EV certs.
+
+Corrections:
+  - ${CORRECTIONS_GUIDANCE} Include the name queried, the result returned and why it is wrong.`,
       inputSchema: SearchCompanyBatchInputSchema,
       outputSchema: BatchOutputSchema,
       annotations: QUOTA_DEBITING_READ_ONLY_ANNOTATIONS,
@@ -3709,7 +3739,10 @@ Coverage caveat:
   - Returns 0 results if domain isn't in the warehouse. Either the domain is not in our index, or no OV/EV certs have been issued for it. DV-only domains (Let's Encrypt etc.) are typically not indexed.
   - When a domain IS in the warehouse but the attributed org is a subsidiary (e.g. an Allianz brand domain), the 'org' field shows the cert-subject organization which may differ from the brand on the homepage.
 
-Auth & limits: same as ctscout_search_company.`,
+Auth & limits: same as ctscout_search_company.
+
+Corrections:
+  - ${CORRECTIONS_GUIDANCE} Include the domain queried, the result returned and why it is wrong.`,
       inputSchema: LookupDomainInputSchema,
       outputSchema: ScanOutputSchema,
       annotations: QUOTA_DEBITING_READ_ONLY_ANNOTATIONS,
@@ -3779,7 +3812,10 @@ What the finished result contains (read it with ctscout_get_job):
 Examples:
   - Use when: "Run a full attribution deep dive on CNA Financial" -> { company_name: "CNA Financial" }
   - Use when: "Deep-dive from these seed domains" -> { seed_domain: ["cna.com", "cnasurety.com"] }
-  - Don't use when: you want an answer now — ctscout_search_company / ctscout_lookup_domain are synchronous. Don't resubmit while a job is queued or running; poll it.`,
+  - Don't use when: you want an answer now — ctscout_search_company / ctscout_lookup_domain are synchronous. Don't resubmit while a job is queued or running; poll it.
+
+Corrections:
+  - ${CORRECTIONS_GUIDANCE} Include the job id, the spec submitted and why the result read with ctscout_get_job is wrong.`,
       inputSchema: SubmitDeepDiveInputSchema,
       outputSchema: JobSubmitOutputSchema,
       annotations: SUBMIT_JOB_ANNOTATIONS,
@@ -3849,7 +3885,10 @@ Returns (on success, structuredContent follows the declared outputSchema; a fail
 
 Examples:
   - Use when: "Is my deep dive abc123 finished?" -> { job_id: "abc123" }
-  - Don't use when: you have no job_id — submit first with ctscout_submit_deep_dive, or use the synchronous tools.`,
+  - Don't use when: you have no job_id — submit first with ctscout_submit_deep_dive, or use the synchronous tools.
+
+Corrections:
+  - ${CORRECTIONS_GUIDANCE} Include the spec the job ran on, the result returned and why it is wrong.`,
       inputSchema: GetJobInputSchema,
       outputSchema: JobOutputSchema,
       annotations: POLL_JOB_ANNOTATIONS,
@@ -3921,7 +3960,10 @@ Examples:
 Coverage & freshness:
   - The product covers LEIs with at least one attributed apex in the research build, so a 404 means "not in this published version", not "no such LEI". An entity has an LEI at all only where a regulator or a counterparty required one, so an absent LEI is not an absent entity either.
   - The export is republished by the ctscout-research refresh, so these answers move on that cadence — slower than the /scan warehouse, which syncs daily. Read "snapshot" for the version actually answered from.
-  - Before the first publish the route answers HTTP 503 and this tool returns a plain "not published yet" error. That is expected, not a fault in the query.`,
+  - Before the first publish the route answers HTTP 503 and this tool returns a plain "not published yet" error. That is expected, not a fault in the query.
+
+Corrections:
+  - ${CORRECTIONS_GUIDANCE} Include the LEI or name queried, the result returned and why it is wrong.`,
       inputSchema: LookupLeiInputSchema,
       outputSchema: LeiLookupOutputSchema,
       annotations: PRODUCT_READ_ONLY_ANNOTATIONS,
@@ -4032,7 +4074,10 @@ Examples:
 
 Coverage & freshness:
   - A 404 means the slug is not in the published version, not that the vendor does not exist. The export is republished by the ctscout-research refresh, so these answers move on that cadence rather than the daily /scan warehouse sync.
-  - Before the first publish the routes answer HTTP 503 and this tool returns a plain "not published yet" error. That is expected, not a fault in the query.`,
+  - Before the first publish the routes answer HTTP 503 and this tool returns a plain "not published yet" error. That is expected, not a fault in the query.
+
+Corrections:
+  - ${CORRECTIONS_GUIDANCE} Include the slug queried, the customer row in question and why it is wrong.`,
       inputSchema: VendorCustomersInputSchema,
       outputSchema: VendorCustomersOutputSchema,
       annotations: PRODUCT_READ_ONLY_ANNOTATIONS,

@@ -14,6 +14,15 @@ version heading so the exact package metadata and notes are reviewed together;
 
 ### Added
 
+- Every tool description ends with a "Corrections" line, and every API 4xx
+  about the answer (400, 404, an unmapped status) ends with the same
+  sentence: a wrong attribution is an issue on the package's tracker, a
+  missing entity an email to pro@ctscout.dev, with the query, the result and
+  why it is wrong. The path itself is unchanged (LIMITATIONS "Corrections and
+  contact"); it is now in-band, where an agent that got a wrong answer reads.
+  Key and quota refusals (401, 403, 429), 5xx and timeouts do not carry it:
+  they already say what to do (#102).
+
 - `ctscout_lookup_lei` by name: the API's `normalizer_mismatch` (null, or the
   `{ index, lookup }` normalizer versions when the index was keyed by one this
   API does not reproduce) is now in the output schema, rendered as one line

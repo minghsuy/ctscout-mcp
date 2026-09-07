@@ -1,11 +1,16 @@
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  ApiError,
+  CORRECTIONS_GUIDANCE,
   createServer,
   type DomainResult,
+  type ErrorSurface,
+  explainError,
   type JobResponse,
   type ScanBatchResponse,
   type ScanResponse,
+  TimeoutError,
 } from "../src/index.ts";
 
 const PAYLOAD_SNAPSHOT = "2026-09-03";
@@ -2271,6 +2276,41 @@ describe("stdio MCP compatibility contract", () => {
       expect(vendor).toContain("SUBSET of candidates");
     } finally {
       await close();
+    }
+  });
+
+  it("tells an agent where a wrong attribution is reported, in every description and on every 4xx about the answer", async () => {
+    // A tool answer that is wrong is not an error, so the affordance has to
+    // ride on the description; a 4xx about the answer is the origin's final
+    // word on the call, so it rides there too. A key or quota refusal already
+    // says what to do, and a 5xx or a timeout says retry, not report.
+    const { client, close } = await connect();
+    try {
+      const { tools } = await client.listTools();
+      for (const tool of tools) {
+        expect(tool.description, tool.name).toContain("\nCorrections:\n");
+        expect(tool.description, tool.name).toContain(CORRECTIONS_GUIDANCE);
+        expect(tool.description, tool.name).toMatch(
+          /why (the result read with ctscout_get_job|it) is wrong/,
+        );
+      }
+    } finally {
+      await close();
+    }
+    const surfaces: ErrorSurface[] = ["scan", "jobs", "product", "vendor_enumeration"];
+    for (const surface of surfaces) {
+      for (const status of [400, 404, 418]) {
+        const text = explainError(new ApiError(status, "{}"), surface);
+        expect(text, `${surface} ${status}`).toContain(CORRECTIONS_GUIDANCE);
+        expect(text, `${surface} ${status}`).not.toContain("\n");
+      }
+      for (const status of [401, 403, 429, 500, 502, 503]) {
+        const text = explainError(new ApiError(status, "{}"), surface);
+        expect(text, `${surface} ${status}`).not.toContain(CORRECTIONS_GUIDANCE);
+      }
+      expect(explainError(new TimeoutError(), surface), surface).not.toContain(
+        CORRECTIONS_GUIDANCE,
+      );
     }
   });
 });
