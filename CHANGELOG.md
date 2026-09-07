@@ -12,6 +12,15 @@ version heading so the exact package metadata and notes are reviewed together;
 
 ## [Unreleased]
 
+### Changed
+
+- `ctscout_search_company`: the `org_match_field` description now states what
+  `normalized` compares since the API moved it to the research normalizer
+  (`X-API-Version: 2026-09-07`): the normalizer's key of the query against the
+  normalized column, with legal forms stripped at the edges, `&`/`and` and
+  hyphen/space unified, a leading "The" dropped and a generic tail such as
+  "Holdings" kept. It used to promise the locale normalizer.
+
 ## [0.5.0] - 2026-09-07
 
 ### Added
