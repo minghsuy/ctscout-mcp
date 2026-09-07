@@ -159,6 +159,8 @@ The model will pick the right ctscout tool, call it, and summarize.
 
 ## Free tier vs Pro tier
 
+The authoritative definition is the product page, <https://ctscout.dev/#tiers>; this table mirrors it.
+
 | | Free | Pro |
 |---|---|---|
 | Queries per day | 10 | unlimited |
@@ -171,7 +173,7 @@ The model will pick the right ctscout tool, call it, and summarize.
 
 The MCP server uses the same API key for both — your tier is determined by the key. If you hit the daily quota, the tool returns a 429 error with an upgrade hint.
 
-Pro is currently concierge-only (manual key mint + invoice) while usage data justifies whether automated commerce is worth building. Email pro@ctscout.dev if you want a Pro key.
+Pro keys are minted by hand for anyone who asks — email pro@ctscout.dev with a line about what you are doing. There is no checkout and no plan to build one until usage says otherwise.
 
 ### What the Pro response looks like
 
