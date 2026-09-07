@@ -209,7 +209,8 @@ export type BatchResultItem =
 
 export interface ScanBatchResponse {
   results: BatchResultItem[];
-  // Remaining daily quota for the calling key; null for unlimited (Pro tier).
+  // Remaining daily quota for the calling key; null when the key has no daily
+  // cap to count down from (Pro tier).
   remaining_quota: number | null;
   // Envelope-level, not per item: one batch reads one warehouse snapshot.
   snapshot?: string | null;
@@ -784,7 +785,12 @@ const BatchResultItemSchema = z.union([
 
 const BatchOutputSchema = z.object({
   results: z.array(BatchResultItemSchema).describe("One item per input name, in input order."),
-  remaining_quota: z.number().nullable().describe("null = unlimited (Pro tier)."),
+  remaining_quota: z
+    .number()
+    .nullable()
+    .describe(
+      "null = no daily cap on this key (Pro tier); only the free tier reports a remaining count.",
+    ),
   ...SnapshotFields,
 });
 
@@ -1438,7 +1444,7 @@ export function explainError(
         const hint = upgradeHintFrom(err.responseBody);
         const upgrade = hint
           ? escapeMarkdown(truncateBody(hint.replace(/[\r\n]+/g, " ")))
-          : "Pro is concierge-only: email pro@ctscout.dev for early access.";
+          : "Pro is $49/month, subscribed from https://ctscout.dev/#tiers; the key comes by email.";
         return `Deep dives require a Pro key; the key in ${auth.keyLocation} is not Pro. ${upgrade}`;
       }
       case 404:
@@ -1468,11 +1474,17 @@ export function explainError(
         );
       case 403:
         return "API key was revoked. Get a new one at https://ctscout.dev.";
-      case 429:
-        return (
-          "Daily request quota exceeded. Free tier is 10 queries/day. " +
-          "Upgrade to pro at https://ctscout.dev for unlimited requests."
-        );
+      case 429: {
+        // Both tiers can meet a 429 (the free daily quota, a Pro key's
+        // per-day guard or its monthly allowance), and only the API's own
+        // detail says which cap, how much was used and when it resets. Quote
+        // it; the fallback assumes neither a tier nor a reset period.
+        const detail = detailFrom(err.responseBody);
+        return detail !== undefined
+          ? `Request quota exceeded. The API said: ${escapeMarkdown(truncateBody(detail.replace(/[\r\n]+/g, " ")))}`
+          : "Request quota exceeded for this API key; the API did not say which cap or when it " +
+              "resets. The tiers and their allowances are at https://ctscout.dev/#tiers.";
+      }
       case 500:
       case 502:
       case 503:
@@ -2058,7 +2070,7 @@ function renderCompanySection(name: string, item: BatchResultItem, limit: number
 
 function batchQuotaFooter(remaining: number | null): string {
   return remaining == null
-    ? "_Remaining quota: unlimited (Pro tier)._"
+    ? "_Remaining quota: no daily cap on this key (Pro tier)._"
     : `_Remaining quota today: ${remaining}._`;
 }
 
@@ -3531,11 +3543,11 @@ Examples:
 Auth & limits:
   - Requires an API key in ${host.keyLocation}. Get a free key (no email) at https://ctscout.dev.
   - Free tier: 10 queries/day, top 5 results from a daily snapshot. The response's "snapshot" field carries that snapshot's sync date (the API reports it since X-API-Version 2026-09-05); when it is null the API could not determine it — treat freshness as unknown, never as current.
-  - Pro tier: unlimited queries, up to 25 rows, a 12-month window; deep-dive jobs (20/day) for multi-signal attribution.
+  - Pro tier: 3,000 lookups/month included, up to 25 rows, a 12-month window; deep-dive jobs (20/day) for multi-signal attribution. $49/month, subscribed from https://ctscout.dev/#tiers.
 
 Error handling:
   - HTTP 401: API key missing or invalid.
-  - HTTP 429: daily quota exceeded — wait or upgrade.
+  - HTTP 429: a quota on this key is exhausted, on either tier; the error quotes the API's own detail, which names the cap and when it resets. Tier allowances: https://ctscout.dev/#tiers.
   - "No domains found": try a shorter or different company name (see legal-vs-brand caveat below).
 
 Legal-vs-brand caveat (important):
@@ -3617,7 +3629,7 @@ Returns (on success, structuredContent follows the declared outputSchema; an err
         { "query": {...}, "domains": [...], "total": number, "match_type": "exact"|"semantic"|"none", "candidates"?: [...] },   // same per-result fields as ctscout_search_company
         { "query": {...}, "error": { "code": number, "message": string } }
       ],
-      "remaining_quota": number | null,  // null = unlimited (Pro)
+      "remaining_quota": number | null,  // null = no daily cap on this key (Pro); only the free tier reports a count
       "snapshot": string | null,         // sync date shared by every result in the batch (API version 2026-09-05+); null (unknown freshness) only when the API could not determine it
       "snapshot_source": "scan" | "unavailable"
     }
@@ -3742,7 +3754,7 @@ Auth & limits: same as ctscout_search_company.`,
 Asynchronous, Pro only:
   - The call returns as soon as the job is queued ({job_id, status: "queued", submitted_at}). Nothing is attributed yet.
   - Poll with ctscout_get_job using the returned job_id. Wait about 30 s before the first poll, then back off toward 5 min between polls; the batch worker picks up queued jobs every few minutes and a deep dive can take several minutes to run.
-  - Requires a Pro API key. A free key gets HTTP 403 with the API's upgrade text (Pro is concierge-only: pro@ctscout.dev). Quota: ${JOBS_PER_DAY} submissions per key per day (HTTP 429 over). Submitting is not idempotent — a retry queues a second job.
+  - Requires a Pro API key. A free key gets HTTP 403 with the API's upgrade text (Pro is $49/month from https://ctscout.dev/#tiers). Quota: ${JOBS_PER_DAY} submissions per key per day (HTTP 429 over). Submitting is not idempotent — a retry queues a second job.
 
 Args:
   - company_name (string, optional): organization name, matched exactly as in ctscout_search_company (partial, case-insensitive; 2–200 chars).

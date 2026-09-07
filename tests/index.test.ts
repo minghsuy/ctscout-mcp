@@ -870,10 +870,27 @@ describe("explainError", () => {
     expect(msg).toContain("https://ctscout.dev");
   });
 
-  it("maps 429 to a quota-exceeded message", () => {
-    const msg = explainError(new ApiError(429, "Quota"));
-    expect(msg).toContain("Daily request quota exceeded");
-    expect(msg).toContain("Upgrade to pro");
+  it("maps 429 to the API's own quota detail, tier-neutral", () => {
+    // The Worker's 429 detail names the cap and its reset for the key's tier;
+    // that sentence is the guidance, escaped and on one line.
+    const pro = explainError(
+      new ApiError(
+        429,
+        JSON.stringify({
+          detail:
+            "Daily request limit reached. This is an abuse-protection cap *set*\nwell above normal usage.",
+        }),
+      ),
+    );
+    expect(pro).toContain("Request quota exceeded. The API said: Daily request limit reached.");
+    expect(pro).toContain("\\*set\\* well above normal usage.");
+    expect(pro).not.toContain("\n");
+    expect(pro).not.toMatch(/free tier|subscribe|unlimited/i);
+    // Without a detail nothing is assumed: not the tier, not a daily reset.
+    const bare = explainError(new ApiError(429, "Quota"));
+    expect(bare).toContain("Request quota exceeded for this API key");
+    expect(bare).toContain("https://ctscout.dev/#tiers");
+    expect(bare).not.toMatch(/daily|free tier|subscribe|unlimited/i);
   });
 
   it("maps 400 to a bad-request message including the body", () => {
@@ -1959,7 +1976,7 @@ describe("formatBatchAsMarkdown", () => {
     const md = formatBatchAsMarkdown([], batchEnvelope([], null));
     expect(md).toContain("# ctscout batch results (0 companies)");
     expect(md).toContain("_No results returned._");
-    expect(md).toContain("unlimited (Pro tier)");
+    expect(md).toContain("no daily cap on this key (Pro tier)");
   });
 
   it("truncates a single huge company's section under the shared limit", () => {
@@ -2386,13 +2403,13 @@ describe("explainError — jobs surface", () => {
     expect(msg).not.toContain("revoked");
   });
 
-  it("falls back to the concierge text when the 403 body carries no upgrade_hint", () => {
+  it("falls back to the subscription text when the 403 body carries no upgrade_hint", () => {
     expect(explainError(new ApiError(403, "Forbidden"), "jobs")).toContain(
-      "Pro is concierge-only: email pro@ctscout.dev",
+      "Pro is $49/month, subscribed from https://ctscout.dev/#tiers",
     );
     expect(
       explainError(new ApiError(403, JSON.stringify({ upgrade_hint: "  " })), "jobs"),
-    ).toContain("Pro is concierge-only");
+    ).toContain("Pro is $49/month");
   });
 
   it("bounds an oversized upgrade_hint", () => {
@@ -2426,7 +2443,7 @@ describe("explainError — jobs surface", () => {
 
   it("leaves the scan surface's 403/404/429 mapping unchanged", () => {
     expect(explainError(new ApiError(403, "Forbidden"))).toContain("revoked");
-    expect(explainError(new ApiError(429, "Quota"))).toContain("Free tier is 10 queries/day");
+    expect(explainError(new ApiError(429, "Quota"))).toContain("Request quota exceeded");
     expect(explainError(new ApiError(404, "nope"))).toContain("HTTP 404");
   });
 });
@@ -3518,9 +3535,7 @@ describe("explainError — product surface", () => {
   });
 
   it("falls through to the shared mapping for a status the product surface does not name", () => {
-    expect(explainError(new ApiError(429, "quota"), "product")).toContain(
-      "Daily request quota exceeded",
-    );
+    expect(explainError(new ApiError(429, "quota"), "product")).toContain("Request quota exceeded");
     expect(explainError(new TimeoutError(), "product")).toContain("timed out");
   });
 });
