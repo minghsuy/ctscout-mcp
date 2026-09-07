@@ -1,7 +1,5 @@
 # Who is behind a domain? What six months of certificates can and cannot tell you
 
-*Draft for Ming's voice. Numbers are the 2026-09-06 refresh; every one of them is on the [open-data page](https://ctscout.dev/open/) or in the three notes linked below, so a reader can check them.*
-
 I run a small service called [CTScout](https://ctscout.dev). It answers one question: which legal entity stands behind a website domain. This post is about how it answers, how often it is right, and where it is wrong, because the honest version of that is more useful than the pitch.
 
 ## How I got here: crt.sh, then a package, then giving up and doing it myself
