@@ -12,6 +12,15 @@ version heading so the exact package metadata and notes are reviewed together;
 
 ## [Unreleased]
 
+### Added
+
+- `ctscout_lookup_lei` by name: the API's `normalizer_mismatch` (null, or the
+  `{ index, lookup }` normalizer versions when the index was keyed by one this
+  API does not reproduce) is now in the output schema, rendered as one line
+  above the markdown result — so a `none` under a drifted index reads as a
+  possible spelling miss, not a true miss — and kept by the overflow envelope.
+  The JSON path already passed it through.
+
 ## [0.5.0] - 2026-09-07
 
 ### Added
