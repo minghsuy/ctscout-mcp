@@ -1467,12 +1467,17 @@ export function explainError(
         );
       case 403:
         return "API key was revoked. Get a new one at https://ctscout.dev.";
-      case 429:
-        return (
-          "Daily request quota exceeded. Free tier is 10 queries/day; Pro includes 3,000 " +
-          "lookups a month (https://ctscout.dev/#tiers) and meets this only at the " +
-          "per-day abuse guard."
-        );
+      case 429: {
+        // Both tiers can meet a 429 (the free daily quota, a Pro key's
+        // per-day guard or its monthly allowance), and only the API's own
+        // detail says which cap, how much was used and when it resets. Quote
+        // it; the fallback assumes neither a tier nor a reset period.
+        const detail = detailFrom(err.responseBody);
+        return detail !== undefined
+          ? `Request quota exceeded. The API said: ${escapeMarkdown(truncateBody(detail.replace(/[\r\n]+/g, " ")))}`
+          : "Request quota exceeded for this API key; the API did not say which cap or when it " +
+              "resets. The tiers and their allowances are at https://ctscout.dev/#tiers.";
+      }
       case 500:
       case 502:
       case 503:
@@ -3535,7 +3540,7 @@ Auth & limits:
 
 Error handling:
   - HTTP 401: API key missing or invalid.
-  - HTTP 429: the daily quota is exhausted — the free tier's 10/day, or a Pro key's per-day abuse guard. Wait for the reset, or subscribe to Pro.
+  - HTTP 429: a quota on this key is exhausted, on either tier; the error quotes the API's own detail, which names the cap and when it resets. Tier allowances: https://ctscout.dev/#tiers.
   - "No domains found": try a shorter or different company name (see legal-vs-brand caveat below).
 
 Legal-vs-brand caveat (important):

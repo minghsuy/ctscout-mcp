@@ -28,8 +28,9 @@ version heading so the exact package metadata and notes are reviewed together;
   sent by email. The "unlimited" and "concierge-only" wording is gone from
   the README, LIMITATIONS, the tool descriptions, the 429 and 403 texts and
   the batch quota footer (which now reads "no daily cap on this key" when
-  the API sends `remaining_quota: null`; a Pro key meets the 429 only at the
-  per-day abuse guard, and the text says so). The README tiers table mirrors
+  the API sends `remaining_quota: null`). A `/scan` 429 quotes the API's own
+  `detail` — which cap, and when it resets — instead of assuming the free
+  daily quota, since a Pro key meets one too. The README tiers table mirrors
   the product page row for row and the Pro example table is the renderer's
   verbatim output; `tests/docs-claims.test.ts` pins those and the transport
   parity exception, the confirmed-vendor definition's two paths, the caps and
