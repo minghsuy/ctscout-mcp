@@ -1022,7 +1022,7 @@ describe("stdio MCP compatibility contract", () => {
         arguments: { domains: ["gs.com"] },
       });
       expect(result.isError).toBe(true);
-      expect(textOf(result)).toContain("Request quota exceeded");
+      expect(textOf(result)).toContain("Daily request quota exceeded");
       expect(result.structuredContent).toBeUndefined();
       expect(calledUrls(fetchMock)).toHaveLength(1);
     } finally {

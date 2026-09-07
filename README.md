@@ -14,7 +14,7 @@ Seven tools:
 - **`ctscout_lookup_lei`** — one LEI's record, or the LEIs under a legal name (see [Research product](#research-product-lei-and-vendor-tools))
 - **`ctscout_vendor_customers`** — a vendor's customer counts, and with a key the customer enumeration
 
-The first three work over the public ctscout.dev `/scan` API (the batch tool wraps `/scan/batch`); the deep-dive pair wraps `/jobs`; the last two read the research product objects at `/lei` and `/vendors`. Free tier requires an API key (no email, no signup). A Pro key gets up to 25 rows, a 12-month window and 3,000 lookups a month on `/scan`, and can submit deep-dive jobs, which return a `confidence_band` per attribution with the named signals behind it (DNS brand tokens, RDAP, IP/ASN, homepage metadata, favicon). Visual brand verification (VLM) is not part of v1.
+The first three work over the public ctscout.dev `/scan` API (the batch tool wraps `/scan/batch`); the deep-dive pair wraps `/jobs`; the last two read the research product objects at `/lei` and `/vendors`. Free tier requires an API key (no email, no signup). A Pro key gets up to 25 rows, a 12-month window and unlimited queries on `/scan`, and can submit deep-dive jobs, which return a `confidence_band` per attribution with the named signals behind it (DNS brand tokens, RDAP, IP/ASN, homepage metadata, favicon). Visual brand verification (VLM) is not part of v1.
 
 **Not a cyber-risk-scoring tool.** See [LIMITATIONS.md](LIMITATIONS.md) for what ctscout is and isn't, the DV-cert coverage gap, and the corrections path.
 
@@ -163,27 +163,28 @@ The authoritative definition is the product page, <https://ctscout.dev/#tiers>; 
 
 | | Free | Pro |
 |---|---|---|
-| Lookups | 10 / day | 3,000 / month included |
-| Results | Top 5 | Top 25 |
-| History window | Last 90 days | Up to 12 months |
-| Deep-dive jobs (async) | — | 20 / day |
-| Data | Daily snapshot | Daily snapshot |
-| Customer lists | Included | Included |
-| Price | $0 | $49 / month — [subscribe](https://buy.stripe.com/cNifZg9lddom9rF8iLasg00), the key comes by email within a day |
+| Lookups | 10 per day | 3,000 per month included |
+| Results per query | top 5 | top 25 |
+| History window | last 90 days | up to 12 months |
+| Data freshness | daily snapshot (`snapshot` names the sync date) | daily snapshot (`snapshot` names the sync date) |
+| Deep-dive jobs (async) | — | 20 per day |
+| Per-attribution evidence | — | in a deep-dive result: `confidence_band` + named signals (DNS, RDAP, IP/ASN, homepage, favicon) |
+| Customer lists (`/vendors/{slug}/customers`) | included | included |
+| Price | $0 | $49 per month — [subscribe](https://buy.stripe.com/cNifZg9lddom9rF8iLasg00); the key comes by email within a day |
 
-Answer pages, research notes, open data and the LEI endpoints need no key at all. A lookup is one query to the API or the MCP tools; on both tiers the `snapshot` field names the daily sync date the answer was read from, and a deep-dive result carries `confidence_band` plus the named signals per attribution. The MCP server uses the same API key for both — your tier is determined by the key. If you hit the free quota, the tool returns a 429 error with an upgrade hint. Terms and privacy: <https://ctscout.dev/terms/>.
+The MCP server uses the same API key for both — your tier is determined by the key. If you hit the quota, the tool returns a 429 error with an upgrade hint. Terms and privacy: <https://ctscout.dev/terms/>.
 
-Pro is paid monthly by card through Stripe and the key is sent by hand to the email on the receipt. Need more than 3,000 lookups a month, or the whole dataset? Email pro@ctscout.dev.
+Pro keys are minted by hand for anyone who asks — email pro@ctscout.dev with a line about what you are doing. There is no checkout and no plan to build one until usage says otherwise.
 
 ### What the Pro response looks like
 
 `/scan` returns the `(domain, organization, certs, subdomains)` table on both tiers; Pro gets more rows and a longer window. A deep-dive job result replaces it with a richer attribution table you can defend in a meeting:
 
 ```
-| Domain | Attributed to | Band | Signals | Evidence |
+| Domain          | Attributed to  | Band         | Signals                                         | Evidence                                                  |
 |---|---|---|---|---|
-| `coalition.com` | Coalition Inc | ✅ verified | dns_txt_brand_token, og_site_name_match, rdap_registrant_match, +1 | verified via google-site-verification, atlassian-domain-verification |
-| `imposter.com` | Coalition Inc | ⚪ insufficient | dns_txt_brand_token | verified via google-site-verification |
+| coalition.com   | Coalition Inc  | ✅ verified  | dns_txt_brand_token, og_site_name_match, +1     | verified via google-site-verification, atlassian-domain... |
+| imposter.com    | Coalition Inc  | ⚪ insufficient | dns_txt_brand_token                              | verified via google-site-verification                     |
 ```
 
 Bands map to confidence intervals (`verified` ≥ multiple strong independent signals, down to `insufficient` = no signals or signals disagree). The `🚫VLM-veto` tag is reserved for visual brand verification overriding the positive signals; VLM does not run in v1, so it never appears yet. Full structured payload is available via `response_format: "json"`.
@@ -382,7 +383,7 @@ npm run build
 # Run the test suite (Vitest, no network)
 npm test
 
-# Maintainer-only, non-publishing release preflight
+# Maintainer-only, non-publishing 0.4.0 release preflight
 npm run release:check
 
 # Run the server with no key: it boots and warns, and the free /lei and

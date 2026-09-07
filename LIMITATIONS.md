@@ -76,7 +76,7 @@ For coverage requests (specific entities you want indexed beyond current warehou
 
 The free tier is self-serve at https://ctscout.dev — Turnstile-protected, no email or account required, 10 queries per day.
 
-The Pro tier (top 25 results, a 12-month window and 3,000 `/scan` lookups a month, plus 20 deep-dive jobs a day) is $49 a month, paid by card through Stripe from https://ctscout.dev/#tiers; the key is sent by hand to the email on the receipt within a day. Need more than 3,000 lookups a month, or the whole dataset? Email pro@ctscout.dev.
+The Pro tier (top 25 results, a 12-month window and unlimited `/scan` queries, plus 20 deep-dive jobs a day) is currently **concierge-only**. Email pro@ctscout.dev if you want early access; key minting and invoicing are manual until usage data justifies automated commerce.
 
 ## License and data
 

@@ -30,19 +30,6 @@ version heading so the exact package metadata and notes are reviewed together;
   hyphen/space unified, a leading "The" dropped and a generic tail such as
   "Holdings" kept. It used to promise the locale normalizer.
 
-- Pro is described as it is sold: 3,000 `/scan` lookups a month for $49,
-  subscribed through Stripe from https://ctscout.dev/#tiers, with the key
-  sent by email. The "unlimited" and "concierge-only" wording is gone from
-  the README, LIMITATIONS, the tool descriptions, the 429 and 403 texts and
-  the batch quota footer (which now reads "no daily cap on this key" when
-  the API sends `remaining_quota: null`). A `/scan` 429 quotes the API's own
-  `detail` — which cap, and when it resets — instead of assuming the free
-  daily quota, since a Pro key meets one too. The README tiers table mirrors
-  the product page row for row and the Pro example table is the renderer's
-  verbatim output; `tests/docs-claims.test.ts` pins those and the transport
-  parity exception, the confirmed-vendor definition's two paths, the caps and
-  quotas, the npm scripts and the handshake example to the code (#116).
-
 ## [0.5.0] - 2026-09-07
 
 ### Added
