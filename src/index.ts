@@ -42,14 +42,13 @@ export * from "./contract.js";
 import {
   ApiError,
   type CtscoutApi,
-  configuredApiKey,
   type DeepDiveSpec,
   ERROR_BODY_CAPTURE_LIMIT,
-  getApiKey,
   type JobResponse,
   type JobSubmitResponse,
   type LeiNameMatches,
   type LeiRecord,
+  MissingCredentialError,
   REQUEST_TIMEOUT_MS,
   readBoundedText,
   registerCtscoutTools,
@@ -57,6 +56,7 @@ import {
   type ScanRequestBody,
   type ScanResponse,
   SERVER_NAME,
+  STDIO_AUTH_WORDING,
   TimeoutError,
   type VendorCustomers,
   type VendorSummary,
@@ -179,6 +179,29 @@ export async function callVendorCustomers(slug: string): Promise<VendorCustomers
   return callApi<VendorCustomers>(`${VENDORS_URL}/${encodeURIComponent(slug)}/customers`, "GET");
 }
 
+/** The configured key, or undefined when none is set. The free research-product
+ *  routes (`/lei`, `/vendors/{slug}`) are unauthenticated, so those reads send
+ *  no `X-API-Key` header at all rather than inventing one and letting the
+ *  origin decide — everything else still requires a key. */
+export function configuredApiKey(): string | undefined {
+  const key = process.env.CTSCOUT_API_KEY;
+  return key !== undefined && key.trim().length > 0 ? key : undefined;
+}
+
+export function getApiKey(): string {
+  const key = configuredApiKey();
+  if (key === undefined) {
+    throw new MissingCredentialError(
+      "CTSCOUT_API_KEY environment variable is not set. " +
+        "Get a free key at https://ctscout.dev (no email, no signup) and " +
+        "set it via your MCP client config (e.g. for Claude Code, " +
+        "`claude mcp add ctscout -s user -e CTSCOUT_API_KEY=<key> -- npx -y ctscout-mcp-server` " +
+        "writes it to ~/.claude.json under env.CTSCOUT_API_KEY).",
+    );
+  }
+  return key;
+}
+
 /** The stdio host's binding of the contract to ctscout.dev. */
 export const api: CtscoutApi = {
   scan: callScan,
@@ -191,6 +214,12 @@ export const api: CtscoutApi = {
   vendorCustomers: callVendorCustomers,
 };
 
+/** Where this host's caller puts the key: the environment, per the README. */
+export const stdioHost = {
+  ...STDIO_AUTH_WORDING,
+  hasCredential: () => configuredApiKey() !== undefined,
+};
+
 /**
  * Build one stdio compatibility server.
  *
@@ -200,7 +229,7 @@ export const api: CtscoutApi = {
  */
 export function createServer(): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
-  registerCtscoutTools(server, api);
+  registerCtscoutTools(server, api, stdioHost);
   return server;
 }
 

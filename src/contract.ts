@@ -1137,28 +1137,31 @@ const VendorCustomersOutputSchema = z.looseObject({
 
 // ---------- Shared utilities ----------
 
-/** The configured key, or undefined when none is set. The free research-product
- *  routes (`/lei`, `/vendors/{slug}`) are unauthenticated, so those reads send
- *  no `X-API-Key` header at all rather than inventing one and letting the
- *  origin decide — everything else still requires a key. */
-export function configuredApiKey(): string | undefined {
-  const key = process.env.CTSCOUT_API_KEY;
-  return key !== undefined && key.trim().length > 0 ? key : undefined;
+/** Thrown by a host when the call needs a credential it does not hold. The
+ *  message is the host's own guidance (where its caller puts the key), which
+ *  explainError passes through verbatim. */
+export class MissingCredentialError extends Error {}
+
+/** Where a host's caller puts the API key, in that caller's terms, and
+ *  whether the host holds one for the current call. The stdio host reads
+ *  CTSCOUT_API_KEY from its environment; the hosted MCP reads X-API-Key from
+ *  the request. Every sentence that tells a caller where the key goes is
+ *  built from this, so the contract never names a transport (#72). */
+export interface CtscoutHost {
+  /** e.g. "CTSCOUT_API_KEY" or "the X-API-Key header" */
+  readonly keyLocation: string;
+  /** e.g. "set it via your MCP client config" or "send it as X-API-Key" */
+  readonly howToSet: string;
+  hasCredential(): boolean;
 }
 
-export function getApiKey(): string {
-  const key = configuredApiKey();
-  if (key === undefined) {
-    throw new Error(
-      "CTSCOUT_API_KEY environment variable is not set. " +
-        "Get a free key at https://ctscout.dev (no email, no signup) and " +
-        "set it via your MCP client config (e.g. for Claude Code, " +
-        "`claude mcp add ctscout -s user -e CTSCOUT_API_KEY=<key> -- npx -y ctscout-mcp-server` " +
-        "writes it to ~/.claude.json under env.CTSCOUT_API_KEY).",
-    );
-  }
-  return key;
-}
+/** The stdio host's wording; the default for explainError so a caller of the
+ *  package's own functions sees what it always saw. */
+export const STDIO_AUTH_WORDING = {
+  keyLocation: "CTSCOUT_API_KEY",
+  howToSet: "set it via your MCP client config",
+} as const;
+export type AuthWording = Pick<CtscoutHost, "keyLocation" | "howToSet">;
 
 export interface ScanRequestBody {
   company_name?: string;
@@ -1334,14 +1337,22 @@ export type ErrorSurface = "scan" | "jobs" | "product" | "vendor_enumeration";
 // prefix so the parenthetical it carries today can change without this drifting.
 export const PRODUCT_UNPUBLISHED_DETAIL = "Research product not yet published";
 
-export const ENUMERATION_KEY_GUIDANCE =
-  "Enumerating a vendor's customers needs an active ctscout.dev API key (any tier), and the " +
-  "key in CTSCOUT_API_KEY was missing, invalid or revoked. Get a free key at " +
-  "https://ctscout.dev and set it via your MCP client config. The vendor summary (counts, top " +
-  "countries, co-use, sample) does not need the enumeration: call this tool with " +
-  "enumerate: false.";
+export function enumerationKeyGuidance(auth: AuthWording = STDIO_AUTH_WORDING): string {
+  return (
+    "Enumerating a vendor's customers needs an active ctscout.dev API key (any tier), and the " +
+    `key in ${auth.keyLocation} was missing, invalid or revoked. Get a free key at ` +
+    `https://ctscout.dev and ${auth.howToSet}. The vendor summary (counts, top ` +
+    "countries, co-use, sample) does not need the enumeration: call this tool with " +
+    "enumerate: false."
+  );
+}
+export const ENUMERATION_KEY_GUIDANCE = enumerationKeyGuidance();
 
-export function explainError(err: unknown, surface: ErrorSurface = "scan"): string {
+export function explainError(
+  err: unknown,
+  surface: ErrorSurface = "scan",
+  auth: AuthWording = STDIO_AUTH_WORDING,
+): string {
   const isProduct = surface === "product" || surface === "vendor_enumeration";
   if (err instanceof ApiError && isProduct) {
     switch (err.status) {
@@ -1350,9 +1361,9 @@ export function explainError(err: unknown, surface: ErrorSurface = "scan"): stri
       case 401:
       case 403:
         return surface === "vendor_enumeration"
-          ? ENUMERATION_KEY_GUIDANCE
-          : "Invalid or missing CTSCOUT_API_KEY. Get a free key at https://ctscout.dev and set " +
-              "it via your MCP client config.";
+          ? enumerationKeyGuidance(auth)
+          : `Invalid or missing ${auth.keyLocation}. Get a free key at https://ctscout.dev and ` +
+              `${auth.howToSet}.`;
       case 404:
         return (
           "Not found in the current research product: no entry is published under that key. " +
@@ -1400,7 +1411,7 @@ export function explainError(err: unknown, surface: ErrorSurface = "scan"): stri
         const upgrade = hint
           ? escapeMarkdown(truncateBody(hint.replace(/[\r\n]+/g, " ")))
           : "Pro is concierge-only: email pro@ctscout.dev for early access.";
-        return `Deep dives require a Pro key; the key in CTSCOUT_API_KEY is not Pro. ${upgrade}`;
+        return `Deep dives require a Pro key; the key in ${auth.keyLocation} is not Pro. ${upgrade}`;
       }
       case 404:
         return (
@@ -1424,9 +1435,8 @@ export function explainError(err: unknown, surface: ErrorSurface = "scan"): stri
         return `Bad request: ${safeBody}. Check the input parameters.`;
       case 401:
         return (
-          "Invalid or missing CTSCOUT_API_KEY. " +
-          "Get a free key at https://ctscout.dev and set it via your MCP " +
-          "client config."
+          `Invalid or missing ${auth.keyLocation}. ` +
+          `Get a free key at https://ctscout.dev and ${auth.howToSet}.`
         );
       case 403:
         return "API key was revoked. Get a new one at https://ctscout.dev.";
@@ -1447,7 +1457,9 @@ export function explainError(err: unknown, surface: ErrorSurface = "scan"): stri
     return "Request to ctscout.dev timed out after 30 seconds. The service may be slow; try again shortly.";
   }
   if (err instanceof Error) {
-    if (err.message.includes("CTSCOUT_API_KEY")) {
+    // the host's own guidance, already in its caller's terms: a typed error,
+    // or any error that names where the caller's key goes
+    if (err instanceof MissingCredentialError || err.message.includes(auth.keyLocation)) {
       return err.message;
     }
     return `Unexpected error: ${err.message}`;
@@ -3398,7 +3410,11 @@ export interface ToolRegistrar {
  *  the whole tool contract: names, descriptions, schemas, annotations and
  *  rendering. A host that registers anything else, or skips one, has drifted
  *  (ctscout-mcp#72), and a parity test in each host says so. */
-export function registerCtscoutTools(server: ToolRegistrar, api: CtscoutApi): void {
+export function registerCtscoutTools(
+  server: ToolRegistrar,
+  api: CtscoutApi,
+  host: CtscoutHost,
+): void {
   server.registerTool(
     "ctscout_search_company",
     {
@@ -3448,7 +3464,7 @@ Examples:
   - Don't use when: You have a specific domain and want to find the organization it's attributed to — use ctscout_lookup_domain instead.
 
 Auth & limits:
-  - Requires CTSCOUT_API_KEY env var. Get a free key (no email) at https://ctscout.dev.
+  - Requires an API key in ${host.keyLocation}. Get a free key (no email) at https://ctscout.dev.
   - Free tier: 10 queries/day, top 5 results from a daily snapshot. The response's "snapshot" field carries that snapshot's sync date (the API reports it since X-API-Version 2026-09-05); when it is null the API could not determine it — treat freshness as unknown, never as current.
   - Pro tier: unlimited queries, up to 25 rows, a 12-month window; deep-dive jobs (20/day) for multi-signal attribution.
 
@@ -3510,7 +3526,7 @@ Coverage caveat:
         };
       } catch (err) {
         return {
-          content: [{ type: "text", text: explainError(err) }],
+          content: [{ type: "text", text: explainError(err, "scan", host) }],
           isError: true,
         };
       }
@@ -3550,7 +3566,7 @@ Examples:
   - Don't use when: you have a single name (use ctscout_search_company) or a specific domain (use ctscout_lookup_domain).
 
 Auth & limits:
-  - Requires CTSCOUT_API_KEY, same as ctscout_search_company.
+  - Requires an API key in ${host.keyLocation}, same as ctscout_search_company.
   - Oversized batches (>${MAX_BATCH_QUERIES} names) are rejected with a validation error before any network call and without a partial quota debit.
   - This MCP batch tool intentionally accepts names only. For matching modifiers such as strict_match_org_only, purpose, or org_match_mode, use individual ctscout_search_company calls or the REST /scan/batch endpoint.
 
@@ -3585,7 +3601,7 @@ Legal-vs-brand and coverage caveats are identical to ctscout_search_company — 
         };
       } catch (err) {
         return {
-          content: [{ type: "text", text: explainError(err) }],
+          content: [{ type: "text", text: explainError(err, "scan", host) }],
           isError: true,
         };
       }
@@ -3645,7 +3661,7 @@ Auth & limits: same as ctscout_search_company.`,
         };
       } catch (err) {
         return {
-          content: [{ type: "text", text: explainError(err) }],
+          content: [{ type: "text", text: explainError(err, "scan", host) }],
           isError: true,
         };
       }
@@ -3710,7 +3726,7 @@ Examples:
         };
       } catch (err) {
         return {
-          content: [{ type: "text", text: explainError(err, "jobs") }],
+          content: [{ type: "text", text: explainError(err, "jobs", host) }],
           isError: true,
         };
       }
@@ -3773,7 +3789,7 @@ Examples:
         };
       } catch (err) {
         return {
-          content: [{ type: "text", text: explainError(err, "jobs") }],
+          content: [{ type: "text", text: explainError(err, "jobs", host) }],
           isError: true,
         };
       }
@@ -3881,7 +3897,7 @@ Coverage & freshness:
         };
       } catch (err) {
         return {
-          content: [{ type: "text", text: explainError(err, "product") }],
+          content: [{ type: "text", text: explainError(err, "product", host) }],
           isError: true,
         };
       }
@@ -3896,7 +3912,7 @@ Coverage & freshness:
 
 Args:
   - slug (string, required): the vendor slug, one lowercase segment, e.g. 'cloudflare'. The values in a LEI record's vendors_confirmed are exactly these slugs.
-  - enumerate (boolean, optional, default false): false = the free summary; true = the per-customer enumeration, which requires an active ctscout.dev API key (any tier) in CTSCOUT_API_KEY. A missing, invalid or revoked key gets HTTP 401 and this tool explains that the summary is still available with enumerate: false.
+  - enumerate (boolean, optional, default false): false = the free summary; true = the per-customer enumeration, which requires an active ctscout.dev API key (any tier) in ${host.keyLocation}. A missing, invalid or revoked key gets HTTP 401 and this tool explains that the summary is still available with enumerate: false.
   - response_format ('markdown' | 'json', default 'markdown'): output format.
 
 Candidates and confirmed are two different claims and are NEVER summed:
@@ -3948,9 +3964,9 @@ Coverage & freshness:
           // The enumeration is the one keyed route here. Answering before the
           // round-trip keeps a keyless install's error identical to the origin's
           // 401 rather than surfacing the generic getApiKey message.
-          if (configuredApiKey() === undefined) {
+          if (!host.hasCredential()) {
             return {
-              content: [{ type: "text", text: ENUMERATION_KEY_GUIDANCE }],
+              content: [{ type: "text", text: enumerationKeyGuidance(host) }],
               isError: true,
             };
           }
