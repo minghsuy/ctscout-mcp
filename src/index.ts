@@ -36,7 +36,6 @@ import { fileURLToPath } from "node:url";
 
 import { McpServer } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
-import { z } from "zod";
 
 export * from "./contract.js";
 
