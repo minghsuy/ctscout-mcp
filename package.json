@@ -1,7 +1,7 @@
 {
   "name": "ctscout-mcp-server",
   "version": "0.4.0",
-  "description": "MCP server for ctscout.dev — domain attribution via Certificate Transparency + multi-signal Pro enrichment",
+  "description": "MCP server for ctscout.dev \u2014 domain attribution via Certificate Transparency + multi-signal Pro enrichment",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./contract": {
+      "types": "./dist/contract.d.ts",
+      "default": "./dist/contract.js"
     },
     "./package.json": "./package.json"
   },
