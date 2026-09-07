@@ -209,8 +209,9 @@ export type BatchResultItem =
 
 export interface ScanBatchResponse {
   results: BatchResultItem[];
-  // Remaining daily quota for the calling key; null when the key has no daily
-  // cap to count down from (Pro tier).
+  // Successful lookups left in the key's period as the API reported them;
+  // null when the API reported no count (Pro today). A per-day request guard
+  // applies to every key regardless, and a 429 carries the API's own detail.
   remaining_quota: number | null;
   // Envelope-level, not per item: one batch reads one warehouse snapshot.
   snapshot?: string | null;
