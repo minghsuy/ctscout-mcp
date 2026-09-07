@@ -4,6 +4,14 @@
 
 I run a small service called [CTScout](https://ctscout.dev). It answers one question: which legal entity stands behind a website domain. This post is about how it answers, how often it is right, and where it is wrong, because the honest version of that is more useful than the pitch.
 
+## How I got here: crt.sh, then a package, then giving up and doing it myself
+
+The public Certificate Transparency logs have had a free front door for years, [crt.sh](https://crt.sh). If you have ever tried to answer a real question with it, you know how the afternoon goes. The web form times out on any organization with more than a few hundred certificates. The trick everyone learns next is the public Postgres endpoint behind it, which works until it doesn't: queries queue behind everyone else's, a search that took two seconds at breakfast takes two minutes at lunch, and a connection that hangs is your problem to detect. I wanted "every domain this company holds certificates for", and getting that for one company was a project; getting it for a list was a week.
+
+So I did what a data scientist does and wrapped the pain in a package. [domain-scout](https://github.com/minghsuy/domain-scout) is a Python tool that queries the crt.sh Postgres directly with a JSON fallback, holds itself to five concurrent queries with a one-second burst delay, then pivots each result through RDAP, DNS and the site's own metadata to corroborate who owns what. It has a rate limiter and a circuit breaker because it needed them. It works, and I still use pieces of it. But every run was still a negotiation with somebody else's database, and the answer was only as complete as the queries that happened not to time out.
+
+The realization was that the logs themselves are a firehose anyone can drink from. Instead of asking crt.sh what it had indexed, I could watch the certificates as they are issued, keep the ones that name an organization, and build my own table. Since February a small collector on a machine under my desk has been doing exactly that: about 2.5 million certificate events a week in, one row per organization-and-domain out, matched against the legal-entity register and served from an edge worker so the answer is a millisecond lookup instead of a query plan. The rest of this post is what that table can and cannot say.
+
 ## Where the answer comes from
 
 When a company buys a website certificate and the issuer checks who they are, the company's registered name goes into the certificate. Those certificates are published in the public Certificate Transparency logs, the same logs your browser relies on. Nobody has to opt in; the record is public by design.
