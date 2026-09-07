@@ -1,0 +1,1 @@
+- [2026-09-07] [style] Put a "draft for X, numbers checked against Y" note inside the blog file itself → drafting/provenance notes go in the PR description, never in the artifact (the same rule as no review receipts in code); the file is what gets published.
