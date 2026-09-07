@@ -4008,7 +4008,7 @@ Coverage & freshness:
           content: [
             {
               type: "text",
-              text: explainError(err, params.enumerate ? "vendor_enumeration" : "product"),
+              text: explainError(err, params.enumerate ? "vendor_enumeration" : "product", host),
             },
           ],
           isError: true,
