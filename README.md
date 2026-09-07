@@ -163,13 +163,13 @@ The authoritative definition is the product page, <https://ctscout.dev/#tiers>; 
 
 | | Free | Pro |
 |---|---|---|
-| Successful lookups (queries that return a result) | 10 per day | 3,000 per month |
+| Lookups | 10 per day | 3,000 per month included |
 | Results per query | top 5 | top 25 |
 | History window | last 90 days | up to 12 months |
 | Data freshness | daily snapshot (`snapshot` names the sync date) | daily snapshot (`snapshot` names the sync date) |
 | Deep-dive jobs (async) | — | 20 per day |
 | Per-attribution evidence | — | in a deep-dive result: `confidence_band` + named signals (DNS, RDAP, IP/ASN, homepage, favicon) |
-| Customer lists (`/vendors/{slug}/customers`) | — | included |
+| Customer lists (`/vendors/{slug}/customers`) | included | included |
 | Price | $0 | $49 per month — email <pro@ctscout.dev> for a key |
 
 The MCP server uses the same API key for both — your tier is determined by the key. If you hit the quota, the tool returns a 429 error with an upgrade hint. Terms and privacy: <https://ctscout.dev/terms/>.
