@@ -163,15 +163,16 @@ The authoritative definition is the product page, <https://ctscout.dev/#tiers>; 
 
 | | Free | Pro |
 |---|---|---|
-| Queries per day | 10 | unlimited |
+| Lookups | 10 per day | 3,000 per month included |
 | Results per query | top 5 | top 25 |
 | History window | last 90 days | up to 12 months |
 | Data freshness | daily snapshot (`snapshot` names the sync date) | daily snapshot (`snapshot` names the sync date) |
 | Deep-dive jobs (async) | — | 20 per day |
 | Per-attribution evidence | — | in a deep-dive result: `confidence_band` + named signals (DNS, RDAP, IP/ASN, homepage, favicon) |
-| Price | $0 | concierge — email for early access |
+| Customer lists (`/vendors/{slug}/customers`) | included | included |
+| Price | $0 | $49 per month — email <pro@ctscout.dev> for a key |
 
-The MCP server uses the same API key for both — your tier is determined by the key. If you hit the daily quota, the tool returns a 429 error with an upgrade hint.
+The MCP server uses the same API key for both — your tier is determined by the key. If you hit the quota, the tool returns a 429 error with an upgrade hint. Terms and privacy: <https://ctscout.dev/terms/>.
 
 Pro keys are minted by hand for anyone who asks — email pro@ctscout.dev with a line about what you are doing. There is no checkout and no plan to build one until usage says otherwise.
 
