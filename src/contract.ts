@@ -789,7 +789,7 @@ const BatchOutputSchema = z.object({
     .number()
     .nullable()
     .describe(
-      "null = no daily cap on this key (Pro tier); only the free tier reports a remaining count.",
+      "null = the API reported no remaining count for this key (Pro today); a per-day request guard still applies, and a 429 carries the API's own detail.",
     ),
   ...SnapshotFields,
 });
@@ -2070,7 +2070,7 @@ function renderCompanySection(name: string, item: BatchResultItem, limit: number
 
 function batchQuotaFooter(remaining: number | null): string {
   return remaining == null
-    ? "_Remaining quota: no daily cap on this key (Pro tier)._"
+    ? "_Remaining quota: not reported for this key (Pro); a per-day request guard still applies._"
     : `_Remaining quota today: ${remaining}._`;
 }
 
@@ -3629,7 +3629,7 @@ Returns (on success, structuredContent follows the declared outputSchema; an err
         { "query": {...}, "domains": [...], "total": number, "match_type": "exact"|"semantic"|"none", "candidates"?: [...] },   // same per-result fields as ctscout_search_company
         { "query": {...}, "error": { "code": number, "message": string } }
       ],
-      "remaining_quota": number | null,  // null = no daily cap on this key (Pro); only the free tier reports a count
+      "remaining_quota": number | null,  // null = no remaining count reported (Pro today); a per-day request guard still applies
       "snapshot": string | null,         // sync date shared by every result in the batch (API version 2026-09-05+); null (unknown freshness) only when the API could not determine it
       "snapshot_source": "scan" | "unavailable"
     }
