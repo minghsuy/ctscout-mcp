@@ -12,8 +12,18 @@ version heading so the exact package metadata and notes are reviewed together;
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-07
+
 ### Added
 
+- `ctscout-mcp-server/contract`: the transport-free tool contract — every
+  name, description, schema, annotation and renderer, and
+  `registerCtscoutTools(server, api, host)` — cut out of the stdio host so the
+  hosted MCP in ctscout-worker registers from the same module (#72, step
+  one). A host supplies a `CtscoutApi` (the eight calls) and a `CtscoutHost`
+  (where its caller puts the API key, in that caller's terms, and whether it
+  holds one), so no sentence in the contract names a transport. The root entry
+  re-exports the contract; nothing importing this package changes.
 - `ctscout_lookup_lei` (`GET /lei/{lei}`, `GET /lei?name=`) and
   `ctscout_vendor_customers` (`GET /vendors/{slug}`, and the keyed
   `GET /vendors/{slug}/customers` behind `enumerate: true`): the research
