@@ -9,6 +9,12 @@
 # Usage:
 #   scripts/release.sh --check <version>  verify only; no external writes
 #   scripts/release.sh <version>          publish/resume from clean synced main
+#
+# The registry can answer 404 for the new version for a few seconds after
+# `npm publish` prints `+ name@version`. The gitHead read that follows the
+# publish retries through that window (NPM_VIEW_DELAYS); a 404 that outlasts
+# it is propagation lag, not a failed publish, and a rerun resumes from the
+# published version once it is visible.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -81,18 +87,47 @@ fi
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ctscout-release.XXXXXX")"
 trap 'rm -rf -- "$TMP_DIR"' EXIT
 
+# Sleeps between attempts; one more attempt than delays (~30 s in total).
+NPM_VIEW_DELAYS=(2 4 8 16)
+
+# Read one field of the published version. Retries while the registry answers
+# E404 — the propagation window after a publish — and surfaces any other error
+# at once. Prints the field's JSON; fails with npm's stderr after the last 404.
+npm_view_field() {
+  local field="$1" attempt
+  for (( attempt = 0; ; attempt++ )); do
+    if npm view "${PACKAGE_NAME}@${NEW_VERSION}" "$field" --json \
+      >"$TMP_DIR/npm-view.out" 2>"$TMP_DIR/npm-view.err"; then
+      cat "$TMP_DIR/npm-view.out"
+      return 0
+    fi
+    if ! grep -q "E404" "$TMP_DIR/npm-view.err" || (( attempt >= ${#NPM_VIEW_DELAYS[@]} )); then
+      cat "$TMP_DIR/npm-view.err" >&2
+      return 1
+    fi
+    echo "    registry has no ${PACKAGE_NAME}@${NEW_VERSION} yet; retrying in ${NPM_VIEW_DELAYS[attempt]}s" >&2
+    sleep "${NPM_VIEW_DELAYS[attempt]}"
+  done
+}
+
+# The JSON `npm view <field> --json` prints, as a bare string ("" when absent
+# or when the read failed and there is no JSON at all).
+json_string() {
+  node -e 'const c=[];process.stdin.on("data",x=>c.push(x));process.stdin.on("end",()=>{const s=Buffer.concat(c).toString().trim();if(!s)return;const v=JSON.parse(s);process.stdout.write(typeof v==="string"?v:"")})'
+}
+
 # npm is the first external mutation in the release sequence. A prior npm
 # version is acceptable only when it names this exact git commit: that is the
-# recoverable "npm succeeded, tag/release did not" state.
+# recoverable "npm succeeded, tag/release did not" state. This probe does not
+# retry: before a publish, 404 is the expected state of a fresh version. The
+# gitHead read after a positive probe does, since the probe just proved the
+# version exists.
 NPM_EXISTS=0
 NPM_GIT_HEAD=""
 if npm view "${PACKAGE_NAME}@${NEW_VERSION}" version --json \
   >"$TMP_DIR/npm-version.json" 2>"$TMP_DIR/npm-version.err"; then
   NPM_EXISTS=1
-  NPM_GIT_HEAD="$(
-    npm view "${PACKAGE_NAME}@${NEW_VERSION}" gitHead --json \
-      | node -e 'const c=[];process.stdin.on("data",x=>c.push(x));process.stdin.on("end",()=>{const v=JSON.parse(Buffer.concat(c));process.stdout.write(typeof v==="string"?v:"")})'
-  )"
+  NPM_GIT_HEAD="$(npm_view_field gitHead | json_string)"
   if [[ "$NPM_GIT_HEAD" != "$HEAD_SHA" ]]; then
     echo "error: npm ${PACKAGE_NAME}@${NEW_VERSION} already exists from another commit" >&2
     echo "       npm gitHead: ${NPM_GIT_HEAD:-(missing)}" >&2
@@ -191,10 +226,13 @@ if (( ! NPM_EXISTS )); then
   echo "==> publishing ${PACKAGE_NAME}@${NEW_VERSION}"
   npm publish --access public
 
-  PUBLISHED_GIT_HEAD="$(
-    npm view "${PACKAGE_NAME}@${NEW_VERSION}" gitHead --json \
-      | node -e 'const c=[];process.stdin.on("data",x=>c.push(x));process.stdin.on("end",()=>{const v=JSON.parse(Buffer.concat(c));process.stdout.write(typeof v==="string"?v:"")})'
-  )"
+  echo "==> verifying registry gitHead for ${PACKAGE_NAME}@${NEW_VERSION}"
+  if ! PUBLISHED_GIT_HEAD="$(npm_view_field gitHead | json_string)"; then
+    echo "error: npm published, but the registry gitHead of ${PACKAGE_NAME}@${NEW_VERSION} could not be read" >&2
+    echo "       if the error above is E404 this is propagation lag after a successful publish, not a failed publish" >&2
+    echo "       do not create a tag; rerun once the version is visible and the release resumes" >&2
+    exit 1
+  fi
   if [[ "$PUBLISHED_GIT_HEAD" != "$HEAD_SHA" ]]; then
     echo "error: npm published, but registry gitHead verification failed" >&2
     echo "       expected: $HEAD_SHA" >&2
