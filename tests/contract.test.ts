@@ -191,6 +191,19 @@ describe("stdio MCP compatibility contract", () => {
       ).org_match_field;
       expect(orgMatchField.description).toContain("research normalizer's key of the query");
       expect(orgMatchField.description).toContain("'&' and 'and' unify");
+
+      // The batch tool's quota wording, as a client reads it over the
+      // protocol: a null remaining count is unreported, never "no daily cap".
+      const batchTool = tools.find((tool) => tool.name === "ctscout_search_company_batch");
+      const remaining = (
+        (batchTool?.outputSchema as { properties?: Record<string, { description?: string }> })
+          ?.properties ?? {}
+      ).remaining_quota;
+      expect(remaining?.description).toContain("reported no remaining count");
+      expect(remaining?.description).toContain("per-day request guard");
+      expect(remaining?.description).not.toMatch(/no daily cap/);
+      expect(batchTool?.description).toContain("no remaining count reported");
+      expect(batchTool?.description).not.toMatch(/no daily cap/);
       expect(orgMatchField.description).toContain("a leading 'The'");
       expect(orgMatchField.description).toContain("'Holdings' or 'Group' is part of the name");
       expect(orgMatchField.description).not.toContain("locale");
