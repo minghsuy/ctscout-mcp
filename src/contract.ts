@@ -333,12 +333,22 @@ export interface LeiRecord extends ProductProvenance, Partial<ProductSnapshotInf
   [k: string]: unknown;
 }
 
+// `null` when the Worker's normalizer is the one the export keyed the index
+// with; otherwise the two versions. Then the normalized spellings are not the
+// index's keys and a `none` may be a spelling miss under this Worker rather
+// than under the index. Absent from a Worker that predates the check.
+export interface NormalizerMismatch {
+  index: string;
+  lookup: string;
+}
+
 // GET /lei?name=<q>. `leis` is capped at the Worker's LEI_NAME_LIMIT while
 // `lei_count` is the pre-cap total, so the two disagree on a truncated answer
 // by design.
 export interface LeiNameMatches extends ProductProvenance, Partial<ProductSnapshotInfo> {
   query: string;
   name_match: "exact" | "normalized" | "none";
+  normalizer_mismatch?: NormalizerMismatch | null;
   leis: string[];
   lei_count: number;
   limit: number;
@@ -1016,6 +1026,17 @@ const LeiLookupOutputSchema = z.looseObject({
       "By-name answer, and the discriminator between the two shapes: 'exact' | " +
         "'normalized' | 'none'. 'none' means neither spelling tried hit the index, NOT " +
         "that the entity has no LEI.",
+    ),
+  normalizer_mismatch: z
+    .looseObject({ index: z.string().optional(), lookup: z.string().optional() })
+    .nullable()
+    .optional()
+    .describe(
+      "By-name answer: null when the API's normalizer is the one the index was keyed " +
+        "with. Otherwise { index, lookup } names the two versions: the normalized " +
+        "spellings are then not the index's keys, and a 'none' may be a spelling miss " +
+        "under this API rather than an absent name. Absent from an API that predates " +
+        "the check.",
     ),
   leis: z
     .array(z.string())
@@ -2833,6 +2854,26 @@ function nameMatchExplanation(match: unknown): string {
   }
 }
 
+// Only a set `normalizer_mismatch` renders: null (checked and equal) and
+// absent (an API that predates the check) both say nothing, so the line is
+// never a claim the API did not make. It goes above the result because it
+// changes what a `none` below it means.
+function normalizerMismatchLine(mismatch: unknown): string[] {
+  if (typeof mismatch !== "object" || mismatch === null) return [];
+  const { index, lookup } = mismatch as Partial<NormalizerMismatch>;
+  return [
+    `**Normalizer mismatch** — the index was keyed by normalizer \`${cellSafe(
+      typeof index === "string" ? index : "(unreported)",
+      40,
+    )}\`; this API applies \`${cellSafe(
+      typeof lookup === "string" ? lookup : "(unreported)",
+      40,
+    )}\`. The normalized spellings tried are not the index's keys, so a \`none\` may be a ` +
+      "spelling miss under this API rather than an absent name.",
+    "",
+  ];
+}
+
 export function formatLeiNameMatchesAsMarkdown(data: LeiNameMatches): string {
   const leis = Array.isArray(data.leis) ? data.leis : [];
   const total = typeof data.lei_count === "number" ? data.lei_count : leis.length;
@@ -2841,6 +2882,7 @@ export function formatLeiNameMatchesAsMarkdown(data: LeiNameMatches): string {
     "",
     productSnapshotLine(data, data.snapshot_dates),
     "",
+    ...normalizerMismatchLine(data.normalizer_mismatch),
     `**Name match: ${cellSafe(data.name_match, 40)}** — ${nameMatchExplanation(data.name_match)}`,
     "",
   ];
@@ -3167,6 +3209,14 @@ const ENV_COUNT = { kind: "count" } as const;
 const ENV_BOOLEAN = { kind: "boolean" } as const;
 /** The candidate/confirmed split, under either of its two names. */
 const ENV_SPLIT = { kind: "split" } as const;
+/** The normalizer-version pair, kept as the explicit null it usually is: a
+ *  dropped null would read as "not checked" where the product said "checked
+ *  and equal". */
+const ENV_NORMALIZER_MISMATCH = {
+  kind: "object",
+  nullable: true,
+  fields: { index: ENV_STRING, lookup: ENV_STRING },
+} as const;
 
 type EnvelopeField =
   | typeof ENV_STRING
@@ -3174,6 +3224,7 @@ type EnvelopeField =
   | typeof ENV_COUNT
   | typeof ENV_BOOLEAN
   | typeof ENV_SPLIT
+  | typeof ENV_NORMALIZER_MISMATCH
   /** An array. `partial` marks a list the product DECLARES partial against a
    *  total the record itself carries (a sample): shortening it further is a
    *  smaller sample of the same claim. Without it the list is published
@@ -3214,6 +3265,7 @@ export const PRODUCT_ENVELOPES = {
   lei_name_matches: {
     query: ENV_STRING,
     name_match: ENV_STRING,
+    normalizer_mismatch: ENV_NORMALIZER_MISMATCH,
     lei_count: ENV_COUNT,
     limit: ENV_COUNT,
     truncated: ENV_BOOLEAN,
@@ -3336,6 +3388,12 @@ export function minimalProductEnvelope<T>(kind: ProductEnvelopeKind, data: T): T
         break;
       case "split":
         keep[name] = boundedSplitCounts(value);
+        break;
+      case "object":
+        if (nullableHole(field, value)) keep[name] = null;
+        else if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+          keep[name] = envelopeRow(value, field.fields);
+        }
         break;
       case "array": {
         if (!Array.isArray(value)) break;
@@ -3829,6 +3887,7 @@ Returns (on success, structuredContent follows the declared outputSchema; a fail
     {
       "query": string,
       "name_match": "exact" | "normalized" | "none",
+      "normalizer_mismatch": null | { "index": string, "lookup": string },   // null: the API's normalizer keyed the index. Set: the two versions differ, so a "none" may be a spelling miss under this API. Absent: an API that predates the check.
       "leis": [string],                      // capped at "limit" (${LEI_NAME_LIMIT})
       "lei_count": number,                   // matches BEFORE the cap — can exceed leis.length
       "limit": number, "truncated": boolean

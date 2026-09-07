@@ -1683,6 +1683,84 @@ describe("stdio MCP compatibility contract", () => {
     }
   });
 
+  it("surfaces a normalizer mismatch in markdown, JSON and structuredContent alike", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_free_contract_test";
+    mockApi({
+      query: "Travelers Insurance",
+      name_match: "none",
+      normalizer_mismatch: { index: "research-2", lookup: "port-1" },
+      leis: [],
+      lei_count: 0,
+      limit: 20,
+      truncated: false,
+      ...PRODUCT_PROVENANCE,
+    });
+
+    const { client, close } = await connect();
+
+    try {
+      const markdown = await client.callTool({
+        name: "ctscout_lookup_lei",
+        arguments: { name: "Travelers Insurance" },
+      });
+      expect(markdown.isError).not.toBe(true);
+      const text = textOf(markdown);
+      expect(text).toContain(
+        "the index was keyed by normalizer `research-2`; this API applies `port-1`",
+      );
+      expect(text.indexOf("**Normalizer mismatch**")).toBeLessThan(
+        text.indexOf("**Name match: none**"),
+      );
+      expect(markdown.structuredContent).toMatchObject({
+        name_match: "none",
+        normalizer_mismatch: { index: "research-2", lookup: "port-1" },
+      });
+
+      const json = await client.callTool({
+        name: "ctscout_lookup_lei",
+        arguments: { name: "Travelers Insurance", response_format: "json" },
+      });
+      expect(json.isError).not.toBe(true);
+      expect(JSON.parse(textOf(json))).toMatchObject({
+        normalizer_mismatch: { index: "research-2", lookup: "port-1" },
+      });
+    } finally {
+      await close();
+    }
+  });
+
+  it("does not turn a partial normalizer_mismatch into an output-schema error", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_free_contract_test";
+    mockApi({
+      query: "Travelers Insurance",
+      name_match: "none",
+      normalizer_mismatch: { index: "research-2", extra: 7 },
+      leis: [],
+      lei_count: 0,
+      limit: 20,
+      truncated: false,
+      ...PRODUCT_PROVENANCE,
+    });
+
+    const { client, close } = await connect();
+
+    try {
+      const result = await client.callTool({
+        name: "ctscout_lookup_lei",
+        arguments: { name: "Travelers Insurance" },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(textOf(result)).toContain(
+        "the index was keyed by normalizer `research-2`; this API applies `(unreported)`",
+      );
+      expect(result.structuredContent).toMatchObject({
+        normalizer_mismatch: { index: "research-2" },
+      });
+    } finally {
+      await close();
+    }
+  });
+
   it("returns the free vendor summary with candidates and confirmed kept apart", async () => {
     process.env.CTSCOUT_API_KEY = "ds_free_contract_test";
     const fetchMock = mockApi(VENDOR_SUMMARY);
