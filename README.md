@@ -271,6 +271,14 @@ normalization) are not that normalizer, so a real entity can miss on a spelling.
 Retry with the exact GLEIF legal name, or look it up by LEI. The markdown output
 says this in place of the miss.
 
+The answer also carries `normalizer_mismatch`: `null` when the API's normalizer
+is the one the index was keyed with, or `{ index, lookup }` naming the two
+versions when they differ — then the normalized spellings are not the index's
+keys, and a `none` may be a spelling miss under this API rather than an absent
+name. The markdown says so in one line above the result; the JSON carries the
+field as sent, and the overflow envelope keeps the pair, bounded. An API that
+predates the check omits it.
+
 ### `ctscout_vendor_customers`
 
 Takes a vendor `slug` and, optionally, `enumerate`.

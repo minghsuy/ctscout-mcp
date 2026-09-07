@@ -3642,6 +3642,38 @@ describe("formatLeiNameMatchesAsMarkdown", () => {
     expect(md.split("\n").filter((line) => line.startsWith("# "))).toHaveLength(1);
     expect(md).not.toContain("\n# Injected heading");
   });
+
+  it("names a normalizer mismatch above the result, so a 'none' below it reads as a spelling miss", () => {
+    const md = formatLeiNameMatchesAsMarkdown(
+      matches({
+        name_match: "none",
+        leis: [],
+        lei_count: 0,
+        normalizer_mismatch: { index: "research-2", lookup: "port-1" },
+      }),
+    );
+    expect(md).toContain(
+      "**Normalizer mismatch** — the index was keyed by normalizer `research-2`; this API applies `port-1`.",
+    );
+    expect(md).toContain("a `none` may be a spelling miss under this API");
+    // Above the name-match line, not after the miss.
+    expect(md.indexOf("**Normalizer mismatch**")).toBeLessThan(md.indexOf("**Name match: none**"));
+  });
+
+  it("says nothing about the normalizer when the API reports null or omits the field", () => {
+    for (const data of [matches({ normalizer_mismatch: null }), matches()]) {
+      const md = formatLeiNameMatchesAsMarkdown(data);
+      expect(md).not.toContain("Normalizer mismatch");
+      expect(md).not.toContain("normalizer_mismatch");
+    }
+  });
+
+  it("keeps a hostile mismatch on its own line", () => {
+    const md = formatLeiNameMatchesAsMarkdown(
+      matches({ normalizer_mismatch: { index: "x\n# Injected", lookup: "y" } }),
+    );
+    expect(md.split("\n").filter((line) => line.startsWith("# "))).toHaveLength(1);
+  });
 });
 
 describe("formatVendorSummaryAsMarkdown", () => {
@@ -3973,6 +4005,7 @@ describe("the one product envelope path, walked over every object kind", () => {
     lei_name_matches: {
       query: "Cloudflare, Inc.",
       name_match: "exact",
+      normalizer_mismatch: { index: "research-2", lookup: "port-1" },
       leis: strings(50, "5493001KJTIIGC8Y1R"),
       lei_count: 50,
       limit: 20,
@@ -4100,11 +4133,30 @@ describe("the one product envelope path, walked over every object kind", () => {
                 ? true
                 : rule.kind === "split"
                   ? { candidates: Number.MAX_VALUE, confirmed: Number.MAX_VALUE }
-                  : OVERSIZED;
+                  : rule.kind === "object"
+                    ? Object.fromEntries(Object.keys(rule.fields ?? {}).map((k) => [k, OVERSIZED]))
+                    : OVERSIZED;
       }
       const envelope = JSON.stringify(minimalProductEnvelope(kind, hostile));
       expect(envelope.length, kind).toBeLessThanOrEqual(CHARACTER_LIMIT);
     }
+  });
+
+  it("lei_name_matches: carries a set normalizer_mismatch through the envelope, bounded", () => {
+    const { structured } = truncateProductJson("lei_name_matches", FIXTURES.lei_name_matches);
+    expect((structured as Record<string, unknown>).normalizer_mismatch).toEqual({
+      index: "research-2",
+      lookup: "port-1",
+    });
+    const hostile = minimalProductEnvelope("lei_name_matches", {
+      normalizer_mismatch: { index: OVERSIZED, lookup: OVERSIZED, extra: OVERSIZED },
+    }) as Record<string, Record<string, string>>;
+    expect(Object.keys(hostile.normalizer_mismatch).sort()).toEqual(["index", "lookup"]);
+    expect(hostile.normalizer_mismatch.index.length).toBeLessThan(OVERSIZED.length);
+    // A non-object where the pair belongs is dropped, never coerced into a claim.
+    expect(
+      minimalProductEnvelope("lei_name_matches", { normalizer_mismatch: "drifted" }),
+    ).not.toHaveProperty("normalizer_mismatch");
   });
 
   // Walks the spec rather than naming fields, so a field that becomes nullable
@@ -4133,6 +4185,14 @@ describe("the one product envelope path, walked over every object kind", () => {
         }
         for (const [sub, subRule] of Object.entries(rule.fields ?? {})) {
           if (subRule.nullable !== true) continue;
+          if (rule.kind === "object") {
+            const out = minimalProductEnvelope(kind, {
+              [field]: { [sub]: null },
+            }) as Record<string, Record<string, unknown>>;
+            expect(out[field], `${kind}.${field}.${sub}`).toHaveProperty(sub, null);
+            checked += 1;
+            continue;
+          }
           const out = minimalProductEnvelope(kind, {
             [field]: [{ [sub]: null }],
           }) as Record<string, Array<Record<string, unknown>>>;
