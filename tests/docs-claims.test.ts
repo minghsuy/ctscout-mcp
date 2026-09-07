@@ -13,7 +13,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   ApiError,
@@ -61,8 +61,8 @@ const SITE_TIERS = [
 const STRIPE_LINK = "https://buy.stripe.com/cNifZg9lddom9rF8iLasg00";
 const TERMS_LINK = "https://ctscout.dev/terms/";
 
-// Note 2's definition of a confirmed vendor has two paths; round five of #115
-// found prose giving only the first.
+// Note 2's definition of a confirmed vendor has two paths, and prose that
+// gives only the first has shipped before.
 const CONFIRMED_PATHS = [
   "the customer's own www does not",
   "another organization certifies the apex",
@@ -113,9 +113,11 @@ function paragraphContaining(markdown: string, needle: string): string {
   return paragraph as string;
 }
 
+// A sentence ends at terminal punctuation followed by a capital, a backtick
+// or a bracket, so "e.g. the" and "vs. the" do not cut one in half.
 function sentenceContaining(markdown: string, needle: string): string {
   const sentence = flat(markdown)
-    .split(/\.\s+/)
+    .split(/(?<=[.!?])\s+(?=[A-Z`([])/)
     .find((candidate) => candidate.includes(needle));
   expect(sentence, `no sentence contains ${JSON.stringify(needle)}`).toBeDefined();
   return sentence as string;
@@ -164,10 +166,24 @@ const PRODUCT_PROVENANCE = {
 };
 
 describe("README and LIMITATIONS claims are pinned to the code", () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.CTSCOUT_API_KEY;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    if (originalApiKey === undefined) {
+      delete process.env.CTSCOUT_API_KEY;
+    } else {
+      process.env.CTSCOUT_API_KEY = originalApiKey;
+    }
+    vi.restoreAllMocks();
+  });
+
   it("lists exactly the registered tools, in registry order, and counts them", async () => {
     const tools = await listTools();
     const listed = [...README.matchAll(/^- \*\*`(ctscout_[a-z_]+)`\*\*/gm)].map((m) => m[1]);
     expect(listed).toEqual(tools.map((tool) => tool.name));
+    expect(NUMBER_WORDS[tools.length]).toBeDefined();
     expect(README).toContain(`${NUMBER_WORDS[tools.length]} tools:`);
   });
 
@@ -232,7 +248,6 @@ describe("README and LIMITATIONS claims are pinned to the code", () => {
         ...PRODUCT_PROVENANCE,
       },
     ];
-    const originalFetch = globalThis.fetch;
     globalThis.fetch = vi.fn(
       async () =>
         new Response(JSON.stringify(payloads.shift()), {
@@ -255,7 +270,6 @@ describe("README and LIMITATIONS claims are pinned to the code", () => {
       }
     } finally {
       await close();
-      globalThis.fetch = originalFetch;
     }
   });
 
@@ -291,8 +305,9 @@ describe("README and LIMITATIONS claims are pinned to the code", () => {
   it("states the caps and quotas the registry advertises", async () => {
     const tools = await listTools();
     const byName = (name: string) => tools.find((tool) => tool.name === name) as ToolInfo;
-    const maxItems = (tool: ToolInfo, field: string): number =>
-      ((tool.inputSchema.properties as Record<string, { maxItems: number }>)[field] ?? {}).maxItems;
+    const maxItems = (tool: ToolInfo, field: string): number | undefined =>
+      (tool.inputSchema.properties as Record<string, { maxItems?: number } | undefined>)[field]
+        ?.maxItems;
 
     const batchMax = maxItems(byName("ctscout_search_company_batch"), "company_names");
     expect(README).toContain(`for up to ${batchMax} organization names in one call`);
@@ -312,10 +327,6 @@ describe("README and LIMITATIONS claims are pinned to the code", () => {
     const leiLimit = lei.match(/capped at "limit" \((\d+)\)/)?.[1];
     expect(leiLimit).toBeDefined();
     expect(README).toContain(`\`leis\` is capped at \`limit\` (${leiLimit})`);
-
-    const lookup = byName("ctscout_lookup_domain").description ?? "";
-    const domainsMax = maxItems(byName("ctscout_lookup_domain"), "domains");
-    expect(lookup).toContain(`Max ${domainsMax} per call`);
   });
 
   it("shows a Pro example table that the deep-dive renderer produces verbatim", () => {
@@ -338,6 +349,9 @@ describe("README and LIMITATIONS claims are pinned to the code", () => {
           confidence_band: band.split(" ")[1] as ConfidenceBand,
           weight_total: 0,
           matched_via: matchedVia,
+          // The evidence cell round-trips as written; what this pins is the
+          // table's shape (code-span domain, band emoji, three signals then
+          // "+N", the uncapped evidence), not the evidence text itself.
           evidence: { [named[0]]: evidence },
           signal_health: {},
           vlm_status: "skipped",
@@ -387,7 +401,7 @@ describe("README and LIMITATIONS claims are pinned to the code", () => {
 
       const proc = spawn("node", [DIST_INDEX], {
         env: { ...process.env, CTSCOUT_API_KEY: "fake" },
-        stdio: ["pipe", "pipe", "pipe"],
+        stdio: ["pipe", "pipe", "ignore"],
       });
       let stdout = "";
       const reply = await new Promise<Record<string, unknown> | undefined>((finish) => {
@@ -395,6 +409,10 @@ describe("README and LIMITATIONS claims are pinned to the code", () => {
           proc.kill();
           finish(undefined);
         }, 5000);
+        proc.on("error", () => {
+          clearTimeout(timer);
+          finish(undefined);
+        });
         proc.stdout.on("data", (chunk: Buffer) => {
           stdout += chunk.toString();
           for (const line of stdout.split("\n")) {

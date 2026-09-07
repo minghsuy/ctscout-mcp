@@ -1960,7 +1960,7 @@ describe("formatBatchAsMarkdown", () => {
     const md = formatBatchAsMarkdown([], batchEnvelope([], null));
     expect(md).toContain("# ctscout batch results (0 companies)");
     expect(md).toContain("_No results returned._");
-    expect(md).toContain("no daily counter for this key (Pro tier)");
+    expect(md).toContain("no daily cap on this key (Pro tier)");
   });
 
   it("truncates a single huge company's section under the shared limit", () => {

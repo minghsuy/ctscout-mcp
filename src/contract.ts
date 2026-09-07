@@ -209,8 +209,8 @@ export type BatchResultItem =
 
 export interface ScanBatchResponse {
   results: BatchResultItem[];
-  // Remaining daily quota for the calling key; null when the API keeps no
-  // daily counter for it (Pro tier).
+  // Remaining daily quota for the calling key; null when the key has no daily
+  // cap to count down from (Pro tier).
   remaining_quota: number | null;
   // Envelope-level, not per item: one batch reads one warehouse snapshot.
   snapshot?: string | null;
@@ -781,7 +781,9 @@ const BatchOutputSchema = z.object({
   remaining_quota: z
     .number()
     .nullable()
-    .describe("null = the API keeps no daily counter for this key (Pro tier)."),
+    .describe(
+      "null = no daily cap on this key (Pro tier); only the free tier reports a remaining count.",
+    ),
   ...SnapshotFields,
 });
 
@@ -1467,8 +1469,9 @@ export function explainError(
         return "API key was revoked. Get a new one at https://ctscout.dev.";
       case 429:
         return (
-          "Daily request quota exceeded. Free tier is 10 queries/day. " +
-          "Pro includes 3,000 lookups a month: https://ctscout.dev/#tiers."
+          "Daily request quota exceeded. Free tier is 10 queries/day; Pro includes 3,000 " +
+          "lookups a month (https://ctscout.dev/#tiers) and meets this only at the " +
+          "per-day abuse guard."
         );
       case 500:
       case 502:
@@ -2055,7 +2058,7 @@ function renderCompanySection(name: string, item: BatchResultItem, limit: number
 
 function batchQuotaFooter(remaining: number | null): string {
   return remaining == null
-    ? "_Remaining quota: no daily counter for this key (Pro tier)._"
+    ? "_Remaining quota: no daily cap on this key (Pro tier)._"
     : `_Remaining quota today: ${remaining}._`;
 }
 
@@ -3532,7 +3535,7 @@ Auth & limits:
 
 Error handling:
   - HTTP 401: API key missing or invalid.
-  - HTTP 429: the free tier's daily quota is exhausted — wait for the reset or subscribe to Pro.
+  - HTTP 429: the daily quota is exhausted — the free tier's 10/day, or a Pro key's per-day abuse guard. Wait for the reset, or subscribe to Pro.
   - "No domains found": try a shorter or different company name (see legal-vs-brand caveat below).
 
 Legal-vs-brand caveat (important):
@@ -3614,7 +3617,7 @@ Returns (on success, structuredContent follows the declared outputSchema; an err
         { "query": {...}, "domains": [...], "total": number, "match_type": "exact"|"semantic"|"none", "candidates"?: [...] },   // same per-result fields as ctscout_search_company
         { "query": {...}, "error": { "code": number, "message": string } }
       ],
-      "remaining_quota": number | null,  // null = the API keeps no daily counter for this key (Pro)
+      "remaining_quota": number | null,  // null = no daily cap on this key (Pro); only the free tier reports a count
       "snapshot": string | null,         // sync date shared by every result in the batch (API version 2026-09-05+); null (unknown freshness) only when the API could not determine it
       "snapshot_source": "scan" | "unavailable"
     }
