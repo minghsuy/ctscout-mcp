@@ -170,7 +170,7 @@ The authoritative definition is the product page, <https://ctscout.dev/#tiers>; 
 | Deep-dive jobs (async) | — | 20 per day |
 | Per-attribution evidence | — | in a deep-dive result: `confidence_band` + named signals (DNS, RDAP, IP/ASN, homepage, favicon) |
 | Customer lists (`/vendors/{slug}/customers`) | included | included |
-| Price | $0 | $49 per month — email <pro@ctscout.dev> for a key |
+| Price | $0 | $49 per month — [subscribe](https://buy.stripe.com/cNifZg9lddom9rF8iLasg00); the key comes by email within a day |
 
 The MCP server uses the same API key for both — your tier is determined by the key. If you hit the quota, the tool returns a 429 error with an upgrade hint. Terms and privacy: <https://ctscout.dev/terms/>.
 
