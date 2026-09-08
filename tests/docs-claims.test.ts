@@ -57,7 +57,7 @@ const SITE_TIERS = [
   ["History window", "Last 90 days", "Up to 12 months"],
   ["Deep-dive jobs (async)", "—", "20 / day"],
   ["Data", "Daily snapshot", "Daily snapshot"],
-  ["Customer lists", "Included", "Included"],
+  ["Customer lists", "First 100 rows", "Full list"],
   ["Price", "$0", "$49 / month — subscribe, the key comes by email within a day"],
 ];
 const STRIPE_LINK = "https://buy.stripe.com/cNifZg9lddom9rF8iLasg00";
