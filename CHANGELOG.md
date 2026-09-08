@@ -12,6 +12,8 @@ version heading so the exact package metadata and notes are reviewed together;
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-08
+
 ### Added
 
 - Every tool description ends with a "Corrections" line, and every API 4xx
