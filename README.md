@@ -168,7 +168,7 @@ The authoritative definition is the product page, <https://ctscout.dev/#tiers>; 
 | History window | Last 90 days | Up to 12 months |
 | Deep-dive jobs (async) | — | 20 / day |
 | Data | Daily snapshot | Daily snapshot |
-| Customer lists | Included | Included |
+| Customer lists | First 100 rows | Full list |
 | Price | $0 | $49 / month — [subscribe](https://buy.stripe.com/cNifZg9lddom9rF8iLasg00), the key comes by email within a day |
 
 Answer pages, research notes, open data and the LEI endpoints need no key at all. A lookup is one query to the API or the MCP tools; on both tiers the `snapshot` field names the daily sync date the answer was read from, and a deep-dive result carries `confidence_band` plus the named signals per attribution. The MCP server uses the same API key for both — your tier is determined by the key. If you hit the free quota, the tool returns a 429 error with an upgrade hint. Terms and privacy: <https://ctscout.dev/terms/>.
