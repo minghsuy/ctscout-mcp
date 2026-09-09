@@ -110,10 +110,9 @@ npm_view_field() {
   done
 }
 
-# The JSON `npm view <field> --json` prints, as a bare string ("" when absent
-# or when the read failed and there is no JSON at all).
+# Reject absent, malformed or multiple values; never silently drop registry metadata.
 json_string() {
-  node -e 'const c=[];process.stdin.on("data",x=>c.push(x));process.stdin.on("end",()=>{const s=Buffer.concat(c).toString().trim();if(!s)return;const v=JSON.parse(s);process.stdout.write(typeof v==="string"?v:"")})'
+  node "$REPO_DIR/scripts/npm-json.mjs" view
 }
 
 # npm is the first external mutation in the release sequence. A prior npm
@@ -126,6 +125,11 @@ NPM_EXISTS=0
 NPM_GIT_HEAD=""
 if npm view "${PACKAGE_NAME}@${NEW_VERSION}" version --json \
   >"$TMP_DIR/npm-version.json" 2>"$TMP_DIR/npm-version.err"; then
+  OBSERVED_VERSION="$(json_string <"$TMP_DIR/npm-version.json")"
+  if [[ "$OBSERVED_VERSION" != "$NEW_VERSION" ]]; then
+    echo "error: npm returned version $OBSERVED_VERSION, expected $NEW_VERSION" >&2
+    exit 1
+  fi
   NPM_EXISTS=1
   NPM_GIT_HEAD="$(npm_view_field gitHead | json_string)"
   if [[ "$NPM_GIT_HEAD" != "$HEAD_SHA" ]]; then

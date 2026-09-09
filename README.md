@@ -431,3 +431,17 @@ If you're building your own integration in Python or another language, you can h
 MIT. See [LICENSE](LICENSE).
 
 The underlying ctscout service uses [domain-scout](https://github.com/minghsuy/domain-scout) (also MIT) for cert log analysis.
+
+### Release CLI compatibility
+
+Maintainer release scripts support npm10 and npm12; npm10.9.8 and npm12.0.2
+are exercised with the exact packed-artifact gate. npm12 requires Node
+`^22.22.2 || ^24.15.0 || >=26.0.0`; a fresh Node24 LTS installation meets that requirement.
+The published MCP runtime still supports Node20+.
+
+The scripts accept npm10's pack array and npm12's package-keyed object, plus
+registry scalar strings or singleton arrays. They reject multiple results, unsafe
+archive filenames, wrong packages/versions and missing or mismatched gitHead values.
+These compatibility checks do not change release authentication or exact-commit
+resume requirements. `scripts/release.sh --check <version>` expects an unpublished,
+reviewed version; it does not publish, tag, or create a GitHub release.
