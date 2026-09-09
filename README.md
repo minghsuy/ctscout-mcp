@@ -32,7 +32,7 @@ Visit [ctscout.dev](https://ctscout.dev) and click "Get a free API key". Solve t
 
 ### 2a. Hosted endpoint (recommended — zero install)
 
-Most of these tools are hosted at `https://ctscout.dev/mcp`. Nothing to install — just point your MCP client at the URL with your API key as the `X-API-Key` header. The two product tools, `ctscout_lookup_lei` and `ctscout_vendor_customers`, ship here first and are not advertised by the hosted endpoint yet (see below).
+All seven tools are hosted at `https://ctscout.dev/mcp`, including `ctscout_lookup_lei` and `ctscout_vendor_customers`. Nothing to install — point your MCP client at the URL with your API key as the `X-API-Key` header.
 
 **Claude Code (CLI)**:
 
@@ -98,20 +98,20 @@ The hosted endpoint is the authoritative MCP contract and is the recommended
 path. The stdio package is a compatibility adapter over the same ctscout.dev
 API for clients that cannot connect to remote MCP servers yet.
 
-Hosted and stdio expose the same public tool names apart from the two product
-tools noted below, including the
-names-only `ctscout_search_company_batch` contract (1–10 organization names,
-ordered partial-failure results) and the deep-dive pair specified in
-[ctscout-worker#344](https://github.com/minghsuy/ctscout-worker/issues/344)
-(contract v1; the hosted tools land in that Worker change). Contract tests pin
-the stdio schema and quota-sensitive annotations against the hosted surface.
-The remaining shared-core/forwarding and automated cross-repository comparison
-work is tracked in [#72](https://github.com/minghsuy/ctscout-mcp/issues/72).
+Hosted and stdio expose the same seven public tool names and use the shared
+implementation, including the names-only `ctscout_search_company_batch`
+contract (1–10 organization names, ordered partial-failure results) and the
+deep-dive pair. The hosted adoption shipped in
+[ctscout-worker#417](https://github.com/minghsuy/ctscout-worker/pull/417), with
+production verification of all seven tools. Hosted connects over HTTP using
+`X-API-Key`; stdio runs a local process using `CTSCOUT_API_KEY`.
 
-Two documented, transport-specific differences. First, this package advertises
-an `outputSchema` on every tool and, on every successful call, returns
-`snapshot` and `snapshot_source` in `structuredContent`. On the scan and job
-tools `snapshot` is the warehouse sync date and `snapshot_source` is
+Both transports advertise an `outputSchema` on every tool and return
+`structuredContent` on successful calls. Results include `snapshot` and
+`snapshot_source`, except the `ctscout_submit_deep_dive` receipt: it is a job
+handle, not a warehouse read, so those fields arrive on `ctscout_get_job`.
+On scan and job results, `snapshot` is the warehouse sync date and
+`snapshot_source` is
 `"scan"` | `"unavailable"`; on `ctscout_lookup_lei` and
 `ctscout_vendor_customers` it is the research export's version and the source
 vocabulary is `"product"` | `"unavailable"` (see
@@ -119,13 +119,7 @@ vocabulary is `"product"` | `"unavailable"` (see
 different origins on different cadences, so they do not share a label. A failed
 call (401, 429, timeout) is an `isError` result with no `structuredContent` at
 all, so do not dereference `snapshot` on it.
-Second, `ctscout_lookup_lei` and `ctscout_vendor_customers` ship here first:
-the hosted MCP at `/mcp` does not advertise them yet, and mirroring them is a
-separate ctscout-worker change. Until it lands the two transports differ by
-exactly those two tools.
-The `ctscout_submit_deep_dive` receipt is the other exception: it is a job
-handle, not a warehouse read, so it carries neither field; both arrive on
-`ctscout_get_job` with the result.
+
 Since `X-API-Version` 2026-09-05 every `/scan` and `/scan/batch` answer carries
 `snapshot`, the warehouse sync date it was read from (the sync runs daily), so
 the scan tools report `snapshot_source: "scan"` with that date; a deep-dive

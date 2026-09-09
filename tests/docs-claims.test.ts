@@ -36,16 +36,18 @@ const PACKAGE = JSON.parse(readFileSync(resolve(ROOT, "package.json"), "utf8")) 
 };
 const DIST_INDEX = resolve(ROOT, "dist", "index.js");
 
-// The tool names the hosted MCP at https://ctscout.dev/mcp advertises: the
-// list ctscout-worker's scripts/verify-production-deploy.sh asserts against
-// production on every deploy. When the Worker mirrors a tool, this list grows
-// and the README's parity exception must shrink by the same name.
+// Offline snapshot of the production gate at Worker417's deployed commit:
+// dbe66c0921eacc5dd3f6c17aab01f22e0fb74dd6/scripts/verify-production-deploy.sh:254.
+// Deployment34321366592 passed that exact seven-tool check. Update this snapshot
+// only with corresponding hosted rollout evidence; it is not a live API query.
 const HOSTED_TOOLS = [
   "ctscout_get_job",
   "ctscout_lookup_domain",
+  "ctscout_lookup_lei",
   "ctscout_search_company",
   "ctscout_search_company_batch",
   "ctscout_submit_deep_dive",
+  "ctscout_vendor_customers",
 ].sort();
 
 // The tiers table at https://ctscout.dev/#tiers, mirrored row for row as of
@@ -115,16 +117,6 @@ function paragraphContaining(markdown: string, needle: string): string {
   return paragraph as string;
 }
 
-// A sentence ends at terminal punctuation followed by a capital, a backtick
-// or a bracket, so "e.g. the" and "vs. the" do not cut one in half.
-function sentenceContaining(markdown: string, needle: string): string {
-  const sentence = flat(markdown)
-    .split(/(?<=[.!?])\s+(?=[A-Z`([])/)
-    .find((candidate) => candidate.includes(needle));
-  expect(sentence, `no sentence contains ${JSON.stringify(needle)}`).toBeDefined();
-  return sentence as string;
-}
-
 function backtickedTools(text: string): string[] {
   return [...text.matchAll(/`(ctscout_[a-z_]+)`/g)].map((match) => match[1]).sort();
 }
@@ -189,19 +181,17 @@ describe("README and LIMITATIONS claims are pinned to the code", () => {
     expect(README).toContain(`${NUMBER_WORDS[tools.length]} tools:`);
   });
 
-  it("names as the transport-parity exception exactly the tools the hosted MCP does not advertise", async () => {
+  it("documents the deployed seven-tool hosted surface without retired parity exceptions", async () => {
     const registry = (await listTools()).map((tool) => tool.name).sort();
-    for (const hosted of HOSTED_TOOLS) expect(registry).toContain(hosted);
-    const stdioOnly = registry.filter((name) => !HOSTED_TOOLS.includes(name));
-    // The README states the exception twice — once where the hosted endpoint
-    // is introduced, once in the transport-differences paragraph — and both
-    // must name the same set.
-    for (const needle of [
-      "not advertised by the hosted endpoint yet",
-      "does not advertise them yet",
-    ]) {
-      expect(backtickedTools(sentenceContaining(README, needle)), needle).toEqual(stdioOnly);
-    }
+    expect(registry).toEqual(HOSTED_TOOLS);
+    const count = NUMBER_WORDS[registry.length].toLowerCase();
+    const hosted = paragraphContaining(README, `All ${count} tools are hosted at`);
+    expect(backtickedTools(hosted)).toEqual(["ctscout_lookup_lei", "ctscout_vendor_customers"]);
+    expect(flat(README)).toContain(`Hosted and stdio expose the same ${count} public tool names`);
+    expect(README).toContain("https://github.com/minghsuy/ctscout-worker/pull/417");
+    expect(flat(README)).not.toMatch(
+      /not advertised by the hosted endpoint yet|does not advertise them yet|ship here first|apart from the two product tools|Two documented, transport-specific differences|remaining shared-core/,
+    );
   });
 
   it("gives both paths of the confirmed-vendor definition wherever confirmation is defined", async () => {
