@@ -12,6 +12,19 @@ version heading so the exact package metadata and notes are reviewed together;
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-08
+
+### Fixed
+
+- Preserve the vendor enumeration's API `truncated` and nullable `free_slice`
+  in its schema, JSON, Markdown explanation and smallest overflow envelope.
+  Free keys get up to 100 rows per list; Pro gets the published lists, subject
+  to separate export and MCP size caps. The summary no longer promises a full
+  enumeration to every key (#72; hosted adoption: ctscout-worker#391).
+- Scan tool quota descriptions explicitly count successful lookups.
+- Update the Vitest 4 patch dependencies to remove the mocker development-tool advisory.
+
+
 ## [0.6.0] - 2026-09-08
 
 ### Added
