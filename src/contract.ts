@@ -412,6 +412,8 @@ export interface VendorCustomers extends ProductProvenance, Partial<ProductSnaps
   candidates?: VendorCustomerRow[];
   counts?: SplitCounts;
   capped?: boolean;
+  truncated?: boolean;
+  free_slice?: { rows: number; full_list: string } | null;
   // Written by this server, never by the API, when rows were dropped to fit
   // CHARACTER_LIMIT — see trimCustomerRows.
   truncation_note?: string;
@@ -1167,6 +1169,17 @@ const VendorCustomersOutputSchema = z.looseObject({
     .describe(
       "Enumeration view: true when the research build kept a subset of the candidates. " +
         "Says nothing about this server's own truncation — see truncation_note.",
+    ),
+  truncated: z
+    .boolean()
+    .optional()
+    .describe("Enumeration view: the API shortened either list for this key's tier."),
+  free_slice: z
+    .looseObject({ rows: z.number(), full_list: z.string() })
+    .nullable()
+    .optional()
+    .describe(
+      "Enumeration view: free-tier rows allowed per list and the tier for the published list; null for Pro. Separate from export and MCP size caps.",
     ),
   truncation_note: z
     .string()
@@ -3024,7 +3037,8 @@ export function formatVendorSummaryAsMarkdown(data: VendorSummary): string {
       data.customers?.confirmed,
     )} confirmed in total: ${sample.text}`,
     "_Hash-chosen from the confirmed customers, not the top N. Call this tool with " +
-      "enumerate: true for the full enumeration (needs an API key)._",
+      "enumerate: true for customer rows (needs an API key): Free returns up to 100 per list; " +
+      "Pro returns the published lists, which may still be export-capped or shortened for MCP._",
   );
   return clampText(lines.join("\n"));
 }
@@ -3065,6 +3079,14 @@ function renderVendorCustomers(data: VendorCustomers): string {
     "",
   );
   lines.push(...(candidates.length > 0 ? customerRowsTable(candidates) : ["_No rows listed._"]));
+  if (data.free_slice && typeof data.free_slice.rows === "number") {
+    lines.push(
+      "",
+      `_Free tier allows up to ${numberCell(data.free_slice.rows)} rows per list. ` +
+        (data.truncated === true ? "The API shortened this answer. " : "") +
+        "Pro returns the published lists; export and MCP size caps still apply._",
+    );
+  }
   if (data.capped === true) {
     lines.push(
       "",
@@ -3255,6 +3277,12 @@ const ENV_NORMALIZER_MISMATCH = {
   fields: { index: ENV_STRING, lookup: ENV_STRING },
 } as const;
 
+const ENV_FREE_SLICE = {
+  kind: "object",
+  nullable: true,
+  fields: { rows: ENV_COUNT, full_list: ENV_STRING },
+} as const;
+
 type EnvelopeField =
   | typeof ENV_STRING
   | typeof ENV_NULLABLE_STRING
@@ -3262,6 +3290,7 @@ type EnvelopeField =
   | typeof ENV_BOOLEAN
   | typeof ENV_SPLIT
   | typeof ENV_NORMALIZER_MISMATCH
+  | typeof ENV_FREE_SLICE
   /** An array. `partial` marks a list the product DECLARES partial against a
    *  total the record itself carries (a sample): shortening it further is a
    *  smaller sample of the same claim. Without it the list is published
@@ -3335,6 +3364,8 @@ export const PRODUCT_ENVELOPES = {
     slug: ENV_STRING,
     counts: ENV_SPLIT,
     capped: ENV_BOOLEAN,
+    truncated: ENV_BOOLEAN,
+    free_slice: ENV_FREE_SLICE,
     // max 0: this envelope is the last resort AFTER trimCustomerRows has
     // already halved the rows away, so by the time it runs there is no budget
     // for a row. Twenty of each would be ~24 KB on their own.
@@ -3567,8 +3598,8 @@ Examples:
 
 Auth & limits:
   - Requires an API key in ${host.keyLocation}. Get a free key (no email) at https://ctscout.dev.
-  - Free tier: 10 queries/day, top 5 results from a daily snapshot. The response's "snapshot" field carries that snapshot's sync date (the API reports it since X-API-Version 2026-09-05); when it is null the API could not determine it — treat freshness as unknown, never as current.
-  - Pro tier: 3,000 lookups/month included, up to 25 rows, a 12-month window; deep-dive jobs (20/day) for multi-signal attribution. $49/month, subscribed from https://ctscout.dev/#tiers.
+  - Free tier: 10 successful lookups/day, top 5 results from a daily snapshot. The response's "snapshot" field carries that snapshot's sync date (the API reports it since X-API-Version 2026-09-05); when it is null the API could not determine it — treat freshness as unknown, never as current.
+  - Pro tier: 3,000 successful lookups/month included, up to 25 rows, a 12-month window; deep-dive jobs (20/day) for multi-signal attribution. $49/month, subscribed from https://ctscout.dev/#tiers.
 
 Error handling:
   - HTTP 401: API key missing or invalid.
@@ -4033,7 +4064,7 @@ Corrections:
 
 Args:
   - slug (string, required): the vendor slug, one lowercase segment, e.g. 'cloudflare'. The values in a LEI record's vendors_confirmed are exactly these slugs.
-  - enumerate (boolean, optional, default false): false = the free summary; true = the per-customer enumeration, which requires an active ctscout.dev API key (any tier) in ${host.keyLocation}. A missing, invalid or revoked key gets HTTP 401 and this tool explains that the summary is still available with enumerate: false.
+  - enumerate (boolean, optional, default false): false = the free summary; true = the per-customer enumeration, which requires an active ctscout.dev API key (any tier) in ${host.keyLocation}. Free returns up to 100 rows from each list; Pro returns the full published lists (which may still be export-capped or shortened for MCP). A missing, invalid or revoked key gets HTTP 401 and this tool explains that the summary is still available with enumerate: false.
   - response_format ('markdown' | 'json', default 'markdown'): output format.
 
 Candidates and confirmed are two different claims and are NEVER summed:
@@ -4058,6 +4089,8 @@ Returns (on success, structuredContent follows the declared outputSchema; a fail
       "candidates": [ same row shape ],
       "counts": { "candidates": number, "confirmed": number },   // what the research build holds
       "capped": boolean,                     // true = the build itself kept a subset of the candidates
+      "truncated": boolean,                  // true = the API shortened a list for the key tier
+      "free_slice": { "rows": number, "full_list": "pro" } | null, // Free limit per list; null for Pro
       "truncation_note": string              // written by THIS server, only when it dropped rows to fit the character limit; counts and capped still describe the API's answer
     }
   - Both also carry "as_of" / "product_version", "snapshot_dates", and this server's "snapshot" / "snapshot_source" ("product" | "unavailable"; null snapshot means unknown freshness, never "current").

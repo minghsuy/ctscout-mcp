@@ -292,6 +292,13 @@ Takes a vendor `slug` and, optionally, `enumerate`.
   an active ctscout.dev API key (any tier); without one the tool returns a clear
   401 message that also points back at the keyless summary.
 
+Free enumeration returns up to 100 rows from each list. `free_slice` records
+that allowance and `truncated` says whether the API shortened a list for the
+key's tier; Pro returns `free_slice: null` and the full published lists. This
+is separate from the research export's `capped` flag and MCP's
+`truncation_note`. Both response formats preserve those distinctions, including
+when a large answer collapses to its metadata envelope.
+
 **Candidates and confirmed are two different claims and are never summed.** A
 candidate is an apex the vendor certified a hostname for — fan-out alone, which
 looks identical to an organization certifying hundreds of its own product sites.

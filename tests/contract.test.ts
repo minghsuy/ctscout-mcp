@@ -1867,6 +1867,64 @@ describe("stdio MCP compatibility contract", () => {
     }
   });
 
+  it.each([
+    false,
+    true,
+  ])("preserves free-tier limits through both formats (overflow: %s)", async (overflow) => {
+    process.env.CTSCOUT_API_KEY = "ds_free_contract_test";
+    mockApi({
+      ...VENDOR_CUSTOMERS,
+      capped: false,
+      truncated: true,
+      free_slice: { rows: 100, full_list: "pro" },
+      ...(overflow ? { unknown_bulk: "x".repeat(100_000) } : {}),
+    });
+    const { client, close } = await connect();
+    try {
+      for (const response_format of ["markdown", "json"]) {
+        const result = await client.callTool({
+          name: "ctscout_vendor_customers",
+          arguments: { slug: "cloudflare", enumerate: true, response_format },
+        });
+        expect(result.isError).not.toBe(true);
+        expect(result.structuredContent).toMatchObject({
+          capped: false,
+          truncated: true,
+          free_slice: { rows: 100, full_list: "pro" },
+        });
+        expect(textOf(result).length).toBeLessThanOrEqual(25_000);
+        if (response_format === "markdown") {
+          expect(textOf(result)).toContain("Free tier allows up to 100 rows per list");
+          expect(textOf(result)).toContain("The API shortened this answer");
+        } else expect(JSON.parse(textOf(result))).toEqual(result.structuredContent);
+      }
+    } finally {
+      await close();
+    }
+  });
+
+  it("preserves explicit Pro tier metadata in an overflow envelope without claiming a free limit", async () => {
+    process.env.CTSCOUT_API_KEY = "ds_pro_contract_test";
+    mockApi({
+      ...VENDOR_CUSTOMERS,
+      truncated: false,
+      free_slice: null,
+      unknown_bulk: "x".repeat(100_000),
+    });
+    const { client, close } = await connect();
+    try {
+      const result = await client.callTool({
+        name: "ctscout_vendor_customers",
+        arguments: { slug: "cloudflare", enumerate: true },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({ truncated: false, free_slice: null });
+      expect(textOf(result)).not.toContain("Free tier allows");
+    } finally {
+      await close();
+    }
+  });
+
   it("keeps a huge customer enumeration under the character limit in both formats, and says what it dropped", async () => {
     process.env.CTSCOUT_API_KEY = "ds_free_contract_test";
     const row = (i: number) => ({
