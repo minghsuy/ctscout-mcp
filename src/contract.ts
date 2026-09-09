@@ -1451,7 +1451,7 @@ function describeError(err: unknown, surface: ErrorSurface, auth: AuthWording): 
         // else (or nothing). Reporting an outage as "wait for the weekly
         // refresh" would turn a retry-in-seconds into a retry-in-days.
         const detail = detailFrom(err.responseBody);
-        if (detail !== undefined && detail.includes(PRODUCT_UNPUBLISHED_DETAIL)) {
+        if (detail?.includes(PRODUCT_UNPUBLISHED_DETAIL)) {
           return (
             `The research product is not published yet: ${safeDetail(err)}. These LEI and ` +
             "vendor answers come from the weekly ctscout-research refresh; until its first " +
