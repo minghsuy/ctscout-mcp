@@ -14,6 +14,8 @@ version heading so the exact package metadata and notes are reviewed together;
 
 ### Fixed
 
+- Hosted setup and transport documentation now reflect the deployed seven-tool
+  shared MCP implementation, including LEI and vendor tools (#139).
 - Release and packed-artifact checks accept npm10 and npm12 JSON formats while rejecting
   ambiguous package results and preserving exact registry commit verification (#137).
 
