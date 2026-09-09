@@ -12,6 +12,11 @@ version heading so the exact package metadata and notes are reviewed together;
 
 ## [Unreleased]
 
+### Fixed
+
+- Release and packed-artifact checks accept npm10 and npm12 JSON formats while rejecting
+  ambiguous package results and preserving exact registry commit verification (#137).
+
 ## [0.6.1] - 2026-09-08
 
 ### Fixed

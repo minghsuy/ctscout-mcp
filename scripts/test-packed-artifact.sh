@@ -12,16 +12,14 @@ PACK_JSON="$(
     --json \
     --pack-destination "$PACK_TMP"
 )"
-PACK_NAME="$(
-  node -e 'const chunks=[]; process.stdin.on("data", c => chunks.push(c)); process.stdin.on("end", () => process.stdout.write(JSON.parse(Buffer.concat(chunks).toString())[0].filename));' \
-    <<<"$PACK_JSON"
-)"
+EXPECTED_NAME="$(node -p "require('$REPO_ROOT/package.json').name")"
+EXPECTED_VERSION="$(node -p "require('$REPO_ROOT/package.json').version")"
+PACK_NAME="$(node "$REPO_ROOT/scripts/npm-json.mjs" pack "$EXPECTED_NAME" "$EXPECTED_VERSION" <<<"$PACK_JSON")"
 PACK_TARBALL="$PACK_TMP/$PACK_NAME"
 PACK_LIST="$PACK_TMP/contents.txt"
 INSTALL_ROOT="$PACK_TMP/consumer"
 INSTALLED_PACKAGE="$INSTALL_ROOT/node_modules/ctscout-mcp-server"
 INSTALLED_BIN="$INSTALL_ROOT/node_modules/.bin/ctscout-mcp-server"
-EXPECTED_VERSION="$(node -p "require('$REPO_ROOT/package.json').version")"
 EXPECTED_MCP_SERVER_VERSION="$(node -p "require('$REPO_ROOT/package.json').dependencies['@modelcontextprotocol/server']")"
 LOCKED_MCP_SERVER_SPECIFIER="$(node -p "require('$REPO_ROOT/package-lock.json').packages[''].dependencies['@modelcontextprotocol/server']")"
 RUNTIME_PACKS="$PACK_TMP/runtime-packs"
