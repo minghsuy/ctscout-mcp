@@ -14,6 +14,9 @@ version heading so the exact package metadata and notes are reviewed together;
 
 ### Fixed
 
+- Separate Claude Desktop local stdio setup from hosted Claude Code and Cursor
+  instructions, including prerequisites and connection checks (#144).
+
 - Hosted setup and transport documentation now reflect the deployed seven-tool
   shared MCP implementation, including LEI and vendor tools (#139).
 - Release and packed-artifact checks accept npm10 and npm12 JSON formats while rejecting
