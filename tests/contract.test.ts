@@ -201,9 +201,8 @@ describe("stdio MCP compatibility contract", () => {
       // protocol: a null remaining count is unreported, never "no daily cap".
       const batchTool = tools.find((tool) => tool.name === "ctscout_search_company_batch");
       const remaining = (
-        (batchTool?.outputSchema as { properties?: Record<string, { description?: string }> })
-          ?.properties ?? {}
-      ).remaining_quota;
+        batchTool?.outputSchema as { properties?: Record<string, { description?: string }> }
+      )?.properties?.remaining_quota;
       expect(remaining?.description).toContain("reported no remaining count");
       expect(remaining?.description).toContain("per-day request guard");
       expect(remaining?.description).not.toMatch(/no daily cap/);

@@ -68,7 +68,7 @@ describe("isDirectlyExecuted (symlink boot)", () => {
         // enough to confirm it boots. If the guard is broken, the process
         // exits 0 before we even see stderr.
         proc.stdin.write(
-          JSON.stringify({
+          `${JSON.stringify({
             jsonrpc: "2.0",
             method: "initialize",
             params: {
@@ -77,7 +77,7 @@ describe("isDirectlyExecuted (symlink boot)", () => {
               clientInfo: { name: "vitest-symlink-regression", version: "0.0.1" },
             },
             id: 1,
-          }) + "\n",
+          })}\n`,
         );
 
         // Resolve as soon as the boot banner appears on stderr — the healthy
