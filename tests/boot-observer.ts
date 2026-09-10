@@ -5,6 +5,8 @@ import { StringDecoder } from "node:string_decoder";
 export type BootOutcome = "ready" | "timeout" | "error" | "premature-close";
 export interface BootResult {
   outcome: BootOutcome;
+  elapsedMs: number;
+  error?: { name: string; code?: string; message: string };
   stdout: string;
   stderr: string;
   code: number | null;
@@ -17,6 +19,8 @@ export function observeBoot(
   request: { id: number; [key: string]: unknown },
 ): Promise<BootResult> {
   return new Promise((resolve) => {
+    const started = performance.now();
+    let error: BootResult["error"];
     let outcome: BootOutcome | undefined;
     let stdout = "";
     let stderr = "";
@@ -46,6 +50,9 @@ export function observeBoot(
           if (
             typeof message === "object" &&
             message !== null &&
+            "jsonrpc" in message &&
+            message.jsonrpc === "2.0" &&
+            "result" in message !== "error" in message &&
             "id" in message &&
             message.id === request.id
           ) {
@@ -61,19 +68,46 @@ export function observeBoot(
     proc.stderr.on("data", (chunk: Buffer) => {
       stderr += errDecoder.write(chunk);
     });
-    proc.on("error", () => stop("error"));
-    proc.stdin.on("error", () => stop("error"));
+    const failed = (cause: unknown) => {
+      const e = cause instanceof Error ? cause : new Error(String(cause));
+      // Error messages can embed launch paths/arguments. Do not expose values
+      // inherited from the test environment in assertion diagnostics.
+      const redact = (text: string) => {
+        for (const value of Object.values(process.env)) {
+          if (value && value.length >= 4) text = text.replaceAll(value, "[redacted]");
+        }
+        return text;
+      };
+      const code = (e as NodeJS.ErrnoException).code;
+      error ??= {
+        name: redact(e.name),
+        code: code === undefined ? undefined : redact(code),
+        message: redact(e.message),
+      };
+      stop("error");
+    };
+    proc.on("error", failed);
+    proc.stdin.on("error", failed);
     proc.on("close", (code, signal) => {
       clearTimeout(timer);
       stdout += outDecoder.end();
       stderr += errDecoder.end();
-      resolve({ outcome: outcome ?? "premature-close", stdout, stderr, code, signal, response });
+      resolve({
+        elapsedMs: performance.now() - started,
+        error,
+        outcome: outcome ?? "premature-close",
+        stdout,
+        stderr,
+        code,
+        signal,
+        response,
+      });
     });
     // All handlers exist before the first write, including spawn and EPIPE errors.
     try {
       proc.stdin.write(`${JSON.stringify(request)}\n`);
-    } catch {
-      stop("error");
+    } catch (cause) {
+      failed(cause);
     }
   });
 }
