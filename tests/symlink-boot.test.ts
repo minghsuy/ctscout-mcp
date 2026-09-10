@@ -26,6 +26,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
+import { initializeRequest, observeBoot } from "./boot-observer.js";
 
 // ESM-native replacement for the CommonJS `__dirname` global. Vitest injects
 // `__dirname` into test files, but the package is native ESM (`"type":
@@ -40,143 +41,47 @@ const PKG_VERSION = (
 ).version;
 
 describe("isDirectlyExecuted (symlink boot)", () => {
-  // `npm run build` should run before `npm test` in CI / via the release
-  // script. Skip explicitly (so Vitest reports skipped, not 0-assertion pass)
-  // if dist isn't there.
-  it.skipIf(!existsSync(DIST_INDEX))(
-    "boots when invoked via a symlink (npx / npm install -g case)",
-    async () => {
-      const tmpDir = mkdtempSync(join(tmpdir(), "ctscout-symlink-"));
-      const symlinkPath = join(tmpDir, "ctscout-mcp-server");
-      try {
-        symlinkSync(DIST_INDEX, symlinkPath);
-
-        // Spawn the binary VIA THE SYMLINK — this is the exact code path
-        // that v0.2.0 broke. With realpath-aware comparison, main() runs
-        // and the server prints its boot banner to stderr.
-        const proc = spawn("node", [symlinkPath], {
-          env: {
-            ...process.env,
-            CTSCOUT_API_KEY: "ds_free_test",
-          },
-          stdio: ["pipe", "pipe", "pipe"],
-        });
-
-        let stderr = "";
-
-        // Send an MCP `initialize` request — keeps the server alive long
-        // enough to confirm it boots. If the guard is broken, the process
-        // exits 0 before we even see stderr.
-        proc.stdin.write(
-          `${JSON.stringify({
-            jsonrpc: "2.0",
-            method: "initialize",
-            params: {
-              protocolVersion: "2024-11-05",
-              capabilities: {},
-              clientInfo: { name: "vitest-symlink-regression", version: "0.0.1" },
-            },
-            id: 1,
-          })}\n`,
-        );
-
-        // Resolve as soon as the boot banner appears on stderr — the healthy
-        // server never exits on its own, so waiting for `close` used to burn
-        // the full 3s on every run (ctscout-mcp#50). The substring asserted
-        // below ends at "running via stdio" (the banner itself continues with
-        // "(api=...)"), and stderr accumulates in order — so once this marker
-        // is present, everything the assertion needs is already captured.
-        // The 3s timer and the `close` listener stay as backstops for the
-        // regression case (broken guard → process exits 0 with empty stderr;
-        // `close`, not `exit`, so piped stderr has flushed before we assert).
-        await new Promise<void>((finish) => {
-          const timer = setTimeout(() => {
-            proc.kill();
-            finish();
-          }, 3000);
-          const done = () => {
-            clearTimeout(timer);
-            finish();
-          };
-          proc.stderr.on("data", (chunk: Buffer) => {
-            stderr += chunk.toString();
-            if (stderr.includes("running via stdio")) {
-              proc.kill();
-              done();
-            }
+  // Fixed repetitions are independent assertions, never retries of failures.
+  for (const launch of ["direct", "symlink"] as const) {
+    for (const attempt of [1, 2, 3]) {
+      it.skipIf(!existsSync(DIST_INDEX))(`${launch} initializes, attempt ${attempt}`, async () => {
+        const tmpDir = mkdtempSync(join(tmpdir(), "ctscout-symlink-"));
+        const link = join(tmpDir, "ctscout-mcp-server");
+        try {
+          symlinkSync(DIST_INDEX, link);
+          const proc = spawn(process.execPath, [launch === "symlink" ? link : DIST_INDEX], {
+            env: { ...process.env, CTSCOUT_API_KEY: "ds_free_test" },
+            stdio: ["pipe", "pipe", "pipe"],
           });
-          proc.on("close", done);
-        });
+          const result = await observeBoot(proc, initializeRequest());
+          expect(result.outcome, JSON.stringify(result)).toBe("ready");
+          expect(result.response?.result).toMatchObject({
+            serverInfo: { name: "ctscout-mcp-server", version: PKG_VERSION },
+            capabilities: { tools: expect.any(Object) },
+          });
+          expect(result.stderr).toContain(`ctscout-mcp-server v${PKG_VERSION} running via stdio`);
+        } finally {
+          // observeBoot settles only after close, so this cannot remove a live
+          // child's argv symlink before its direct-execution guard has run.
+          rmSync(tmpDir, { recursive: true, force: true });
+        }
+      });
+    }
+  }
 
-        // The boot banner contains the version string and "running via stdio".
-        // v0.2.0's bug produced empty stderr. SERVER_VERSION is read from
-        // package.json at RUNTIME, so asserting the exact version here also
-        // pins that dist/index.js resolves ../package.json from its built
-        // location — on the same symlinked-argv[1] path npx uses.
-        expect(stderr).toContain(`ctscout-mcp-server v${PKG_VERSION} running via stdio`);
-      } finally {
-        rmSync(tmpDir, { recursive: true, force: true });
-      }
-    },
-  );
-
-  // The free research-product routes (/lei, /vendors/{slug}) are
-  // unauthenticated, so a keyless install is a valid configuration for those
-  // tools. Booting used to exit 1 on a missing key, which made the keyless case
-  // impossible before a single tool call — ctscout-mcp#115 review round 1.
   it.skipIf(!existsSync(DIST_INDEX))(
-    "boots without CTSCOUT_API_KEY, naming the tools that still work",
+    "initializes without a key and names the free tools",
     async () => {
       const { CTSCOUT_API_KEY: _dropped, ...envWithoutKey } = process.env;
-      const proc = spawn("node", [DIST_INDEX], {
+      const proc = spawn(process.execPath, [DIST_INDEX], {
         env: envWithoutKey,
         stdio: ["pipe", "pipe", "pipe"],
       });
-
-      let stderr = "";
-      let exitCode: number | null = null;
-
-      proc.stdin.write(
-        `${JSON.stringify({
-          jsonrpc: "2.0",
-          method: "initialize",
-          params: {
-            protocolVersion: "2024-11-05",
-            capabilities: {},
-            clientInfo: { name: "vitest-keyless-boot", version: "0.0.1" },
-          },
-          id: 1,
-        })}\n`,
-      );
-
-      await new Promise<void>((finish) => {
-        const timer = setTimeout(() => {
-          proc.kill();
-          finish();
-        }, 3000);
-        const done = () => {
-          clearTimeout(timer);
-          finish();
-        };
-        proc.stderr.on("data", (chunk: Buffer) => {
-          stderr += chunk.toString();
-          if (stderr.includes("running via stdio")) {
-            proc.kill();
-            done();
-          }
-        });
-        proc.on("close", (code) => {
-          exitCode = code;
-          done();
-        });
-      });
-
-      // It booted (banner present) rather than exiting 1 on the missing key...
-      expect(stderr).toContain("running via stdio");
-      expect(exitCode).not.toBe(1);
-      // ...and it still says the key is missing, naming what works without one.
-      expect(stderr).toContain("CTSCOUT_API_KEY is not set");
-      expect(stderr).toContain("ctscout_lookup_lei");
+      const result = await observeBoot(proc, initializeRequest());
+      expect(result.outcome, JSON.stringify(result)).toBe("ready");
+      expect(result.response?.result).toMatchObject({ serverInfo: { version: PKG_VERSION } });
+      expect(result.stderr).toContain("CTSCOUT_API_KEY is not set");
+      expect(result.stderr).toContain("ctscout_lookup_lei");
     },
   );
 });
