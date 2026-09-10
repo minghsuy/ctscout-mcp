@@ -37,22 +37,24 @@ All seven tools are hosted at `https://ctscout.dev/mcp`, including `ctscout_look
 **Claude Code (CLI)**:
 
 ```bash
-claude mcp add ctscout \
-  -s user \
+claude mcp add \
+  --scope user \
   --transport http \
   --header "X-API-Key: YOUR_KEY_HERE" \
-  https://ctscout.dev/mcp
+  ctscout https://ctscout.dev/mcp
 ```
 
-This writes to `~/.claude.json`.
+This stores the user-scoped connection in `~/.claude.json`. Run
+`claude mcp get ctscout`, then open `/mcp` inside Claude Code to check that
+ctscout is connected. See the [official Claude Code MCP guide](https://code.claude.com/docs/en/mcp).
 
-**Claude Desktop / Cursor / Cline / any HTTP-transport MCP client** — edit the client config:
+**Cursor** — add the `ctscout` entry to `mcpServers` in
+`~/.cursor/mcp.json`, preserving any existing servers and other settings:
 
 ```json
 {
   "mcpServers": {
     "ctscout": {
-      "type": "http",
       "url": "https://ctscout.dev/mcp",
       "headers": { "X-API-Key": "YOUR_KEY_HERE" }
     }
@@ -60,27 +62,31 @@ This writes to `~/.claude.json`.
 }
 ```
 
-Config file locations:
-- **Claude Desktop**: `~/Library/Application Support/Claude/claude_desktop_config.json` (Mac), `%APPDATA%\Claude\claude_desktop_config.json` (Windows). HTTP-transport MCP support requires a recent Desktop build; if your client doesn't recognize `"type": "http"`, use the local npm fallback below.
-- **Cursor**: `~/.cursor/mcp.json`. If Cursor's HTTP transport doesn't connect, swap the `url` to `https://ctscout.dev/sse` — the same tools are served over the legacy SSE transport.
+Check that ctscout is enabled and connected in Cursor's MCP settings. See
+[Cursor's MCP documentation](https://cursor.com/docs/mcp). Clients that only
+support legacy SSE can use `https://ctscout.dev/sse` with the same header.
 
-After adding, **fully quit and restart your MCP client** (not just close the window). The tools will appear under "ctscout".
+**Claude Desktop** — use the local command configuration below. Desktop's
+remote connectors are a separate setup mechanism; this HTTP JSON is not a
+`claude_desktop_config.json` entry. See the
+[official remote connector guide](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp).
 
-### 2b. Local npm (fallback — if you can't use the hosted endpoint)
+### 2b. Claude Desktop or local stdio clients
 
-If your MCP client does not support remote HTTP transport, run the published
-Node compatibility binary locally. It still calls `https://ctscout.dev`, so
-your network must allow that origin. Version 0.3.0 and newer require Node.js
-20 or newer:
+Claude Desktop can launch this published package as a local stdio process.
+It still calls `https://ctscout.dev`, so your network must allow that origin.
+Install the current [Node.js LTS](https://nodejs.org/en/download) (Node.js 24 LTS
+is supported), including npm. The package supports Node.js 20 or newer.
+Verify both commands in a terminal:
 
 ```bash
-claude mcp add ctscout \
-  -s user \
-  -e CTSCOUT_API_KEY=YOUR_KEY_HERE \
-  -- npx -y ctscout-mcp-server
+node --version
+npm --version
 ```
 
-Or in JSON config:
+You do not need `npm login` or to clone this repository to use the public
+package. In Desktop, open **Settings → Developer → Edit Config** and add
+`ctscout` under `mcpServers`, preserving existing entries:
 
 ```json
 {
@@ -92,6 +98,20 @@ Or in JSON config:
     }
   }
 }
+```
+
+The Desktop config is at
+`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS or
+`%APPDATA%\Claude\claude_desktop_config.json` on Windows. Fully quit and
+restart Desktop, then check that the ctscout tools appear. If Desktop cannot
+find `npx`, use its full installed path for `command`; see the
+[official local-server setup and troubleshooting guide](https://modelcontextprotocol.io/docs/develop/connect-local-servers).
+
+For Claude Code's local stdio fallback:
+
+```bash
+claude mcp add --scope user --env CTSCOUT_API_KEY=YOUR_KEY_HERE \
+  ctscout -- npx -y ctscout-mcp-server
 ```
 
 The hosted endpoint is the authoritative MCP contract and is the recommended
@@ -137,17 +157,20 @@ existing clients keep the 2025 `initialize` handshake.
 
 ### 3. Use it
 
-In Claude Code or Claude Desktop, just ask the model:
+Start with one concrete request in your connected client:
 
-> "Find all domains attributed to Cloudflare"
->
-> "Who is gs.com attributed to? What about goldmansachs.com — same parent?"
->
-> "Given an OV/EV-cert domain, pivot from its cert subject and surface sibling apex domains attributed to the same legal entity."
->
-> "List the domains attributed to The Hartford."
+> Use ctscout to find domains attributed to Cloudflare. Show the organization,
+> returned apex domains and snapshot date, and explain the OV/EV-only coverage.
 
-The model will pick the right ctscout tool, call it, and summarize.
+Approve the tool call if prompted. The client should call
+`ctscout_search_company` and return a tool result with attributed domains or
+an explicit no-match result, plus snapshot information when available. Counts
+and dates vary with the dataset; an empty result is not proof that an
+organization has no domains. A 401 means the key needs checking; a 429 means
+its quota or guard was reached. Neither is a successful lookup.
+
+You can then ask who a domain is attributed to or request a batch of company
+names. All seven tools listed above remain available through either transport.
 
 ---
 
