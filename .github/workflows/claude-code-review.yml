@@ -1,16 +1,25 @@
 name: Claude Code Review
 
+# pull_request, never pull_request_target: GitHub blocks pull_request_target in
+# public repositories by default from 2026-11-02. A same-repository PR receives
+# the secret and the write scopes below; a fork PR receives neither, so the if:
+# skips its job instead of letting it fail. pull_request does not fire while a
+# PR has a merge conflict: resolve it, then mark the PR ready again. The
+# 15-minute timeout is set on the reusable job; a job that calls a reusable
+# workflow cannot set one.
 on:
-  pull_request_target:
+  pull_request:
     types: [ready_for_review]
 
-permissions:
-  contents: read
-  pull-requests: write
-  statuses: write
+permissions: {}
 
 jobs:
   review:
+    permissions:
+      contents: read # PR metadata and the compare diff, read through the API
+      pull-requests: write # publish one SHA-bound review
+      statuses: write # set the claude-review status on the reviewed head
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
     uses: minghsuy/claude-review-workflows/.github/workflows/review.yml@04e8407c2d3b9fd94c95c68a9e4d1853be8cadff
     with:
       pr: ${{ github.event.pull_request.number }}
